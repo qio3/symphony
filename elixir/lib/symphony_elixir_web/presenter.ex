@@ -11,16 +11,23 @@ defmodule SymphonyElixirWeb.Presenter do
 
     case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
       %{} = snapshot ->
+        owner_view = owner_view_payload(snapshot)
+
         %{
           generated_at: generated_at,
           counts: %{
+            backlog: owner_count(owner_view, :backlog),
             running: length(snapshot.running),
+            queued: length(snapshot.retrying),
             retrying: length(snapshot.retrying),
-            blocked: length(Map.get(snapshot, :blocked, []))
+            blocked: owner_count(owner_view, :blocked) || length(Map.get(snapshot, :blocked, [])),
+            ready_for_acceptance: owner_count(owner_view, :ready_for_acceptance),
+            done: owner_count(owner_view, :done)
           },
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
+          owner_view: owner_view,
           codex_totals: snapshot.codex_totals,
           models: Map.get(snapshot, :model_counts, empty_model_counts()),
           rate_limits: snapshot.rate_limits
@@ -155,6 +162,242 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
+  defp owner_view_payload(snapshot) do
+    case Map.get(snapshot, :owner_view) do
+      %{} = owner_view ->
+        blocked =
+          owner_view
+          |> owner_blocked_items()
+          |> merge_owner_items(fallback_blocked_items(snapshot))
+
+        counts =
+          owner_view
+          |> owner_counts()
+          |> Map.update!(:blocked, &(&1 || length(blocked)))
+
+        %{
+          available: true,
+          updated_at: iso8601(value(owner_view, :updated_at)),
+          blocked: blocked,
+          backlog: owner_items(owner_view, :backlog),
+          work_items: owner_items(owner_view, :work_items),
+          ready_for_acceptance: owner_items(owner_view, :ready_for_acceptance),
+          counts: counts
+        }
+
+      _ ->
+        %{
+          available: false,
+          updated_at: nil,
+          blocked: fallback_blocked_items(snapshot),
+          backlog: [],
+          work_items: fallback_work_items(snapshot),
+          ready_for_acceptance: [],
+          counts: %{backlog: nil, blocked: nil, ready_for_acceptance: nil, done: nil}
+        }
+    end
+  end
+
+  defp owner_counts(owner_view) do
+    counts = value(owner_view, :counts, %{})
+
+    %{
+      backlog: owner_count_value(counts, :backlog),
+      blocked: owner_count_value(counts, :blocked),
+      ready_for_acceptance: owner_count_value(counts, :ready_for_acceptance),
+      done: owner_count_value(counts, :done)
+    }
+  end
+
+  defp owner_count(%{available: true} = owner_view, key) do
+    owner_view
+    |> Map.get(:counts, %{})
+    |> value(key)
+  end
+
+  defp owner_count(_owner_view, _key), do: nil
+
+  defp owner_items(owner_view, key) do
+    owner_view
+    |> value(key, [])
+    |> case do
+      items when is_list(items) -> Enum.map(items, &owner_item_payload/1)
+      _ -> []
+    end
+  end
+
+  defp owner_blocked_items(owner_view) do
+    owner_view
+    |> value(:blocked, [])
+    |> case do
+      items when is_list(items) -> Enum.map(items, &owner_blocked_item_payload/1)
+      _ -> []
+    end
+  end
+
+  defp owner_blocked_item_payload(item) when is_map(item) do
+    %{
+      issue_id: value(item, :issue_id),
+      issue_identifier: value(item, :identifier) || value(item, :issue_identifier),
+      issue_url: value(item, :issue_url) || value(item, :url),
+      title: value(item, :title),
+      stage: value(item, :stage) || value(item, :state) || "Blocked",
+      question: value(item, :question),
+      reason: value(item, :reason) || value(item, :error),
+      blocked_at: iso8601(value(item, :blocked_at))
+    }
+  end
+
+  defp owner_blocked_item_payload(_item), do: owner_blocked_item_payload(%{})
+
+  defp fallback_blocked_items(snapshot) do
+    Enum.map(Map.get(snapshot, :blocked, []), fn entry ->
+      %{
+        issue_id: entry.issue_id,
+        issue_identifier: entry.identifier,
+        issue_url: Map.get(entry, :issue_url),
+        title: Map.get(entry, :title),
+        stage: Map.get(entry, :state) || "Blocked",
+        question: summarize_message(Map.get(entry, :last_codex_message)),
+        reason: Map.get(entry, :error),
+        blocked_at: iso8601(Map.get(entry, :blocked_at))
+      }
+    end)
+  end
+
+  defp merge_owner_items(primary, fallback) do
+    primary = deduplicate_owner_items(primary)
+
+    primary_identifiers =
+      primary
+      |> Enum.map(& &1.issue_identifier)
+      |> Enum.reject(&is_nil/1)
+      |> MapSet.new()
+
+    primary ++ Enum.reject(fallback, &MapSet.member?(primary_identifiers, &1.issue_identifier))
+  end
+
+  defp deduplicate_owner_items(items) do
+    items
+    |> Enum.reduce({MapSet.new(), []}, &deduplicate_owner_item/2)
+    |> elem(1)
+    |> Enum.reverse()
+  end
+
+  defp deduplicate_owner_item(%{issue_identifier: nil} = item, {seen, deduplicated}) do
+    {seen, [item | deduplicated]}
+  end
+
+  defp deduplicate_owner_item(%{issue_identifier: identifier} = item, {seen, deduplicated}) do
+    case MapSet.member?(seen, identifier) do
+      true -> {seen, deduplicated}
+      false -> {MapSet.put(seen, identifier), [item | deduplicated]}
+    end
+  end
+
+  defp owner_item_payload(item) when is_map(item) do
+    %{
+      issue_id: value(item, :issue_id),
+      issue_identifier: value(item, :identifier) || value(item, :issue_identifier),
+      issue_url: value(item, :issue_url) || value(item, :url),
+      title: value(item, :title),
+      stage: value(item, :stage) || value(item, :state),
+      status: value(item, :status),
+      started_at: iso8601(value(item, :started_at)),
+      pr: delivery_link_payload(value(item, :pr), [:number, :url, :state]),
+      ci: delivery_link_payload(value(item, :ci), [:status, :url]),
+      test: delivery_link_payload(value(item, :test), [:status, :sha, :url])
+    }
+  end
+
+  defp owner_item_payload(_item) do
+    %{
+      issue_id: nil,
+      issue_identifier: nil,
+      issue_url: nil,
+      title: nil,
+      stage: nil,
+      status: nil,
+      started_at: nil,
+      pr: nil,
+      ci: nil,
+      test: nil
+    }
+  end
+
+  defp owner_count_value(counts, key) do
+    case value(counts, key) do
+      count when is_integer(count) and count >= 0 -> count
+      _ -> nil
+    end
+  end
+
+  defp delivery_link_payload(%{} = payload, keys) do
+    Map.new(keys, &{&1, value(payload, &1)})
+  end
+
+  defp delivery_link_payload(_payload, _keys), do: nil
+
+  defp fallback_work_items(snapshot) do
+    running =
+      Enum.map(snapshot.running, fn entry ->
+        %{
+          issue_id: entry.issue_id,
+          issue_identifier: entry.identifier,
+          issue_url: Map.get(entry, :issue_url),
+          title: Map.get(entry, :title),
+          stage: "Agent working",
+          status: "running",
+          started_at: iso8601(entry.started_at),
+          pr: nil,
+          ci: nil,
+          test: nil
+        }
+      end)
+
+    queued =
+      Enum.map(snapshot.retrying, fn entry ->
+        %{
+          issue_id: entry.issue_id,
+          issue_identifier: entry.identifier,
+          issue_url: Map.get(entry, :issue_url),
+          title: Map.get(entry, :title),
+          stage: "Retry queued",
+          status: "queued",
+          started_at: nil,
+          pr: nil,
+          ci: nil,
+          test: nil
+        }
+      end)
+
+    blocked =
+      Enum.map(Map.get(snapshot, :blocked, []), fn entry ->
+        %{
+          issue_id: entry.issue_id,
+          issue_identifier: entry.identifier,
+          issue_url: Map.get(entry, :issue_url),
+          title: Map.get(entry, :title),
+          stage: "Needs owner",
+          status: "blocked",
+          started_at: nil,
+          pr: nil,
+          ci: nil,
+          test: nil
+        }
+      end)
+
+    running ++ queued ++ blocked
+  end
+
+  defp value(map, key, default \\ nil)
+
+  defp value(map, key, default) when is_map(map) and is_atom(key) do
+    Map.get(map, key, Map.get(map, Atom.to_string(key), default))
+  end
+
+  defp value(_map, _key, default), do: default
+
   defp running_issue_payload(running) do
     %{
       worker_host: Map.get(running, :worker_host),
@@ -261,6 +504,13 @@ defmodule SymphonyElixirWeb.Presenter do
     datetime
     |> DateTime.truncate(:second)
     |> DateTime.to_iso8601()
+  end
+
+  defp iso8601(datetime) when is_binary(datetime) do
+    case DateTime.from_iso8601(datetime) do
+      {:ok, parsed, _offset} -> iso8601(parsed)
+      _ -> nil
+    end
   end
 
   defp iso8601(_datetime), do: nil

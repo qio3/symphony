@@ -186,9 +186,16 @@ pre,
 
 .status-stack {
   display: grid;
+  gap: 0.55rem;
   justify-items: end;
   align-content: start;
   min-width: min(100%, 9rem);
+}
+
+.freshness-label {
+  color: var(--muted);
+  font-size: 0.72rem;
+  white-space: nowrap;
 }
 
 .status-badge {
@@ -246,6 +253,16 @@ pre,
   padding: 1rem 1.05rem 1.1rem;
 }
 
+.metric-card-active {
+  border-color: rgba(16, 163, 127, 0.28);
+  background: linear-gradient(180deg, rgba(232, 250, 244, 0.86), var(--card));
+}
+
+.metric-card-danger {
+  border-color: #f6d3cf;
+  background: linear-gradient(180deg, rgba(254, 243, 242, 0.92), var(--card));
+}
+
 .metric-label {
   margin: 0;
   color: var(--muted);
@@ -291,6 +308,154 @@ pre,
   margin: 0.35rem 0 0;
   color: var(--muted);
   font-size: 0.94rem;
+}
+
+.section-kicker {
+  margin: 0 0 0.28rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.section-card-primary {
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.06);
+}
+
+.section-card-acceptance {
+  border-color: rgba(16, 163, 127, 0.24);
+  background: linear-gradient(180deg, rgba(232, 250, 244, 0.62), var(--card) 42%);
+}
+
+.attention-card {
+  border-color: #f6d3cf;
+  background: linear-gradient(180deg, #fff8f7 0%, var(--card) 100%);
+}
+
+.attention-card-clear {
+  border-color: rgba(16, 163, 127, 0.2);
+  background: linear-gradient(180deg, rgba(232, 250, 244, 0.62), var(--card) 100%);
+}
+
+.attention-list,
+.backlog-list {
+  display: grid;
+  gap: 0.7rem;
+  margin-top: 1rem;
+}
+
+.attention-item,
+.backlog-item {
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.attention-issue,
+.backlog-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.attention-reason {
+  margin: 0.55rem 0 0;
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.attention-title {
+  margin: 0.55rem 0 0;
+  font-weight: 650;
+}
+
+.owner-table {
+  min-width: 860px;
+}
+
+.acceptance-table {
+  min-width: 920px;
+}
+
+.owner-issue,
+.delivery-stack {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.owner-issue-title {
+  max-width: 28rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.35;
+}
+
+.delivery-link,
+.test-link {
+  width: fit-content;
+  color: var(--accent-ink);
+  font-weight: 650;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+}
+
+.delivery-badge {
+  display: inline-flex;
+  width: fit-content;
+  padding: 0.24rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.delivery-badge-success {
+  border-color: rgba(16, 163, 127, 0.2);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+.delivery-badge-danger {
+  border-color: #f6d3cf;
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.delivery-badge-warning {
+  border-color: #f1d8a6;
+  background: #fff7e8;
+  color: #8a5a00;
+}
+
+.diagnostics-card details > summary {
+  cursor: pointer;
+  font-weight: 700;
+  list-style-position: outside;
+}
+
+.diagnostics-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+
+.diagnostic-value {
+  margin: 0.3rem 0 0;
+  font-size: 1.35rem;
+  font-weight: 650;
+}
+
+.diagnostics-code {
+  margin-top: 0.45rem;
+  max-height: 8rem;
+  overflow: auto;
 }
 
 .table-wrap {
@@ -454,6 +619,10 @@ pre,
 
   .metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .diagnostics-grid {
+    grid-template-columns: 1fr;
   }
 }
 
