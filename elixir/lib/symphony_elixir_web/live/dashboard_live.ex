@@ -5,8 +5,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
+  alias SymphonyElixir.OwnerControl.Client, as: OwnerControlClient
   alias SymphonyElixirWeb.{Endpoint, ObservabilityPubSub, Presenter}
   @runtime_tick_ms 1_000
+  @control_refresh_ms 5_000
 
   @impl true
   def mount(_params, _session, socket) do
@@ -18,6 +20,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     if connected?(socket) do
       :ok = ObservabilityPubSub.subscribe()
       schedule_runtime_tick()
+      schedule_control_refresh()
     end
 
     {:ok, socket}
@@ -29,6 +32,19 @@ defmodule SymphonyElixirWeb.DashboardLive do
     {:noreply, assign(socket, :now, DateTime.utc_now())}
   end
 
+  def handle_info(:control_refresh, socket) do
+    schedule_control_refresh()
+
+    if owner_control_client().enabled?() do
+      {:noreply,
+       socket
+       |> assign(:payload, load_payload())
+       |> assign(:now, DateTime.utc_now())}
+    else
+      {:noreply, socket}
+    end
+  end
+
   @impl true
   def handle_info(:observability_updated, socket) do
     {:noreply,
@@ -38,9 +54,45 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event("pause-intake", _params, socket), do: control_action(socket, :pause, %{})
+
+  def handle_event("resume-intake", _params, socket), do: control_action(socket, :resume, %{})
+
+  def handle_event("restart-service", _params, socket), do: control_action(socket, :restart, %{})
+
+  def handle_event("run", %{"issue" => issue}, socket) do
+    case parse_issue_number(issue) do
+      {:ok, issue_number} -> control_action(socket, :run, %{issue: issue_number})
+      {:error, _reason} -> {:noreply, put_flash(socket, :error, "Invalid issue number")}
+    end
+  end
+
+  def handle_event("accept", %{"issue" => issue}, socket) do
+    case parse_issue_number(issue) do
+      {:ok, issue_number} -> control_action(socket, :accept, %{issue: issue_number})
+      {:error, _reason} -> {:noreply, put_flash(socket, :error, "Invalid issue number")}
+    end
+  end
+
+  def handle_event("rework", %{"issue" => issue, "reason" => reason}, socket) do
+    with {:ok, issue_number} <- parse_issue_number(issue),
+         normalized_reason when normalized_reason != "" <- String.trim(reason) do
+      control_action(socket, :rework, %{issue: issue_number, reason: normalized_reason})
+    else
+      _error -> {:noreply, put_flash(socket, :error, "Rework reason is required")}
+    end
+  end
+
+  @impl true
   def render(assigns) do
     ~H"""
     <section class="dashboard-shell">
+      <div :if={message = Phoenix.Flash.get(@flash, :info)} class="control-flash control-flash-info">
+        <%= message %>
+      </div>
+      <div :if={message = Phoenix.Flash.get(@flash, :error)} class="control-flash control-flash-error">
+        <%= message %>
+      </div>
       <header class="hero-card">
         <div class="hero-grid">
           <div>
@@ -56,20 +108,68 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </div>
 
           <div class="status-stack">
-            <span class="status-badge status-badge-live">
-              <span class="status-badge-dot"></span>
-              Live
-            </span>
-            <span class="status-badge status-badge-offline">
-              <span class="status-badge-dot"></span>
-              Offline
-            </span>
+            <%= if control_snapshot?(@payload) do %>
+              <span class={service_badge_class(@payload)}>
+                <span class="status-badge-dot"></span>
+                <%= if service_live?(@payload), do: "Live", else: "Down" %>
+              </span>
+            <% else %>
+              <span class="status-badge status-badge-live">
+                <span class="status-badge-dot"></span>
+                Live
+              </span>
+              <span class="status-badge status-badge-offline">
+                <span class="status-badge-dot"></span>
+                Offline
+              </span>
+            <% end %>
             <span class="freshness-label mono">
               Updated <%= snapshot_freshness(@payload) %>
             </span>
           </div>
         </div>
+
+        <div :if={control_snapshot?(@payload)} class="control-strip">
+          <div class="control-statuses">
+            <span class={intake_badge_class(@payload)}>
+              Intake <%= if intake_active?(@payload), do: "Active", else: "Paused" %>
+            </span>
+            <span class="control-worker-count numeric">Workers <%= workers_label(@payload) %></span>
+          </div>
+          <div class="control-actions">
+            <button
+              :if={intake_active?(@payload)}
+              type="button"
+              class="control-button"
+              phx-click="pause-intake"
+            >Pause intake</button>
+            <button
+              :if={!intake_active?(@payload)}
+              type="button"
+              class="control-button control-button-primary"
+              phx-click="resume-intake"
+            >Resume intake</button>
+            <button
+              type="button"
+              class="control-button control-button-danger"
+              phx-click="restart-service"
+            >Restart service</button>
+          </div>
+        </div>
+
+        <div :if={control_snapshot?(@payload)} class={release_status_class(@payload)}>
+          <span>Canonical: <strong class="mono"><%= compact_sha(@payload.canonical.sha) %></strong></span>
+          <span>TEST: <strong class="mono"><%= compact_sha(@payload.test.sha) %></strong></span>
+          <span><%= if @payload.test.synced, do: "✓ synced", else: "⚠ drift" %></span>
+        </div>
       </header>
+
+      <section :if={@payload[:control_error]} class="error-card control-error-card">
+        <h2 class="error-title">Owner controls unavailable</h2>
+        <p class="error-copy">
+          New work is paused fail-closed. Running workers are not interrupted; use external service controls if needed.
+        </p>
+      </section>
 
       <%= if @payload[:error] do %>
         <section class="error-card">
@@ -85,7 +185,13 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <article class="metric-card">
             <p class="metric-label">Backlog</p>
             <p class="metric-value numeric"><%= format_count(@payload.counts.backlog) %></p>
-            <p class="metric-detail">Ready for Symphony.</p>
+            <p class="metric-detail">Not yet queued.</p>
+          </article>
+
+          <article class="metric-card">
+            <p class="metric-label">Ready for AI</p>
+            <p class="metric-value numeric"><%= format_count(Map.get(@payload.counts, :ready_for_ai)) %></p>
+            <p class="metric-detail">Eligible for Start.</p>
           </article>
 
           <article class="metric-card metric-card-active">
@@ -140,6 +246,13 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 <p :if={entry.title} class="attention-title"><%= entry.title %></p>
                 <p class="attention-reason"><%= entry.question || entry.reason || "Owner input required" %></p>
                 <p :if={entry.reason && entry.reason != entry.question} class="muted"><%= entry.reason %></p>
+                <a
+                  :if={external_issue_url(entry.issue_url)}
+                  class="control-link"
+                  href={external_issue_url(entry.issue_url)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >Open Issue</a>
               </article>
             </div>
           <% end %>
@@ -203,6 +316,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <th>CI</th>
                     <th>TEST deploy SHA</th>
                     <th>Environment</th>
+                    <th :if={control_snapshot?(@payload)}>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -212,6 +326,28 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <td><.ci_link ci={item.ci} /></td>
                     <td class="mono"><%= compact_sha(item.test && item.test.sha) %></td>
                     <td><.test_link test={item.test} /></td>
+                    <td :if={control_snapshot?(@payload)}>
+                      <div class="owner-actions">
+                        <button
+                          type="button"
+                          class="control-button control-button-primary"
+                          phx-click="accept"
+                          phx-value-issue={item.number}
+                        >Accept</button>
+                        <form phx-submit="rework" class="rework-form">
+                          <input type="hidden" name="issue" value={item.number} />
+                          <input
+                            type="text"
+                            name="reason"
+                            class="rework-input"
+                            placeholder="Short reason"
+                            aria-label={"Rework reason for #{item.issue_identifier}"}
+                            required
+                          />
+                          <button type="submit" class="control-button">Rework</button>
+                        </form>
+                      </div>
+                    </td>
                   </tr>
                 </tbody>
               </table>
@@ -234,7 +370,16 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <div class="backlog-list">
               <article :for={item <- @payload.owner_view.backlog} class="backlog-item">
                 <.owner_issue item={item} />
-                <span class="state-badge state-badge-warning"><%= item.stage || "Backlog" %></span>
+                <div class="backlog-actions">
+                  <span class="state-badge state-badge-warning"><%= item.stage || "Backlog" %></span>
+                  <button
+                    :if={control_snapshot?(@payload)}
+                    type="button"
+                    class="control-button control-button-primary"
+                    phx-click="run"
+                    phx-value-issue={item.number}
+                  >Start</button>
+                </div>
               </article>
             </div>
           <% end %>
@@ -471,7 +616,35 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   defp load_payload do
-    Presenter.state_payload(orchestrator(), snapshot_timeout_ms())
+    case owner_control_client().snapshot() do
+      {:ok, payload} ->
+        payload
+
+      :disabled ->
+        Presenter.state_payload(orchestrator(), snapshot_timeout_ms())
+
+      {:error, reason} ->
+        orchestrator()
+        |> Presenter.state_payload(snapshot_timeout_ms())
+        |> Map.put(:control_error, inspect(reason))
+    end
+  end
+
+  defp owner_control_client do
+    Application.get_env(:symphony_elixir, :owner_control_client_module, OwnerControlClient)
+  end
+
+  defp control_action(socket, action, params) do
+    case owner_control_client().action(action, params) do
+      {:ok, _result} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, control_success_message(action))
+         |> assign(:payload, load_payload())}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Owner action rejected: #{format_control_error(reason)}")}
+    end
   end
 
   defp orchestrator do
@@ -643,6 +816,57 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp inventory_empty_copy(_owner_view, empty_copy), do: empty_copy
 
+  defp control_snapshot?(%{version: 1, service: %{}, intake: %{}, workers: %{}}), do: true
+  defp control_snapshot?(_payload), do: false
+
+  defp service_live?(payload), do: get_in(payload, [:service, :live]) == true
+  defp intake_active?(payload), do: get_in(payload, [:intake, :active]) == true
+
+  defp workers_label(payload) do
+    "#{get_in(payload, [:workers, :running]) || 0}/#{get_in(payload, [:workers, :limit]) || 0}"
+  end
+
+  defp service_badge_class(payload) do
+    if service_live?(payload),
+      do: "status-badge status-badge-live",
+      else: "status-badge status-badge-offline"
+  end
+
+  defp intake_badge_class(payload) do
+    if intake_active?(payload),
+      do: "state-badge state-badge-active",
+      else: "state-badge state-badge-warning"
+  end
+
+  defp release_status_class(payload) do
+    if get_in(payload, [:test, :synced]),
+      do: "release-status release-status-synced",
+      else: "release-status release-status-drift"
+  end
+
+  defp parse_issue_number(issue) when is_integer(issue) and issue > 0, do: {:ok, issue}
+
+  defp parse_issue_number(issue) when is_binary(issue) do
+    case Integer.parse(String.trim_leading(String.trim(issue), "#")) do
+      {number, ""} when number > 0 -> {:ok, number}
+      _other -> {:error, :invalid_issue_number}
+    end
+  end
+
+  defp parse_issue_number(_issue), do: {:error, :invalid_issue_number}
+
+  defp control_success_message(:pause), do: "Intake paused"
+  defp control_success_message(:resume), do: "Intake resumed"
+  defp control_success_message(:restart), do: "Service restart accepted"
+  defp control_success_message(:run), do: "Issue queued for Symphony"
+  defp control_success_message(:accept), do: "Issue accepted"
+  defp control_success_message(:rework), do: "Issue returned for rework"
+
+  defp format_control_error({:owner_control_http_error, status}), do: "control HTTP #{status}"
+  defp format_control_error({:owner_control_action_rejected, message}), do: message
+  defp format_control_error(:unsupported_action), do: "unsupported action"
+  defp format_control_error(_reason), do: "control service unavailable"
+
   defp format_runtime_and_turns(started_at, turn_count, now) when is_integer(turn_count) and turn_count > 0 do
     "#{format_runtime_seconds(runtime_seconds_from_started_at(started_at, now))} / #{turn_count}"
   end
@@ -701,6 +925,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp schedule_runtime_tick do
     Process.send_after(self(), :runtime_tick, @runtime_tick_ms)
+  end
+
+  defp schedule_control_refresh do
+    Process.send_after(self(), :control_refresh, @control_refresh_ms)
   end
 
   defp pretty_value(nil), do: "n/a"

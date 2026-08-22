@@ -138,6 +138,24 @@ pre,
   gap: 1rem;
 }
 
+.control-flash {
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  padding: 0.7rem 0.9rem;
+  font-size: 0.88rem;
+  font-weight: 650;
+}
+
+.control-flash-info {
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+}
+
+.control-flash-error {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
 .hero-card,
 .section-card,
 .metric-card,
@@ -190,6 +208,91 @@ pre,
   justify-items: end;
   align-content: start;
   min-width: min(100%, 9rem);
+}
+
+.control-strip,
+.release-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  margin-top: 1.15rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+
+.control-statuses,
+.control-actions,
+.owner-actions,
+.backlog-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.control-worker-count {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+
+.control-button {
+  min-height: 2rem;
+  padding: 0.34rem 0.72rem;
+  border-color: var(--line-strong);
+  border-radius: 10px;
+  background: white;
+  color: var(--ink);
+  box-shadow: var(--shadow-sm);
+  font-size: 0.78rem;
+}
+
+.control-button:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  box-shadow: var(--shadow-sm);
+  transform: none;
+}
+
+.control-button-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: white;
+}
+
+.control-button-primary:hover {
+  background: #0d8a6b;
+  color: white;
+}
+
+.control-button-danger {
+  border-color: #f6d3cf;
+  color: var(--danger);
+}
+
+.control-button-danger:hover {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.release-status {
+  justify-content: flex-start;
+  margin-top: 0.85rem;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid rgba(16, 163, 127, 0.2);
+  border-radius: 14px;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-size: 0.82rem;
+}
+
+.release-status-drift {
+  border-color: #f1d8a6;
+  background: #fff7e8;
+  color: #8a5a00;
 }
 
 .freshness-label {
@@ -367,6 +470,16 @@ pre,
   font-weight: 600;
 }
 
+.control-link {
+  display: inline-flex;
+  margin-top: 0.65rem;
+  color: var(--danger);
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 0.16em;
+}
+
 .attention-title {
   margin: 0.55rem 0 0;
   font-weight: 650;
@@ -377,7 +490,35 @@ pre,
 }
 
 .acceptance-table {
-  min-width: 920px;
+  min-width: 1180px;
+}
+
+.owner-actions {
+  align-items: flex-start;
+  min-width: 19rem;
+}
+
+.rework-form {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.rework-input {
+  width: 10rem;
+  min-height: 2rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: white;
+  color: var(--ink);
+  padding: 0.35rem 0.55rem;
+  font: inherit;
+  font-size: 0.78rem;
+}
+
+.rework-input:focus {
+  border-color: var(--accent);
+  outline: 2px solid rgba(16, 163, 127, 0.14);
 }
 
 .owner-issue,
@@ -617,6 +758,16 @@ pre,
     justify-items: start;
   }
 
+  .control-strip {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .release-status {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
   .metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -636,5 +787,12 @@ pre,
   .error-card {
     border-radius: 20px;
     padding: 1rem;
+  }
+
+  .control-actions,
+  .control-statuses,
+  .backlog-item {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }

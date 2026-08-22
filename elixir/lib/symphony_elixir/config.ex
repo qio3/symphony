@@ -85,6 +85,25 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  @type owner_control_settings :: %{url: String.t(), token: String.t()}
+
+  @spec owner_control_settings() :: :disabled | {:ok, owner_control_settings()} | {:error, term()}
+  def owner_control_settings do
+    case Application.get_env(:symphony_elixir, :owner_control_settings) do
+      nil ->
+        owner_control_settings_from_env(
+          System.get_env("SYMPHONY_OWNER_CONTROL_URL"),
+          System.get_env("SYMPHONY_OWNER_CONTROL_TOKEN")
+        )
+
+      settings when is_map(settings) ->
+        validate_owner_control_settings(settings)
+
+      _other ->
+        {:error, :invalid_owner_control_settings}
+    end
+  end
+
   @doc false
   @spec local_workspace_root() :: Path.t()
   def local_workspace_root do
@@ -141,4 +160,38 @@ defmodule SymphonyElixir.Config do
         "Invalid WORKFLOW.md config: #{inspect(other)}"
     end
   end
+
+  defp owner_control_settings_from_env(nil, nil), do: :disabled
+
+  defp owner_control_settings_from_env(url, token) do
+    validate_owner_control_settings(%{url: url, token: token})
+  end
+
+  defp validate_owner_control_settings(settings) do
+    url = Map.get(settings, :url) || Map.get(settings, "url")
+    token = Map.get(settings, :token) || Map.get(settings, "token")
+
+    with {:ok, normalized_url} <- normalize_owner_control_url(url),
+         :ok <- validate_owner_control_token(token) do
+      {:ok, %{url: normalized_url, token: token}}
+    end
+  end
+
+  defp normalize_owner_control_url(url) when is_binary(url) do
+    case URI.parse(url) do
+      %URI{scheme: scheme, host: host}
+      when scheme in ["http", "https"] and is_binary(host) and host != "" ->
+        {:ok, String.trim_trailing(url, "/")}
+
+      _other ->
+        {:error, :invalid_owner_control_settings}
+    end
+  end
+
+  defp normalize_owner_control_url(_url), do: {:error, :invalid_owner_control_settings}
+
+  defp validate_owner_control_token(token) when is_binary(token) and byte_size(token) >= 32,
+    do: :ok
+
+  defp validate_owner_control_token(_token), do: {:error, :invalid_owner_control_settings}
 end

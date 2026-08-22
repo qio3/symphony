@@ -8,6 +8,7 @@ defmodule SymphonyElixir.Orchestrator do
   import Bitwise, only: [<<<: 2]
 
   alias SymphonyElixir.{AgentRunner, Config, ModelRouter, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.OwnerControl.Client, as: OwnerControlClient
   alias SymphonyElixir.Tracker.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -444,7 +445,13 @@ defmodule SymphonyElixir.Orchestrator do
   @doc false
   @spec should_dispatch_issue_for_test(Issue.t(), term()) :: boolean()
   def should_dispatch_issue_for_test(%Issue{} = issue, %State{} = state) do
-    should_dispatch_issue?(issue, state, active_state_set(), terminal_state_set())
+    should_dispatch_issue?(
+      issue,
+      state,
+      active_state_set(),
+      terminal_state_set(),
+      owner_control_intake_active?()
+    )
   end
 
   @doc false
@@ -846,11 +853,12 @@ defmodule SymphonyElixir.Orchestrator do
   defp choose_issues(issues, state) do
     active_states = active_state_set()
     terminal_states = terminal_state_set()
+    intake_active = owner_control_intake_active?()
 
     issues
     |> sort_issues_for_dispatch()
     |> Enum.reduce(state, fn issue, state_acc ->
-      if should_dispatch_issue?(issue, state_acc, active_states, terminal_states) do
+      if should_dispatch_issue?(issue, state_acc, active_states, terminal_states, intake_active) do
         dispatch_issue(state_acc, issue)
       else
         state_acc
@@ -882,9 +890,11 @@ defmodule SymphonyElixir.Orchestrator do
          %Issue{} = issue,
          %State{running: running, claimed: claimed, blocked: blocked} = state,
          active_states,
-         terminal_states
+         terminal_states,
+         intake_active
        ) do
-    candidate_issue?(issue, active_states, terminal_states) and
+    intake_active and
+      candidate_issue?(issue, active_states, terminal_states) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
       !Map.has_key?(blocked, issue.id) and
@@ -893,7 +903,8 @@ defmodule SymphonyElixir.Orchestrator do
       worker_slots_available?(state)
   end
 
-  defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
+  defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states, _intake_active),
+    do: false
 
   defp state_slots_available?(%Issue{state: issue_state}, running) when is_map(running) do
     limit = Config.max_concurrent_agents_for_state(issue_state)
@@ -1286,9 +1297,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_active_retry(state, issue, attempt, metadata) do
-    if retry_candidate_issue?(issue, terminal_state_set()) and
-         dispatch_slots_available?(issue, state) and
-         worker_slots_available?(state, metadata[:worker_host]) do
+    intake_active = owner_control_intake_active?()
+
+    if retry_dispatch_allowed?(intake_active, issue, state, metadata[:worker_host]) do
       case refresh_issue_for_dispatch(issue) do
         {:ok, %Issue{} = refreshed_issue} ->
           {:noreply,
@@ -1319,7 +1330,8 @@ defmodule SymphonyElixir.Orchestrator do
            )}
       end
     else
-      Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
+      retry_reason = if intake_active, do: "no available orchestrator slots", else: "intake paused"
+      Logger.debug("Retry deferred for #{issue_context(issue)} reason=#{retry_reason}")
 
       {:noreply,
        schedule_issue_retry(
@@ -1328,10 +1340,26 @@ defmodule SymphonyElixir.Orchestrator do
          attempt + 1,
          Map.merge(metadata, %{
            identifier: issue.identifier,
-           error: "no available orchestrator slots"
+           error: retry_reason
          })
        )}
     end
+  end
+
+  defp retry_dispatch_allowed?(intake_active, issue, state, worker_host) do
+    intake_active and
+      retry_candidate_issue?(issue, terminal_state_set()) and
+      dispatch_slots_available?(issue, state) and
+      worker_slots_available?(state, worker_host)
+  end
+
+  defp owner_control_intake_active? do
+    client = Application.get_env(:symphony_elixir, :owner_control_client_module, OwnerControlClient)
+    client.intake_active?()
+  rescue
+    _exception -> false
+  catch
+    _kind, _reason -> false
   end
 
   defp release_issue_claim(%State{} = state, issue_id) do
