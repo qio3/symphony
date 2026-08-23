@@ -291,9 +291,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <td><.owner_issue item={item} /></td>
                     <td><span class={state_badge_class(item.status || item.stage)}><%= item.stage || "Unknown" %></span></td>
                     <td><.model_status model={item[:model]} /></td>
-                    <td class="numeric"><%= format_elapsed(item.started_at, @now) %></td>
+                    <td class="numeric"><%= format_elapsed(item[:started_at], @now) %></td>
                     <td><.delivery_status pr={item.pr} ci={item.ci} /></td>
-                    <td><.test_status test={item.test} /></td>
+                    <td><.test_status test={item[:test]} /></td>
                   </tr>
                 </tbody>
               </table>

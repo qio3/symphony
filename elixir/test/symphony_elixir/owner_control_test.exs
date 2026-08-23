@@ -216,6 +216,7 @@ defmodule SymphonyElixir.OwnerControlTest do
     assert html =~ "Terra 1"
     assert html =~ "gpt-5.6-terra"
     assert html =~ "Luna → Terra"
+    assert html =~ "Claim pending"
     assert html =~ "Ready for AI"
     assert html =~ "Canonical"
     assert html =~ "be44cf15"
@@ -361,6 +362,17 @@ defmodule SymphonyElixir.OwnerControlTest do
             pr: nil,
             ci: nil,
             test: nil
+          },
+          %{
+            number: 405,
+            issue_identifier: "#405",
+            issue_url: "https://example.org/issues/405",
+            title: "Claim pending",
+            stage: "In Progress",
+            status: "In Progress",
+            model: nil,
+            pr: nil,
+            ci: nil
           }
         ],
         ready_for_acceptance: [
