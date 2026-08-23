@@ -103,7 +103,7 @@ defmodule SymphonyElixir.ModelRouter do
         |> Map.put(:same_failure_count, count)
 
       if count >= 2 do
-        tracked
+        route
         |> escalate("repeated_root_cause_#{fingerprint}")
         |> Map.put(:failure_fingerprint, nil)
         |> Map.put(:same_failure_count, 0)
