@@ -59,6 +59,13 @@ class SnapshotBuilder:
             "synced": synced,
             "drift": bool(canonical_sha and test_sha and canonical_sha != test_sha),
         }
+        codex_totals = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "seconds_running": 0,
+            **(runtime.get("codex_totals") or {}),
+        }
 
         for issue_key in sorted(items, key=self._issue_sort_key):
             item = items[issue_key]
@@ -134,7 +141,7 @@ class SnapshotBuilder:
             "running": runtime.get("running", []),
             "retrying": runtime.get("retrying", []),
             "blocked": runtime.get("blocked", []),
-            "codex_totals": runtime.get("codex_totals", {}),
+            "codex_totals": codex_totals,
             "rate_limits": runtime.get("rate_limits"),
         }
 

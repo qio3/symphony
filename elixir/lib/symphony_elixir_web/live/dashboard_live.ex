@@ -398,9 +398,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <div class="diagnostics-grid">
               <div>
                 <p class="metric-label">Total tokens</p>
-                <p class="diagnostic-value numeric"><%= format_int(@payload.codex_totals.total_tokens) %></p>
+                <p class="diagnostic-value numeric"><%= format_int(Map.get(@payload.codex_totals, :total_tokens, 0)) %></p>
                 <p class="metric-detail numeric">
-                  In <%= format_int(@payload.codex_totals.input_tokens) %> / Out <%= format_int(@payload.codex_totals.output_tokens) %>
+                  In <%= format_int(Map.get(@payload.codex_totals, :input_tokens, 0)) %> / Out <%= format_int(Map.get(@payload.codex_totals, :output_tokens, 0)) %>
                 </p>
               </div>
               <div>
@@ -820,7 +820,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp external_issue_url(_url), do: nil
 
   defp total_runtime_seconds(payload, now) do
-    (payload.codex_totals.seconds_running || 0) +
+    Map.get(payload.codex_totals, :seconds_running, 0) +
       Enum.reduce(payload.running, 0, fn entry, total ->
         total + runtime_seconds_from_started_at(entry.started_at, now)
       end)

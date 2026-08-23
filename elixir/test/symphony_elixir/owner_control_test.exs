@@ -181,7 +181,7 @@ defmodule SymphonyElixir.OwnerControlTest do
       running: %{},
       claimed: MapSet.new(),
       blocked: %{},
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      codex_totals: %{},
       retry_attempts: %{}
     }
 

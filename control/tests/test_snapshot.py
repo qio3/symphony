@@ -134,6 +134,10 @@ class SnapshotBuilderTest(unittest.TestCase):
         )
 
         self.assertEqual(snapshot["intake"], {"active": False, "status": "paused"})
+        self.assertEqual(
+            snapshot["codex_totals"],
+            {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "seconds_running": 0},
+        )
         self.assertTrue(snapshot["test"]["drift"])
         self.assertFalse(snapshot["test"]["synced"])
         self.assertEqual(
