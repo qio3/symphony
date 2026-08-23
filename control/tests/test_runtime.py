@@ -1,5 +1,7 @@
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -39,6 +41,20 @@ class ChangingGitHub(FakeGitHub):
 
     def canonical(self, _ref):
         return {"sha": self.sha, "url": None}
+
+
+class BlockingGitHub(ChangingGitHub):
+    def __init__(self):
+        super().__init__()
+        self.block = False
+        self.refresh_started = threading.Event()
+        self.release_refresh = threading.Event()
+
+    def project_snapshot(self):
+        if self.block:
+            self.refresh_started.set()
+            self.release_refresh.wait(timeout=2)
+        return super().project_snapshot()
 
 
 class AuthFailingGitHub(FakeGitHub):
@@ -137,6 +153,38 @@ class SnapshotServiceTest(unittest.TestCase):
 
         service.invalidate()
 
+        deadline = time.monotonic() + 1
+        while service.snapshot()["canonical"]["sha"] != "secondsha" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(service.snapshot()["canonical"]["sha"], "secondsha")
+
+    def test_expired_snapshot_returns_stale_cache_while_refresh_runs(self):
+        github = BlockingGitHub()
+        service = SnapshotService(
+            symphony=FakeSymphony(),
+            github=github,
+            test_environment=FakeTest(),
+            supervisor=FakeSupervisor(),
+            state_store=self.store,
+            worker_limit=2,
+            canonical_ref="rebrand/stanina",
+            cache_seconds=0,
+        )
+        self.assertEqual(service.snapshot()["canonical"]["sha"], "firstsha")
+        github.sha = "secondsha"
+        github.block = True
+
+        started_at = time.monotonic()
+        stale = service.snapshot()
+        elapsed = time.monotonic() - started_at
+
+        self.assertLess(elapsed, 0.2)
+        self.assertEqual(stale["canonical"]["sha"], "firstsha")
+        self.assertTrue(github.refresh_started.wait(timeout=1))
+        github.release_refresh.set()
+        deadline = time.monotonic() + 1
+        while service.snapshot()["canonical"]["sha"] != "secondsha" and time.monotonic() < deadline:
+            time.sleep(0.01)
         self.assertEqual(service.snapshot()["canonical"]["sha"], "secondsha")
 
     def test_authentication_failure_is_marked_systemic_for_attention_notification(self):

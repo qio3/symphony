@@ -31,24 +31,56 @@ class SnapshotService:
         self._canonical_ref = canonical_ref
         self._cache_seconds = cache_seconds
         self._builder = SnapshotBuilder()
-        self._lock = threading.Lock()
+        self._cache_lock = threading.Lock()
+        self._refresh_lock = threading.Lock()
         self._cached: dict[str, Any] | None = None
         self._cached_at = 0.0
 
     def snapshot(self, *, fresh: bool = False) -> dict[str, Any]:
-        with self._lock:
+        if fresh:
+            return self._refresh()
+
+        with self._cache_lock:
             now = time.monotonic()
-            if not fresh and self._cached is not None and now - self._cached_at < self._cache_seconds:
-                return self._cached
-            value = self._collect()
-            self._cached = value
-            self._cached_at = now
-            return value
+            cached = self._cached
+            expired = cached is not None and now - self._cached_at >= self._cache_seconds
+
+        if cached is None:
+            return self._refresh()
+        if expired:
+            self._start_refresh()
+        return cached
 
     def invalidate(self) -> None:
-        with self._lock:
-            self._cached = None
+        with self._cache_lock:
             self._cached_at = 0.0
+        self._start_refresh()
+
+    def _refresh(self) -> dict[str, Any]:
+        with self._refresh_lock:
+            return self._collect_and_cache()
+
+    def _start_refresh(self) -> None:
+        if not self._refresh_lock.acquire(blocking=False):
+            return
+        threading.Thread(
+            target=self._refresh_from_acquired_lock,
+            name="owner-control-snapshot-refresh",
+            daemon=True,
+        ).start()
+
+    def _refresh_from_acquired_lock(self) -> None:
+        try:
+            self._collect_and_cache()
+        finally:
+            self._refresh_lock.release()
+
+    def _collect_and_cache(self) -> dict[str, Any]:
+        value = self._collect()
+        with self._cache_lock:
+            self._cached = value
+            self._cached_at = time.monotonic()
+        return value
 
     def _collect(self) -> dict[str, Any]:
         failures = []
