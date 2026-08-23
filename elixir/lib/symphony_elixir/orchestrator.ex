@@ -172,7 +172,13 @@ defmodule SymphonyElixir.Orchestrator do
         {:noreply, state}
 
       running_entry ->
-        updated_running_entry = Map.merge(running_entry, routing_info)
+        normalized_routing_info =
+          case Map.fetch(routing_info, :selected_tier) do
+            {:ok, tier} -> Map.put_new(routing_info, :selected_model_tier, tier)
+            :error -> routing_info
+          end
+
+        updated_running_entry = Map.merge(running_entry, normalized_routing_info)
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
     end

@@ -216,13 +216,13 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp observable_route(route) do
     Map.take(route, [
-      :selected_tier,
       :actual_model,
       :routing_reason,
       :confidence,
       :escalated_from,
       :escalation_history
     ])
+    |> Map.put(:selected_model_tier, Map.get(route, :selected_tier))
     |> Map.put(:model_route, route)
   end
 

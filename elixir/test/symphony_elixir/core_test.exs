@@ -1019,6 +1019,58 @@ defmodule SymphonyElixir.CoreTest do
              AgentRunner.continue_with_issue_for_test(issue, fetcher)
   end
 
+  test "worker routing updates populate snapshot tier and active model aggregate" do
+    issue_id = "issue-routing-observability"
+    orchestrator_name = Module.concat(__MODULE__, :RoutingObservabilityOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: "GH-OBS",
+      issue: %Issue{id: issue_id, identifier: "GH-OBS", state: "In Progress"},
+      worker_host: nil,
+      workspace_path: nil,
+      session_id: nil,
+      codex_app_server_pid: nil,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      turn_count: 0,
+      last_codex_timestamp: nil,
+      last_codex_message: nil,
+      last_codex_event: nil,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      %{initial_state | running: %{issue_id => running_entry}, claimed: MapSet.new([issue_id])}
+    end)
+
+    send(pid, {
+      :worker_routing_info,
+      issue_id,
+      %{
+        selected_tier: :luna,
+        actual_model: "gpt-5.6-luna",
+        routing_reason: "classifier:bounded_local_fix",
+        escalation_history: []
+      }
+    })
+
+    assert %{running: [worker], model_counts: model_counts} =
+             Orchestrator.snapshot(orchestrator_name, 1_000)
+
+    assert worker.selected_model_tier == :luna
+    assert model_counts.luna.active == 1
+  end
+
   test "normal worker exit schedules active-state continuation retry" do
     issue_id = "issue-resume"
     ref = make_ref()
