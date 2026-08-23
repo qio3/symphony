@@ -65,6 +65,7 @@ class CodexReadOnly:
                 command,
                 input=prompt,
                 text=True,
+                encoding="utf-8",
                 capture_output=True,
                 timeout=self._timeout_seconds,
                 env=self._safe_environment(),

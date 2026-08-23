@@ -47,6 +47,35 @@ class CodexReadOnlyTest(unittest.TestCase):
 
             self.assertEqual(answer, "#401 has been running for 15 minutes.")
 
+    def test_sends_unicode_question_to_codex_as_utf8(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            fake_codex = root / "fake_codex.py"
+            fake_codex.write_text(
+                textwrap.dedent(
+                    """
+                    import json
+                    import sys
+
+                    prompt = sys.stdin.buffer.read().decode("utf-8")
+                    assert "что сейчас происходит?" in prompt
+                    output = sys.argv[sys.argv.index("-o") + 1]
+                    with open(output, "w", encoding="utf-8") as handle:
+                        json.dump({"answer": "Сервис работает."}, handle, ensure_ascii=False)
+                    """
+                ),
+                encoding="utf-8",
+            )
+            adapter = CodexReadOnly(
+                executable=[sys.executable, str(fake_codex)],
+                codex_home=root,
+                timeout_seconds=5,
+            )
+
+            answer = adapter.answer("что сейчас происходит?", {"service": {"live": True}})
+
+            self.assertEqual(answer, "Сервис работает.")
+
     @staticmethod
     def _restore_env(name, value):
         if value is None:
