@@ -136,6 +136,7 @@ codex:
 model_routing:
   enabled: true
   classifier_model: gpt-5.6-luna
+  classifier_command: codex --disable shell_tool --disable unified_exec --disable code_mode_host --disable browser_use --disable in_app_browser --disable computer_use --disable apps --disable plugins --disable multi_agent --disable workspace_dependencies --disable skill_search --disable view_image --disable image_generation --disable tool_suggest app-server
   confidence_threshold: 0.65
   models:
     luna: gpt-5.6-luna
@@ -178,7 +179,11 @@ Notes:
   tool-free `model_routing.classifier_model` turn sees issue metadata only; confidence below
   `confidence_threshold` falls back to Terra. `force_sol_labels` is an optional exact-label list
   for narrowly defined high-risk work. Exhausted Luna/Terra attempts move only one tier per retry;
-  ordinary test/CI/network failures and owner-blocked work do not escalate.
+  two identical non-transient worker failures also move one tier. Ordinary test/CI/network failures
+  and owner-blocked work do not escalate.
+- `model_routing.classifier_command` launches a separate app-server with repository-reading and
+  external tools disabled. The classifier also receives an empty workspace, read-only/no-network
+  sandbox policy, no dynamic tools, and a strict JSON output schema.
 - The runtime removes `OPENAI_API_KEY` from local and SSH-launched app-server environments. This
   preserves Codex ChatGPT authentication while preventing API-key inheritance.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue

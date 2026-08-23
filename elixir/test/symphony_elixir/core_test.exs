@@ -1033,11 +1033,23 @@ defmodule SymphonyElixir.CoreTest do
 
     initial_state = :sys.get_state(pid)
 
+    route = %{
+      selected_tier: :luna,
+      actual_model: "gpt-5.6-luna",
+      routing_reason: "classifier:bounded_local_fix",
+      confidence: 0.9,
+      escalated_from: nil,
+      escalation_history: [],
+      models: %{"luna" => "gpt-5.6-luna", "terra" => "gpt-5.6-terra", "sol" => "gpt-5.6-sol"}
+    }
+
     running_entry = %{
       pid: self(),
       ref: ref,
       identifier: "MT-558",
       issue: %Issue{id: issue_id, identifier: "MT-558", state: "In Progress"},
+      model_route: route,
+      selected_model_tier: :luna,
       started_at: DateTime.utc_now()
     }
 
@@ -1055,6 +1067,8 @@ defmodule SymphonyElixir.CoreTest do
     refute Map.has_key?(state.running, issue_id)
     assert MapSet.member?(state.completed, issue_id)
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
+    assert state.retry_attempts[issue_id].model_route == route
+    assert state.model_completed_counts.luna == 1
     assert is_integer(due_at_ms)
     assert_due_in_range(due_at_ms, 500, 1_100)
   end
@@ -1107,6 +1121,7 @@ defmodule SymphonyElixir.CoreTest do
     assert state.retry_attempts[issue_id].model_route.selected_tier == :terra
     assert state.retry_attempts[issue_id].model_route.actual_model == "gpt-5.6-terra"
     assert state.retry_attempts[issue_id].escalation_reason == :max_turns_exhausted
+    assert state.model_completed_counts.luna == 0
   end
 
   test "abnormal worker exit increments retry attempt progressively" do

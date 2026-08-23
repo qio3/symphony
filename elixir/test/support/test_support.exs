@@ -164,6 +164,7 @@ defmodule SymphonyElixir.TestSupport do
     codex_stall_timeout_ms = Keyword.get(config, :codex_stall_timeout_ms)
     model_routing_enabled = Keyword.get(config, :model_routing_enabled)
     model_routing_classifier_model = Keyword.get(config, :model_routing_classifier_model)
+    model_routing_classifier_command = Keyword.get(config, :model_routing_classifier_command)
     model_routing_confidence_threshold = Keyword.get(config, :model_routing_confidence_threshold)
     model_routing_timeout_ms = Keyword.get(config, :model_routing_timeout_ms)
     model_routing_models = Keyword.get(config, :model_routing_models)
@@ -213,6 +214,7 @@ defmodule SymphonyElixir.TestSupport do
         "model_routing:",
         "  enabled: #{yaml_value(model_routing_enabled)}",
         "  classifier_model: #{yaml_value(model_routing_classifier_model)}",
+        "  classifier_command: #{yaml_value(model_routing_classifier_command)}",
         "  confidence_threshold: #{yaml_value(model_routing_confidence_threshold)}",
         "  timeout_ms: #{yaml_value(model_routing_timeout_ms)}",
         "  models: #{yaml_value(model_routing_models)}",

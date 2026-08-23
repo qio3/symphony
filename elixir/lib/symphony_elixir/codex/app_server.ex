@@ -40,13 +40,15 @@ defmodule SymphonyElixir.Codex.AppServer do
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
     model = Keyword.get(opts, :model)
+    command = Keyword.get(opts, :command, Config.settings!().codex.command)
     dynamic_tool_binding = dynamic_tool_binding(opts)
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
-         {:ok, port} <- start_port(expanded_workspace, worker_host, dynamic_tool_binding) do
+         {:ok, port} <- start_port(expanded_workspace, worker_host, dynamic_tool_binding, command) do
       metadata = port_metadata(port, worker_host)
 
-      with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
+      with {:ok, configured_policies} <- session_policies(expanded_workspace, worker_host),
+           session_policies <- override_session_policies(configured_policies, opts),
            {:ok, thread_id} <-
              do_start_session(port, expanded_workspace, session_policies, dynamic_tool_binding, model) do
         {:ok,
@@ -94,7 +96,18 @@ defmodule SymphonyElixir.Codex.AppServer do
         DynamicTool.execute(tool, arguments, dynamic_tool_binding, issue: issue)
       end)
 
-    case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
+    output_schema = Keyword.get(opts, :output_schema)
+
+    case start_turn(
+           port,
+           thread_id,
+           prompt,
+           issue,
+           workspace,
+           approval_policy,
+           turn_sandbox_policy,
+           output_schema
+         ) do
       {:ok, turn_id} ->
         session_id = "#{thread_id}-#{turn_id}"
         Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
@@ -194,7 +207,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_port(workspace, nil, dynamic_tool_binding) do
+  defp start_port(workspace, nil, dynamic_tool_binding, command) do
     executable = System.find_executable("bash")
 
     if is_nil(executable) do
@@ -207,7 +220,7 @@ defmodule SymphonyElixir.Codex.AppServer do
             :binary,
             :exit_status,
             :stderr_to_stdout,
-            args: [~c"-lc", String.to_charlist(local_launch_command(dynamic_tool_binding))],
+            args: [~c"-lc", String.to_charlist(local_launch_command(dynamic_tool_binding, command))],
             cd: String.to_charlist(workspace),
             env: tracker_secret_port_env(dynamic_tool_binding),
             line: @port_line_bytes
@@ -218,26 +231,27 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_port(workspace, worker_host, dynamic_tool_binding) when is_binary(worker_host) do
-    remote_command = remote_launch_command(workspace, dynamic_tool_binding)
+  defp start_port(workspace, worker_host, dynamic_tool_binding, command)
+       when is_binary(worker_host) do
+    remote_command = remote_launch_command(workspace, dynamic_tool_binding, command)
     SSH.start_port(worker_host, remote_command, line: @port_line_bytes)
   end
 
-  defp local_launch_command(dynamic_tool_binding) do
+  defp local_launch_command(dynamic_tool_binding, command) do
     [
       tracker_secret_unset_command(dynamic_tool_binding),
-      "exec #{Config.settings!().codex.command}"
+      "exec #{command}"
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.join(" && ")
   end
 
-  defp remote_launch_command(workspace, dynamic_tool_binding) when is_binary(workspace) do
+  defp remote_launch_command(workspace, dynamic_tool_binding, command) when is_binary(workspace) do
     [
       "cd #{shell_escape(workspace)}",
       "unset OPENAI_API_KEY",
       tracker_secret_unset_command(dynamic_tool_binding),
-      "exec #{Config.settings!().codex.command}"
+      "exec #{command}"
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.join(" && ")
@@ -363,11 +377,18 @@ defmodule SymphonyElixir.Codex.AppServer do
     if Keyword.get(opts, :dynamic_tools, true), do: binding, else: %{binding | tool_specs: []}
   end
 
-  defp start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
-    send_message(port, %{
-      "method" => "turn/start",
-      "id" => @turn_start_id,
-      "params" => %{
+  defp start_turn(
+         port,
+         thread_id,
+         prompt,
+         issue,
+         workspace,
+         approval_policy,
+         turn_sandbox_policy,
+         output_schema
+       ) do
+    params =
+      %{
         "threadId" => thread_id,
         "input" => [
           %{
@@ -380,12 +401,32 @@ defmodule SymphonyElixir.Codex.AppServer do
         "approvalPolicy" => approval_policy,
         "sandboxPolicy" => turn_sandbox_policy
       }
+      |> maybe_put_output_schema(output_schema)
+
+    send_message(port, %{
+      "method" => "turn/start",
+      "id" => @turn_start_id,
+      "params" => params
     })
 
     case await_response(port, @turn_start_id) do
       {:ok, %{"turn" => %{"id" => turn_id}}} -> {:ok, turn_id}
       other -> other
     end
+  end
+
+  defp maybe_put_output_schema(params, %{} = output_schema),
+    do: Map.put(params, "outputSchema", output_schema)
+
+  defp maybe_put_output_schema(params, _output_schema), do: params
+
+  defp override_session_policies(policies, opts) do
+    %{
+      policies
+      | approval_policy: Keyword.get(opts, :approval_policy, policies.approval_policy),
+        thread_sandbox: Keyword.get(opts, :thread_sandbox, policies.thread_sandbox),
+        turn_sandbox_policy: Keyword.get(opts, :turn_sandbox_policy, policies.turn_sandbox_policy)
+    }
   end
 
   defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests, turn_timeout_ms) do

@@ -136,7 +136,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       issue_id ->
         {running_entry, state} = pop_running_entry(state, issue_id)
-        state = state |> record_session_completion_totals(running_entry) |> record_model_completion(running_entry)
+        state = record_session_completion_totals(state, running_entry)
         session_id = running_entry_session_id(running_entry)
 
         state = handle_agent_down(reason, state, issue_id, running_entry, session_id)
@@ -242,13 +242,15 @@ defmodule SymphonyElixir.Orchestrator do
       Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
 
       state
+      |> record_model_completion(running_entry)
       |> complete_issue(issue_id)
       |> schedule_issue_retry(issue_id, 1, %{
         identifier: running_entry.identifier,
         issue_url: running_entry.issue.url,
         delay_type: :continuation,
         worker_host: Map.get(running_entry, :worker_host),
-        workspace_path: Map.get(running_entry, :workspace_path)
+        workspace_path: Map.get(running_entry, :workspace_path),
+        model_route: Map.get(running_entry, :model_route)
       })
     end
   end
@@ -273,15 +275,37 @@ defmodule SymphonyElixir.Orchestrator do
     Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
 
     next_attempt = next_retry_attempt_from_running(running_entry)
+    model_route = retry_model_route(running_entry, reason)
 
     schedule_issue_retry(state, issue_id, next_attempt, %{
       identifier: running_entry.identifier,
       issue_url: running_entry.issue.url,
       error: "agent exited: #{inspect(reason)}",
       worker_host: Map.get(running_entry, :worker_host),
-      workspace_path: Map.get(running_entry, :workspace_path)
+      workspace_path: Map.get(running_entry, :workspace_path),
+      model_route: model_route,
+      escalation_reason: repeated_failure_escalation_reason(running_entry, model_route)
     })
   end
+
+  defp retry_model_route(running_entry, reason) do
+    case Map.get(running_entry, :model_route) do
+      %{} = route -> ModelRouter.retry_route(route, reason)
+      _ -> nil
+    end
+  end
+
+  defp repeated_failure_escalation_reason(running_entry, %{} = retry_route) do
+    case Map.get(running_entry, :model_route) do
+      %{selected_tier: previous_tier} when previous_tier != retry_route.selected_tier ->
+        :repeated_root_cause
+
+      _ ->
+        nil
+    end
+  end
+
+  defp repeated_failure_escalation_reason(_running_entry, _retry_route), do: nil
 
   defp maybe_dispatch(%State{} = state) do
     state =

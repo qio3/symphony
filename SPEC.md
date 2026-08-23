@@ -496,6 +496,7 @@ Fields:
 
 - `enabled` (boolean, default `false`)
 - `classifier_model` (string, default `gpt-5.6-luna`)
+- `classifier_command` (non-empty string launching an app-server with repository and external tools disabled)
 - `confidence_threshold` (number between `0` and `1`, default `0.65`)
 - `timeout_ms` (positive integer, default `90000`)
 - `models` (map containing non-empty `luna`, `terra`, and `sol` model IDs)
@@ -505,8 +506,9 @@ When enabled, `model:luna`, `model:terra`, and `model:sol` labels MUST override 
 Otherwise the classifier receives issue metadata only and MUST NOT inspect the repository. A result
 below the confidence threshold MUST select Terra. The selected model ID MUST be passed explicitly
 to app-server. Exhaustion MAY escalate one tier per attempt from Luna to Terra to Sol; ordinary CI,
-network, or owner-blocked outcomes MUST NOT escalate. App-server child environments MUST NOT inherit
-`OPENAI_API_KEY`.
+network, or owner-blocked outcomes MUST NOT escalate. Two consecutive identical non-transient worker
+failures MAY count as an unresolved root cause and escalate one tier. App-server child environments
+MUST NOT inherit `OPENAI_API_KEY`.
 
 ### 5.4 Prompt Template Contract
 
@@ -1420,7 +1422,7 @@ SHOULD return:
   - `total_tokens`
   - `seconds_running` (aggregate runtime seconds as of snapshot time, including active sessions)
 - `rate_limits` (latest coding-agent rate limit payload, if available)
-- `model_counts`, containing `active` and `completed` worker-attempt counts for Luna, Terra, and Sol
+- `model_counts`, containing active and successfully completed worker counts for Luna, Terra, and Sol
 - model-routed running, retry, and blocked rows SHOULD include selected tier, actual model ID,
   routing reason, and escalation history
 

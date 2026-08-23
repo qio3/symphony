@@ -7,6 +7,17 @@ defmodule SymphonyElixir.Codex.MetadataClassifier do
   alias SymphonyElixir.Config
   alias SymphonyElixir.Tracker.Issue
 
+  @output_schema %{
+    "type" => "object",
+    "additionalProperties" => false,
+    "required" => ["tier", "confidence", "reason"],
+    "properties" => %{
+      "tier" => %{"type" => "string", "enum" => ["luna", "terra", "sol"]},
+      "confidence" => %{"type" => "number", "minimum" => 0, "maximum" => 1},
+      "reason" => %{"type" => "string", "maxLength" => 80}
+    }
+  }
+
   @spec classify(map()) :: map()
   def classify(metadata) when is_map(metadata) do
     settings = Config.settings!().model_routing
@@ -29,7 +40,12 @@ defmodule SymphonyElixir.Codex.MetadataClassifier do
       with {:ok, _result} <-
              AppServer.run(workspace, prompt(metadata), issue,
                model: settings.classifier_model,
+               command: settings.classifier_command,
                dynamic_tools: false,
+               approval_policy: "never",
+               thread_sandbox: "read-only",
+               turn_sandbox_policy: %{"type" => "readOnly", "networkAccess" => false},
+               output_schema: @output_schema,
                turn_timeout_ms: settings.timeout_ms,
                on_message: on_message
              ),

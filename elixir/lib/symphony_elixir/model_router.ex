@@ -88,6 +88,31 @@ defmodule SymphonyElixir.ModelRouter do
 
   def maybe_escalate(route, _reason), do: route
 
+  @spec retry_route(route(), term()) :: route()
+  def retry_route(route, reason) do
+    if non_escalating_retry?(reason) do
+      route
+    else
+      fingerprint = failure_fingerprint(reason)
+      previous = Map.get(route, :failure_fingerprint)
+      count = if previous == fingerprint, do: Map.get(route, :same_failure_count, 0) + 1, else: 1
+
+      tracked =
+        route
+        |> Map.put(:failure_fingerprint, fingerprint)
+        |> Map.put(:same_failure_count, count)
+
+      if count >= 2 do
+        tracked
+        |> escalate("repeated_root_cause_#{fingerprint}")
+        |> Map.put(:failure_fingerprint, nil)
+        |> Map.put(:same_failure_count, 0)
+      else
+        tracked
+      end
+    end
+  end
+
   @spec exhaustion_reason(term()) :: :max_turns_exhausted | :session_budget_exceeded | nil
   def exhaustion_reason({:max_turns_exhausted, _turns}), do: :max_turns_exhausted
 
@@ -233,6 +258,37 @@ defmodule SymphonyElixir.ModelRouter do
   end
 
   defp machine_reason(_reason), do: "unspecified"
+
+  defp non_escalating_retry?(reason) do
+    text = reason |> inspect(limit: 50, printable_limit: 2_000) |> String.downcase()
+
+    Enum.any?(
+      [
+        "ci_retry",
+        "ci failure",
+        "network",
+        "connection",
+        "econn",
+        "timeout",
+        "rate_limit",
+        "rate limit",
+        "429",
+        "502",
+        "503",
+        "504",
+        "blocked",
+        "owner"
+      ],
+      &String.contains?(text, &1)
+    )
+  end
+
+  defp failure_fingerprint(reason) do
+    :sha256
+    |> :crypto.hash(inspect(reason, limit: 50, printable_limit: 2_000))
+    |> Base.encode16(case: :lower)
+    |> String.slice(0, 12)
+  end
 
   defp contains_error_code?(%{} = map, code) do
     Enum.any?(map, fn

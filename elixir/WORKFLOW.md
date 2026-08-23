@@ -40,6 +40,7 @@ codex:
 model_routing:
   enabled: false
   classifier_model: gpt-5.6-luna
+  classifier_command: codex --disable shell_tool --disable unified_exec --disable code_mode_host --disable browser_use --disable in_app_browser --disable computer_use --disable apps --disable plugins --disable multi_agent --disable workspace_dependencies --disable skill_search --disable view_image --disable image_generation --disable tool_suggest app-server
   confidence_threshold: 0.65
   models:
     luna: gpt-5.6-luna

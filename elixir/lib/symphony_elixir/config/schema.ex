@@ -238,10 +238,12 @@ defmodule SymphonyElixir.Config.Schema do
       "terra" => "gpt-5.6-terra",
       "sol" => "gpt-5.6-sol"
     }
+    @default_classifier_command "codex --disable shell_tool --disable unified_exec --disable code_mode_host --disable browser_use --disable in_app_browser --disable computer_use --disable apps --disable plugins --disable multi_agent --disable workspace_dependencies --disable skill_search --disable view_image --disable image_generation --disable tool_suggest app-server"
 
     embedded_schema do
       field(:enabled, :boolean, default: false)
       field(:classifier_model, :string, default: "gpt-5.6-luna")
+      field(:classifier_command, :string, default: @default_classifier_command)
       field(:confidence_threshold, :float, default: 0.65)
       field(:timeout_ms, :integer, default: 90_000)
       field(:models, :map, default: @default_models)
@@ -253,10 +255,18 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:enabled, :classifier_model, :confidence_threshold, :timeout_ms, :models, :force_sol_labels],
+        [
+          :enabled,
+          :classifier_model,
+          :classifier_command,
+          :confidence_threshold,
+          :timeout_ms,
+          :models,
+          :force_sol_labels
+        ],
         empty_values: []
       )
-      |> validate_required([:classifier_model, :models])
+      |> validate_required([:classifier_model, :classifier_command, :models])
       |> validate_number(:confidence_threshold, greater_than_or_equal_to: 0.0, less_than_or_equal_to: 1.0)
       |> validate_number(:timeout_ms, greater_than: 0)
       |> validate_change(:models, &validate_models/2)

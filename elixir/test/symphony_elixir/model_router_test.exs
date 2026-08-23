@@ -26,6 +26,8 @@ defmodule SymphonyElixir.ModelRouterTest do
     routing = Config.settings!().model_routing
     assert routing.enabled
     assert routing.classifier_model == "gpt-5.6-luna"
+    assert routing.classifier_command =~ "--disable shell_tool"
+    assert routing.classifier_command =~ "--disable unified_exec"
     assert routing.confidence_threshold == 0.72
     assert routing.models == @config.models
     assert routing.force_sol_labels == ["risk:data-integrity"]
@@ -115,6 +117,20 @@ defmodule SymphonyElixir.ModelRouterTest do
     assert ModelRouter.maybe_escalate(luna, :ci_retry) == luna
     assert ModelRouter.maybe_escalate(luna, :network_retry) == luna
     assert ModelRouter.maybe_escalate(luna, :owner_blocked) == luna
+    assert ModelRouter.retry_route(luna, {:ci_retry, "tests failed"}) == luna
+    assert ModelRouter.retry_route(luna, {:network_retry, :econnreset}) == luna
+  end
+
+  test "two identical non-transient root-cause failures escalate one tier" do
+    luna = ModelRouter.route(%{issue("small") | labels: ["model:luna"]}, config: @config)
+    first_retry = ModelRouter.retry_route(luna, {:worker_failed, :same_root_cause})
+    second_retry = ModelRouter.retry_route(first_retry, {:worker_failed, :same_root_cause})
+
+    assert first_retry.selected_tier == :luna
+    assert second_retry.selected_tier == :terra
+    assert second_retry.actual_model == "gpt-5.6-terra"
+    assert second_retry.routing_reason =~ "escalation:repeated_root_cause_"
+    assert List.last(second_retry.escalation_history).reason =~ "repeated_root_cause_"
   end
 
   test "only the exact app-server budget code is reasoning exhaustion" do

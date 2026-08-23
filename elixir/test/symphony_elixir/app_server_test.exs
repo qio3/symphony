@@ -69,6 +69,83 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "classifier app-server command disables repository tools and constrains output" do
+    test_root =
+      Path.join(System.tmp_dir!(), "symphony-elixir-classifier-tools-#{System.unique_integer([:positive])}")
+
+    previous_trace = System.get_env("SYMPHONY_CLASSIFIER_TRACE")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, ".model-classifier")
+      codex_binary = Path.join(test_root, "fake-classifier-codex")
+      trace_file = Path.join(test_root, "trace.jsonl")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      printf 'ARGS=%s\n' "$*" >> "$SYMPHONY_CLASSIFIER_TRACE"
+      count=0
+      while IFS= read -r line; do
+        printf '%s\n' "$line" >> "$SYMPHONY_CLASSIFIER_TRACE"
+        count=$((count + 1))
+        case "$count" in
+          1) printf '%s\n' '{"id":1,"result":{}}' ;;
+          2) ;;
+          3) printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-classifier"}}}' ;;
+          4)
+            printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-classifier"}}}'
+            printf '%s\n' '{"method":"turn/completed"}'
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMPHONY_CLASSIFIER_TRACE", trace_file)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      issue = %Issue{id: "router", identifier: "ROUTER", title: "classify", state: "In Progress"}
+      output_schema = %{"type" => "object", "required" => ["tier"]}
+
+      command =
+        "#{codex_binary} --disable shell_tool --disable unified_exec --disable code_mode_host app-server"
+
+      assert {:ok, _result} =
+               AppServer.run(workspace, "metadata only", issue,
+                 command: command,
+                 dynamic_tools: false,
+                 approval_policy: "never",
+                 thread_sandbox: "read-only",
+                 turn_sandbox_policy: %{"type" => "readOnly", "networkAccess" => false},
+                 output_schema: output_schema
+               )
+
+      [args | messages] = File.read!(trace_file) |> String.split("\n", trim: true)
+      assert args =~ "--disable shell_tool"
+      assert args =~ "--disable unified_exec"
+      assert args =~ "--disable code_mode_host"
+
+      decoded = Enum.map(messages, &Jason.decode!/1)
+      thread_start = Enum.find(decoded, &(&1["method"] == "thread/start"))
+      turn_start = Enum.find(decoded, &(&1["method"] == "turn/start"))
+
+      assert thread_start["params"]["dynamicTools"] == []
+      assert thread_start["params"]["sandbox"] == "read-only"
+
+      assert turn_start["params"]["sandboxPolicy"] == %{
+               "type" => "readOnly",
+               "networkAccess" => false
+             }
+
+      assert turn_start["params"]["outputSchema"] == output_schema
+    after
+      restore_env("SYMPHONY_CLASSIFIER_TRACE", previous_trace)
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server rejects the workspace root and paths outside workspace root" do
     test_root =
       Path.join(
