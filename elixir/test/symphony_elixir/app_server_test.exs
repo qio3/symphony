@@ -1,6 +1,74 @@
 defmodule SymphonyElixir.AppServerTest do
   use SymphonyElixir.TestSupport
 
+  test "worker thread receives the selected model and never inherits OPENAI_API_KEY" do
+    test_root =
+      Path.join(System.tmp_dir!(), "symphony-elixir-app-server-model-#{System.unique_integer([:positive])}")
+
+    previous_api_key = System.get_env("OPENAI_API_KEY")
+    previous_trace = System.get_env("SYMPHONY_MODEL_TRACE")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "GH-1")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "trace.jsonl")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      if [ "${OPENAI_API_KEY+x}" = "x" ]; then
+        printf '%s\n' 'OPENAI_API_KEY=INHERITED' >> "$SYMPHONY_MODEL_TRACE"
+      else
+        printf '%s\n' 'OPENAI_API_KEY=UNSET' >> "$SYMPHONY_MODEL_TRACE"
+      fi
+      count=0
+      while IFS= read -r line; do
+        printf '%s\n' "$line" >> "$SYMPHONY_MODEL_TRACE"
+        count=$((count + 1))
+        case "$count" in
+          1) printf '%s\n' '{"id":1,"result":{}}' ;;
+          2) ;;
+          3) printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-model"}}}' ;;
+          4)
+            printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-model"}}}'
+            printf '%s\n' '{"method":"turn/completed"}'
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      System.put_env("OPENAI_API_KEY", "forbidden")
+      System.put_env("SYMPHONY_MODEL_TRACE", trace_file)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{id: "1", identifier: "GH-1", title: "Model contract", state: "In Progress"}
+
+      assert {:ok, _result} =
+               AppServer.run(workspace, "work", issue, model: "gpt-5.6-terra")
+
+      [environment | messages] = File.read!(trace_file) |> String.split("\n", trim: true)
+      assert environment == "OPENAI_API_KEY=UNSET"
+
+      thread_start =
+        messages
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["method"] == "thread/start"))
+
+      assert thread_start["params"]["model"] == "gpt-5.6-terra"
+    after
+      restore_env("OPENAI_API_KEY", previous_api_key)
+      restore_env("SYMPHONY_MODEL_TRACE", previous_trace)
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server rejects the workspace root and paths outside workspace root" do
     test_root =
       Path.join(

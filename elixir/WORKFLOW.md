@@ -37,6 +37,15 @@ codex:
   turn_sandbox_policy:
     type: workspaceWrite
     networkAccess: true
+model_routing:
+  enabled: false
+  classifier_model: gpt-5.6-luna
+  confidence_threshold: 0.65
+  models:
+    luna: gpt-5.6-luna
+    terra: gpt-5.6-terra
+    sol: gpt-5.6-sol
+  force_sol_labels: []
 ---
 
 You are working on a Linear ticket `{{ issue.identifier }}`

@@ -114,6 +114,16 @@ defmodule SymphonyElixir.TestSupport do
           codex_turn_timeout_ms: 3_600_000,
           codex_read_timeout_ms: 5_000,
           codex_stall_timeout_ms: 300_000,
+          model_routing_enabled: false,
+          model_routing_classifier_model: "gpt-5.6-luna",
+          model_routing_confidence_threshold: 0.65,
+          model_routing_timeout_ms: 90_000,
+          model_routing_models: %{
+            "luna" => "gpt-5.6-luna",
+            "terra" => "gpt-5.6-terra",
+            "sol" => "gpt-5.6-sol"
+          },
+          model_routing_force_sol_labels: [],
           hook_after_create: nil,
           hook_before_run: nil,
           hook_after_run: nil,
@@ -152,6 +162,12 @@ defmodule SymphonyElixir.TestSupport do
     codex_turn_timeout_ms = Keyword.get(config, :codex_turn_timeout_ms)
     codex_read_timeout_ms = Keyword.get(config, :codex_read_timeout_ms)
     codex_stall_timeout_ms = Keyword.get(config, :codex_stall_timeout_ms)
+    model_routing_enabled = Keyword.get(config, :model_routing_enabled)
+    model_routing_classifier_model = Keyword.get(config, :model_routing_classifier_model)
+    model_routing_confidence_threshold = Keyword.get(config, :model_routing_confidence_threshold)
+    model_routing_timeout_ms = Keyword.get(config, :model_routing_timeout_ms)
+    model_routing_models = Keyword.get(config, :model_routing_models)
+    model_routing_force_sol_labels = Keyword.get(config, :model_routing_force_sol_labels)
     hook_after_create = Keyword.get(config, :hook_after_create)
     hook_before_run = Keyword.get(config, :hook_before_run)
     hook_after_run = Keyword.get(config, :hook_after_run)
@@ -194,6 +210,13 @@ defmodule SymphonyElixir.TestSupport do
         "  turn_timeout_ms: #{yaml_value(codex_turn_timeout_ms)}",
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
+        "model_routing:",
+        "  enabled: #{yaml_value(model_routing_enabled)}",
+        "  classifier_model: #{yaml_value(model_routing_classifier_model)}",
+        "  confidence_threshold: #{yaml_value(model_routing_confidence_threshold)}",
+        "  timeout_ms: #{yaml_value(model_routing_timeout_ms)}",
+        "  models: #{yaml_value(model_routing_models)}",
+        "  force_sol_labels: #{yaml_value(model_routing_force_sol_labels)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),

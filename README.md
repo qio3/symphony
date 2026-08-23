@@ -31,6 +31,10 @@ Check out [elixir/README.md](elixir/README.md) for instructions on how to set up
 and run the Elixir-based Symphony implementation. You can also ask your favorite coding agent to
 help with the setup:
 
+The reference implementation can optionally route each issue to a repo-configured Codex model.
+Owner labels take priority; otherwise a short metadata-only classifier selects the tier, with a
+bounded one-tier escalation only when a worker exhausts its reasoning budget.
+
 > Set up Symphony for my repository based on
 > https://github.com/openai/symphony/blob/main/elixir/README.md
 

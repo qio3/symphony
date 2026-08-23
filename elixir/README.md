@@ -133,6 +133,14 @@ agent:
   max_turns: 20
 codex:
   command: codex app-server
+model_routing:
+  enabled: true
+  classifier_model: gpt-5.6-luna
+  confidence_threshold: 0.65
+  models:
+    luna: gpt-5.6-luna
+    terra: gpt-5.6-terra
+    sol: gpt-5.6-sol
 ---
 
 You are working on an issue from the configured tracker {{ issue.identifier }}.
@@ -165,6 +173,14 @@ Notes:
   by the Codex turn sandbox.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
+- `model_routing.enabled` makes the agent runner choose and explicitly pass a Codex model for each
+  worker. Labels `model:luna`, `model:terra`, and `model:sol` are owner overrides. Otherwise a
+  tool-free `model_routing.classifier_model` turn sees issue metadata only; confidence below
+  `confidence_threshold` falls back to Terra. `force_sol_labels` is an optional exact-label list
+  for narrowly defined high-risk work. Exhausted Luna/Terra attempts move only one tier per retry;
+  ordinary test/CI/network failures and owner-blocked work do not escalate.
+- The runtime removes `OPENAI_API_KEY` from local and SSH-launched app-server environments. This
+  preserves Codex ChatGPT authentication while preventing API-key inheritance.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run

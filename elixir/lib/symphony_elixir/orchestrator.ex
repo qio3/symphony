@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, ModelRouter, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -39,6 +39,7 @@ defmodule SymphonyElixir.Orchestrator do
       claimed: MapSet.new(),
       blocked: %{},
       retry_attempts: %{},
+      model_completed_counts: %{luna: 0, terra: 0, sol: 0},
       codex_totals: nil,
       codex_rate_limits: nil
     ]
@@ -135,7 +136,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       issue_id ->
         {running_entry, state} = pop_running_entry(state, issue_id)
-        state = record_session_completion_totals(state, running_entry)
+        state = state |> record_session_completion_totals(running_entry) |> record_model_completion(running_entry)
         session_id = running_entry_session_id(running_entry)
 
         state = handle_agent_down(reason, state, issue_id, running_entry, session_id)
@@ -159,6 +160,19 @@ defmodule SymphonyElixir.Orchestrator do
           |> maybe_put_runtime_value(:worker_host, runtime_info[:worker_host])
           |> maybe_put_runtime_value(:workspace_path, runtime_info[:workspace_path])
 
+        notify_dashboard()
+        {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+    end
+  end
+
+  def handle_info({:worker_routing_info, issue_id, routing_info}, %{running: running} = state)
+      when is_binary(issue_id) and is_map(routing_info) do
+    case Map.get(running, issue_id) do
+      nil ->
+        {:noreply, state}
+
+      running_entry ->
+        updated_running_entry = Map.merge(running_entry, routing_info)
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
     end
@@ -203,6 +217,22 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_info(msg, state) do
     Logger.debug("Orchestrator ignored message: #{inspect(msg)}")
     {:noreply, state}
+  end
+
+  defp handle_agent_down({:model_exhausted, route, reason}, state, issue_id, running_entry, session_id) do
+    escalated_route = ModelRouter.maybe_escalate(route, reason)
+
+    Logger.warning("Agent model exhausted for issue_id=#{issue_id} session_id=#{session_id} from=#{route.selected_tier} to=#{escalated_route.selected_tier} reason=#{reason}; scheduling retry")
+
+    schedule_issue_retry(state, issue_id, next_retry_attempt_from_running(running_entry), %{
+      identifier: running_entry.identifier,
+      issue_url: running_entry.issue.url,
+      error: "model exhausted: #{reason}",
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path),
+      model_route: escalated_route,
+      escalation_reason: reason
+    })
   end
 
   defp handle_agent_down(:normal, state, issue_id, running_entry, session_id) do
@@ -766,7 +796,12 @@ defmodule SymphonyElixir.Orchestrator do
       blocked_at: DateTime.utc_now(),
       last_codex_message: Map.get(running_entry, :last_codex_message),
       last_codex_event: Map.get(running_entry, :last_codex_event),
-      last_codex_timestamp: Map.get(running_entry, :last_codex_timestamp)
+      last_codex_timestamp: Map.get(running_entry, :last_codex_timestamp),
+      model_route: Map.get(running_entry, :model_route),
+      selected_model_tier: Map.get(running_entry, :selected_model_tier),
+      actual_model: Map.get(running_entry, :actual_model),
+      routing_reason: Map.get(running_entry, :routing_reason),
+      escalation_history: Map.get(running_entry, :escalation_history, [])
     }
 
     %{
@@ -904,10 +939,16 @@ defmodule SymphonyElixir.Orchestrator do
     |> MapSet.new()
   end
 
-  defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
+  defp dispatch_issue(
+         %State{} = state,
+         issue,
+         attempt \\ nil,
+         preferred_worker_host \\ nil,
+         model_route \\ nil
+       ) do
     case refresh_issue_for_dispatch(issue) do
       {:ok, %Issue{} = refreshed_issue} ->
-        do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host)
+        do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host, model_route)
 
       {:skip, _reason} ->
         state
@@ -937,7 +978,7 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
+  defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host, model_route) do
     recipient = self()
 
     case select_worker_host(state, preferred_worker_host) do
@@ -946,42 +987,28 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       worker_host ->
-        spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host)
+        spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host, model_route)
     end
   end
 
-  defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
-    case Task.Supervisor.start_child(state.task_supervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
-         end) do
+  defp spawn_issue_on_worker_host(
+         %State{} = state,
+         issue,
+         attempt,
+         recipient,
+         worker_host,
+         model_route
+       ) do
+    task = fn -> run_agent_task(issue, recipient, attempt, worker_host, model_route) end
+
+    case Task.Supervisor.start_child(state.task_supervisor, task) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
 
         Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"}")
 
-        running =
-          Map.put(state.running, issue.id, %{
-            pid: pid,
-            ref: ref,
-            identifier: issue.identifier,
-            issue: issue,
-            worker_host: worker_host,
-            workspace_path: nil,
-            session_id: nil,
-            last_codex_message: nil,
-            last_codex_timestamp: nil,
-            last_codex_event: nil,
-            codex_app_server_pid: nil,
-            codex_input_tokens: 0,
-            codex_output_tokens: 0,
-            codex_total_tokens: 0,
-            codex_last_reported_input_tokens: 0,
-            codex_last_reported_output_tokens: 0,
-            codex_last_reported_total_tokens: 0,
-            turn_count: 0,
-            retry_attempt: normalize_retry_attempt(attempt),
-            started_at: DateTime.utc_now()
-          })
+        running_entry = new_running_entry(issue, pid, ref, worker_host, model_route, attempt)
+        running = Map.put(state.running, issue.id, running_entry)
 
         %{
           state
@@ -1001,6 +1028,50 @@ defmodule SymphonyElixir.Orchestrator do
           worker_host: worker_host
         })
     end
+  end
+
+  defp run_agent_task(issue, recipient, attempt, worker_host, model_route) do
+    case AgentRunner.run(issue, recipient,
+           attempt: attempt,
+           worker_host: worker_host,
+           model_route: model_route
+         ) do
+      :ok -> :ok
+      {:model_exhausted, route, reason} -> exit({:model_exhausted, route, reason})
+    end
+  end
+
+  defp new_running_entry(issue, pid, ref, worker_host, model_route, attempt) do
+    route = model_route || %{}
+
+    %{
+      pid: pid,
+      ref: ref,
+      identifier: issue.identifier,
+      issue: issue,
+      worker_host: worker_host,
+      workspace_path: nil,
+      session_id: nil,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      codex_app_server_pid: nil,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0,
+      turn_count: 0,
+      model_route: model_route,
+      selected_model_tier: Map.get(route, :selected_tier),
+      actual_model: Map.get(route, :actual_model),
+      routing_reason: Map.get(route, :routing_reason),
+      escalated_from: Map.get(route, :escalated_from),
+      escalation_history: Map.get(route, :escalation_history, []),
+      retry_attempt: normalize_retry_attempt(attempt),
+      started_at: DateTime.utc_now()
+    }
   end
 
   defp revalidate_issue_for_dispatch(%Issue{id: issue_id}, issue_fetcher, terminal_states)
@@ -1044,6 +1115,8 @@ defmodule SymphonyElixir.Orchestrator do
     error = pick_retry_error(previous_retry, metadata)
     worker_host = pick_retry_worker_host(previous_retry, metadata)
     workspace_path = pick_retry_workspace_path(previous_retry, metadata)
+    model_route = metadata[:model_route] || Map.get(previous_retry, :model_route)
+    escalation_reason = metadata[:escalation_reason] || Map.get(previous_retry, :escalation_reason)
 
     if is_reference(old_timer) do
       Process.cancel_timer(old_timer)
@@ -1067,7 +1140,9 @@ defmodule SymphonyElixir.Orchestrator do
             issue_url: issue_url,
             error: error,
             worker_host: worker_host,
-            workspace_path: workspace_path
+            workspace_path: workspace_path,
+            model_route: model_route,
+            escalation_reason: escalation_reason
           })
     }
   end
@@ -1080,7 +1155,9 @@ defmodule SymphonyElixir.Orchestrator do
           issue_url: Map.get(retry_entry, :issue_url),
           error: Map.get(retry_entry, :error),
           worker_host: Map.get(retry_entry, :worker_host),
-          workspace_path: Map.get(retry_entry, :workspace_path)
+          workspace_path: Map.get(retry_entry, :workspace_path),
+          model_route: Map.get(retry_entry, :model_route),
+          escalation_reason: Map.get(retry_entry, :escalation_reason)
         }
 
         {:ok, attempt, metadata, %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}}
@@ -1184,7 +1261,14 @@ defmodule SymphonyElixir.Orchestrator do
          worker_slots_available?(state, metadata[:worker_host]) do
       case refresh_issue_for_dispatch(issue) do
         {:ok, %Issue{} = refreshed_issue} ->
-          {:noreply, do_dispatch_issue(state, refreshed_issue, attempt, metadata[:worker_host])}
+          {:noreply,
+           do_dispatch_issue(
+             state,
+             refreshed_issue,
+             attempt,
+             metadata[:worker_host],
+             metadata[:model_route]
+           )}
 
         {:skip, :missing} ->
           {:noreply, release_issue_claim(state, issue.id)}
@@ -1431,6 +1515,11 @@ defmodule SymphonyElixir.Orchestrator do
           last_codex_timestamp: metadata.last_codex_timestamp,
           last_codex_message: metadata.last_codex_message,
           last_codex_event: metadata.last_codex_event,
+          selected_model_tier: Map.get(metadata, :selected_model_tier),
+          actual_model: Map.get(metadata, :actual_model),
+          routing_reason: Map.get(metadata, :routing_reason),
+          escalated_from: Map.get(metadata, :escalated_from),
+          escalation_history: Map.get(metadata, :escalation_history, []),
           runtime_seconds: running_seconds(metadata.started_at, now)
         }
       end)
@@ -1446,7 +1535,13 @@ defmodule SymphonyElixir.Orchestrator do
           issue_url: Map.get(retry, :issue_url),
           error: Map.get(retry, :error),
           worker_host: Map.get(retry, :worker_host),
-          workspace_path: Map.get(retry, :workspace_path)
+          workspace_path: Map.get(retry, :workspace_path),
+          selected_model_tier: get_in(retry, [:model_route, :selected_tier]),
+          actual_model: get_in(retry, [:model_route, :actual_model]),
+          routing_reason: get_in(retry, [:model_route, :routing_reason]),
+          escalated_from: get_in(retry, [:model_route, :escalated_from]),
+          escalation_history: get_in(retry, [:model_route, :escalation_history]) || [],
+          escalation_reason: Map.get(retry, :escalation_reason)
         }
       end)
 
@@ -1465,7 +1560,11 @@ defmodule SymphonyElixir.Orchestrator do
           blocked_at: Map.get(metadata, :blocked_at),
           last_codex_timestamp: Map.get(metadata, :last_codex_timestamp),
           last_codex_message: Map.get(metadata, :last_codex_message),
-          last_codex_event: Map.get(metadata, :last_codex_event)
+          last_codex_event: Map.get(metadata, :last_codex_event),
+          selected_model_tier: Map.get(metadata, :selected_model_tier),
+          actual_model: Map.get(metadata, :actual_model),
+          routing_reason: Map.get(metadata, :routing_reason),
+          escalation_history: Map.get(metadata, :escalation_history, [])
         }
       end)
 
@@ -1475,6 +1574,7 @@ defmodule SymphonyElixir.Orchestrator do
        retrying: retrying,
        blocked: blocked,
        codex_totals: state.codex_totals,
+       model_counts: model_counts(state),
        rate_limits: Map.get(state, :codex_rate_limits),
        polling: %{
          checking?: state.poll_check_in_progress == true,
@@ -1628,6 +1728,30 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp record_session_completion_totals(state, _running_entry), do: state
+
+  defp record_model_completion(%State{} = state, running_entry) when is_map(running_entry) do
+    case Map.get(running_entry, :selected_model_tier) do
+      tier when tier in [:luna, :terra, :sol] ->
+        counts = Map.update(state.model_completed_counts, tier, 1, &(&1 + 1))
+        %{state | model_completed_counts: counts}
+
+      _ ->
+        state
+    end
+  end
+
+  defp record_model_completion(state, _running_entry), do: state
+
+  defp model_counts(%State{} = state) do
+    Enum.into([:luna, :terra, :sol], %{}, fn tier ->
+      active =
+        Enum.count(state.running, fn {_issue_id, entry} ->
+          Map.get(entry, :selected_model_tier) == tier
+        end)
+
+      {tier, %{active: active, completed: Map.get(state.model_completed_counts, tier, 0)}}
+    end)
+  end
 
   defp refresh_runtime_config(%State{} = state) do
     config = Config.settings!()

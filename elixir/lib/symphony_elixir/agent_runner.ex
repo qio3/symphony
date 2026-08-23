@@ -5,7 +5,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Config, ModelRouter, PromptBuilder, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 
   @type worker_host :: String.t() | nil
@@ -18,24 +18,34 @@ defmodule SymphonyElixir.AgentRunner do
     continue_with_issue?(issue, issue_state_fetcher)
   end
 
-  @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
+  @spec run(map(), pid() | nil, keyword()) ::
+          :ok | {:model_exhausted, ModelRouter.route(), atom()} | no_return()
   def run(issue, codex_update_recipient \\ nil, opts \\ []) do
     # The orchestrator owns host retries so one worker lifetime never hops machines.
     worker_host = selected_worker_host(Keyword.get(opts, :worker_host), Config.settings!().worker.ssh_hosts)
+    model_route = selected_model_route(issue, opts)
+    send_worker_routing_info(codex_update_recipient, issue, model_route)
 
     Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
-    case run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
+    case run_on_worker_host(issue, codex_update_recipient, opts, worker_host, model_route) do
       :ok ->
         :ok
 
       {:error, reason} ->
-        Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
-        raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+        case {model_route, ModelRouter.exhaustion_reason(reason)} do
+          {%{} = route, exhaustion_reason} when not is_nil(exhaustion_reason) ->
+            Logger.warning("Agent reasoning exhausted for #{issue_context(issue)} model=#{route.actual_model} reason=#{exhaustion_reason}")
+            {:model_exhausted, route, exhaustion_reason}
+
+          _ ->
+            Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
+            raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+        end
     end
   end
 
-  defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
+  defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host, model_route) do
     Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
     case Workspace.create_for_issue(issue, worker_host) do
@@ -44,7 +54,7 @@ defmodule SymphonyElixir.AgentRunner do
 
         try do
           with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
-            run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+            run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host, model_route)
           end
         after
           Workspace.run_after_run_hook(workspace, issue, worker_host)
@@ -85,11 +95,23 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
 
-  defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
+  defp send_worker_routing_info(recipient, %Issue{id: issue_id}, %{} = model_route)
+       when is_binary(issue_id) and is_pid(recipient) do
+    send(recipient, {:worker_routing_info, issue_id, observable_route(model_route)})
+    :ok
+  end
+
+  defp send_worker_routing_info(_recipient, _issue, _model_route), do: :ok
+
+  defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host, model_route) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issues_by_ids/1)
 
-    with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
+    session_opts =
+      [worker_host: worker_host]
+      |> maybe_put_model_route(model_route)
+
+    with {:ok, session} <- AppServer.start_session(workspace, session_opts) do
       try do
         do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
       after
@@ -128,7 +150,7 @@ defmodule SymphonyElixir.AgentRunner do
         {:continue, refreshed_issue} ->
           Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
 
-          :ok
+          {:error, {:max_turns_exhausted, max_turns}}
 
         {:done, _refreshed_issue} ->
           :ok
@@ -184,6 +206,30 @@ defmodule SymphonyElixir.AgentRunner do
   defp issue_routable?(%Issue{} = issue) do
     Issue.routable?(issue, Config.settings!().tracker.required_labels)
   end
+
+  defp selected_model_route(issue, opts) do
+    case Keyword.fetch(opts, :model_route) do
+      {:ok, %{} = route} -> route
+      _ -> if Config.settings!().model_routing.enabled, do: ModelRouter.route(issue), else: nil
+    end
+  end
+
+  defp observable_route(route) do
+    Map.take(route, [
+      :selected_tier,
+      :actual_model,
+      :routing_reason,
+      :confidence,
+      :escalated_from,
+      :escalation_history
+    ])
+    |> Map.put(:model_route, route)
+  end
+
+  defp maybe_put_model_route(opts, %{actual_model: model}) when is_binary(model),
+    do: Keyword.put(opts, :model, model)
+
+  defp maybe_put_model_route(opts, _model_route), do: opts
 
   defp selected_worker_host(nil, []), do: nil
 
