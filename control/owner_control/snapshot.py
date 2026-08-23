@@ -125,6 +125,7 @@ class SnapshotBuilder:
             "service": service,
             "intake": {"active": bool(intake_active), "status": "active" if intake_active else "paused"},
             "workers": {"running": counts["running"], "limit": max(int(worker_limit), 0)},
+            "models": deepcopy(runtime.get("models") or {}),
             "counts": counts,
             "canonical": canonical,
             "test": normalized_test,
@@ -165,7 +166,7 @@ class SnapshotBuilder:
     @staticmethod
     def _with_runtime(item: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
         item = deepcopy(item)
-        for key in ("started_at", "last_message", "last_event", "last_event_at", "error", "due_at"):
+        for key in ("started_at", "last_message", "last_event", "last_event_at", "error", "due_at", "model"):
             if runtime.get(key) is not None:
                 item[key] = runtime[key]
         return item

@@ -26,6 +26,11 @@ def snapshot():
         "service": {"live": True},
         "intake": {"active": True},
         "workers": {"running": 1, "limit": 2},
+        "models": {
+            "luna": {"active": 0, "completed": 4},
+            "terra": {"active": 1, "completed": 2},
+            "sol": {"active": 0, "completed": 1},
+        },
         "counts": {
             "backlog": 74,
             "ready_for_ai": 2,
@@ -38,7 +43,14 @@ def snapshot():
         "canonical": {"sha": "be44cf15aaaaaaaa"},
         "test": {"sha": "be44cf15aaaaaaaa", "synced": True, "url": "https://test.example"},
         "owner_view": {
-            "work_items": [{"number": 401, "title": "Work", "stage": "In Progress"}],
+            "work_items": [
+                {
+                    "number": 401,
+                    "title": "Work",
+                    "stage": "In Progress",
+                    "model": {"selected_tier": "terra", "actual_model": "gpt-5.6-terra"},
+                }
+            ],
             "ready_for_acceptance": [{"number": 402, "title": "Ready"}],
             "blocked": [{"number": 403, "title": "Blocked", "question": "Choose A or B?"}],
             "backlog": [{"number": 404, "title": "Next", "stage": "Backlog"}],
@@ -74,7 +86,13 @@ class TelegramCommandHandlerTest(unittest.TestCase):
         self.assertIn("Backlog: 74", text)
         self.assertIn("Ready for AI: 2", text)
         self.assertIn("TEST: be44cf15 ✓", text)
+        self.assertIn("Models: Luna 0 · Terra 1 · Sol 0", text)
         self.assertNotIn("tokens", text.casefold())
+
+    def test_work_includes_the_actual_routed_model(self):
+        text = self.handler.handle("/work")
+
+        self.assertIn("#401 Work · Terra", text)
 
     def test_commands_call_shared_typed_actions(self):
         self.assertIn("accepted", self.handler.handle("/run #401"))

@@ -135,6 +135,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
               Intake <%= if intake_active?(@payload), do: "Active", else: "Paused" %>
             </span>
             <span class="control-worker-count numeric">Workers <%= workers_label(@payload) %></span>
+            <span class="routing-status">Routing Auto</span>
+            <span class="model-count model-count-luna"><%= model_active_label(@payload, :luna) %></span>
+            <span class="model-count model-count-terra"><%= model_active_label(@payload, :terra) %></span>
+            <span class="model-count model-count-sol"><%= model_active_label(@payload, :sol) %></span>
           </div>
           <div class="control-actions">
             <button
@@ -276,6 +280,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                   <tr>
                     <th>Issue</th>
                     <th>Stage</th>
+                    <th>Model</th>
                     <th>In work</th>
                     <th>PR / CI</th>
                     <th>TEST</th>
@@ -285,6 +290,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                   <tr :for={item <- @payload.owner_view.work_items}>
                     <td><.owner_issue item={item} /></td>
                     <td><span class={state_badge_class(item.status || item.stage)}><%= item.stage || "Unknown" %></span></td>
+                    <td><.model_status model={item[:model]} /></td>
                     <td class="numeric"><%= format_elapsed(item.started_at, @now) %></td>
                     <td><.delivery_status pr={item.pr} ci={item.ci} /></td>
                     <td><.test_status test={item.test} /></td>
@@ -371,6 +377,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
               <article :for={item <- @payload.owner_view.backlog} class="backlog-item">
                 <.owner_issue item={item} />
                 <div class="backlog-actions">
+                  <span class="routing-hint"><%= backlog_routing_label(item) %></span>
                   <span class="state-badge state-badge-warning"><%= item.stage || "Backlog" %></span>
                   <button
                     :if={control_snapshot?(@payload)}
@@ -385,7 +392,35 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <% end %>
         </section>
 
-        <section class="section-card">
+        <section class="section-card diagnostics-card">
+          <details class="runtime-details">
+            <summary>Runtime diagnostics</summary>
+            <div class="diagnostics-grid">
+              <div>
+                <p class="metric-label">Total tokens</p>
+                <p class="diagnostic-value numeric"><%= format_int(@payload.codex_totals.total_tokens) %></p>
+                <p class="metric-detail numeric">
+                  In <%= format_int(@payload.codex_totals.input_tokens) %> / Out <%= format_int(@payload.codex_totals.output_tokens) %>
+                </p>
+              </div>
+              <div>
+                <p class="metric-label">Runtime</p>
+                <p class="diagnostic-value numeric"><%= format_runtime_seconds(total_runtime_seconds(@payload, @now)) %></p>
+                <p class="metric-detail">Completed and active sessions.</p>
+              </div>
+              <div>
+                <p class="metric-label">Model routing</p>
+                <p :for={tier <- [:luna, :terra, :sol]} class="metric-detail numeric">
+                  <%= model_diagnostic_label(@payload, tier) %>
+                </p>
+              </div>
+              <div>
+                <p class="metric-label">Rate limits</p>
+                <pre class="code-panel diagnostics-code"><%= pretty_value(@payload.rate_limits) %></pre>
+              </div>
+            </div>
+
+        <section class="runtime-section">
           <div class="section-header">
             <div>
               <h2 class="section-title">Running sessions</h2>
@@ -410,6 +445,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                   <tr>
                     <th>Issue</th>
                     <th>State</th>
+                    <th>Model</th>
                     <th>Session</th>
                     <th>Runtime / turns</th>
                     <th>Codex update</th>
@@ -429,6 +465,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                         <%= entry.state %>
                       </span>
                     </td>
+                    <td><.model_status model={entry[:model]} compact /></td>
                     <td>
                       <div class="session-stack">
                         <%= if entry.session_id do %>
@@ -474,7 +511,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <% end %>
         </section>
 
-        <section class="section-card">
+        <section class="runtime-section">
           <div class="section-header">
             <div>
               <h2 class="section-title">Blocked sessions</h2>
@@ -491,6 +528,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                   <tr>
                     <th>Issue</th>
                     <th>State</th>
+                    <th>Model</th>
                     <th>Session</th>
                     <th>Blocked at</th>
                     <th>Last update</th>
@@ -510,6 +548,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                         <%= entry.state || "Blocked" %>
                       </span>
                     </td>
+                    <td><.model_status model={entry[:model]} compact /></td>
                     <td>
                       <%= if entry.session_id do %>
                         <button
@@ -548,7 +587,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <% end %>
         </section>
 
-        <section class="section-card">
+        <section class="runtime-section">
           <div class="section-header">
             <div>
               <h2 class="section-title">Retry queue</h2>
@@ -565,6 +604,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                   <tr>
                     <th>Issue</th>
                     <th>Attempt</th>
+                    <th>Model</th>
                     <th>Due at</th>
                     <th>Error</th>
                   </tr>
@@ -578,6 +618,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                       </div>
                     </td>
                     <td><%= entry.attempt %></td>
+                    <td><.model_status model={entry[:model]} compact /></td>
                     <td class="mono"><%= entry.due_at || "n/a" %></td>
                     <td><%= entry.error || "n/a" %></td>
                   </tr>
@@ -586,28 +627,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
             </div>
           <% end %>
         </section>
-
-        <section class="section-card diagnostics-card">
-          <details>
-            <summary>Runtime diagnostics</summary>
-            <div class="diagnostics-grid">
-              <div>
-                <p class="metric-label">Total tokens</p>
-                <p class="diagnostic-value numeric"><%= format_int(@payload.codex_totals.total_tokens) %></p>
-                <p class="metric-detail numeric">
-                  In <%= format_int(@payload.codex_totals.input_tokens) %> / Out <%= format_int(@payload.codex_totals.output_tokens) %>
-                </p>
-              </div>
-              <div>
-                <p class="metric-label">Runtime</p>
-                <p class="diagnostic-value numeric"><%= format_runtime_seconds(total_runtime_seconds(@payload, @now)) %></p>
-                <p class="metric-detail">Completed and active sessions.</p>
-              </div>
-              <div>
-                <p class="metric-label">Rate limits</p>
-                <pre class="code-panel diagnostics-code"><%= pretty_value(@payload.rate_limits) %></pre>
-              </div>
-            </div>
           </details>
         </section>
       <% end %>
@@ -663,6 +682,31 @@ defmodule SymphonyElixirWeb.DashboardLive do
       <.issue_identifier identifier={@item.issue_identifier || "Unknown"} url={@item.issue_url} />
       <span :if={@item.title} class="owner-issue-title"><%= @item.title %></span>
     </div>
+    """
+  end
+
+  attr(:model, :any, default: nil)
+  attr(:compact, :boolean, default: false)
+
+  defp model_status(assigns) do
+    assigns =
+      assigns
+      |> assign(:tier, model_field(assigns.model, :selected_tier))
+      |> assign(:actual_model, model_field(assigns.model, :actual_model))
+      |> assign(:routing_reason, model_field(assigns.model, :routing_reason))
+      |> assign(:escalation, model_escalation_label(assigns.model))
+
+    ~H"""
+    <%= if @tier do %>
+      <div class="model-stack" title={@routing_reason}>
+        <span class={model_badge_class(@tier)}><%= model_title(@tier) %></span>
+        <span :if={!@compact && @actual_model} class="model-id mono"><%= @actual_model %></span>
+        <span :if={@escalation} class="model-escalation"><%= @escalation %></span>
+        <span :if={!@compact && @routing_reason} class="model-reason"><%= routing_reason_label(@routing_reason) %></span>
+      </div>
+    <% else %>
+      <span class="muted">Auto on start</span>
+    <% end %>
     """
   end
 
@@ -824,6 +868,62 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp workers_label(payload) do
     "#{get_in(payload, [:workers, :running]) || 0}/#{get_in(payload, [:workers, :limit]) || 0}"
+  end
+
+  defp model_active_label(payload, tier) do
+    "#{model_title(tier)} #{model_count(payload, tier, :active)}"
+  end
+
+  defp model_diagnostic_label(payload, tier) do
+    "#{model_title(tier)} #{model_count(payload, tier, :active)} active · #{model_count(payload, tier, :completed)} done"
+  end
+
+  defp model_count(payload, tier, key) do
+    payload
+    |> Map.get(:models, %{})
+    |> model_field(tier)
+    |> model_field(key)
+    |> case do
+      count when is_integer(count) and count >= 0 -> count
+      _ -> 0
+    end
+  end
+
+  defp model_field(%{} = model, key) when is_atom(key),
+    do: Map.get(model, key) || Map.get(model, Atom.to_string(key))
+
+  defp model_field(_model, _key), do: nil
+
+  defp model_title(value) do
+    value
+    |> to_string()
+    |> String.capitalize()
+  end
+
+  defp model_badge_class(tier), do: "model-badge model-badge-#{tier |> to_string() |> String.downcase()}"
+
+  defp model_escalation_label(model) do
+    case {model_field(model, :escalated_from), model_field(model, :selected_tier)} do
+      {from, to} when not is_nil(from) and not is_nil(to) -> "#{model_title(from)} → #{model_title(to)}"
+      _ -> nil
+    end
+  end
+
+  defp routing_reason_label(reason) do
+    reason
+    |> to_string()
+    |> String.replace([":", "_"], " ")
+  end
+
+  defp backlog_routing_label(item) do
+    item
+    |> Map.get(:labels, [])
+    |> Enum.find_value("Auto on start", fn label ->
+      case String.split(to_string(label), ":", parts: 2) do
+        ["model", tier] when tier in ["luna", "terra", "sol"] -> "Override #{model_title(tier)}"
+        _ -> nil
+      end
+    end)
   end
 
   defp service_badge_class(payload) do

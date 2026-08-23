@@ -14,7 +14,8 @@ defmodule SymphonyElixir.OwnerControl.Client do
     rate_limits failures unrecoverable fingerprint message number identifier issue_identifier
     issue_id issue_url title stage state labels owner_question question project_item_id pr ci
     merged due_at last_message last_event last_event_at error attempt worker_host workspace_path
-    session_id turn_count tokens health_url
+    session_id turn_count tokens health_url models model selected_tier actual_model routing_reason
+    escalated_from escalation_history luna terra sol completed from to
   )a
   @key_lookup Map.new(@known_keys, &{Atom.to_string(&1), &1})
 

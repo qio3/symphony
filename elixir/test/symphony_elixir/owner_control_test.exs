@@ -130,6 +130,51 @@ defmodule SymphonyElixir.OwnerControlTest do
     refute Client.intake_active?()
   end
 
+  test "client normalizes deterministic model routing fields from the shared JSON snapshot" do
+    Application.put_env(:symphony_elixir, :owner_control_settings, %{
+      url: "http://127.0.0.1:4081",
+      token: String.duplicate("c", 32)
+    })
+
+    Application.put_env(:symphony_elixir, :owner_control_request_fun, fn _, _, _, _ ->
+      {:ok, 200,
+       Jason.encode!(%{
+         "version" => 1,
+         "models" => %{"terra" => %{"active" => 1, "completed" => 2}},
+         "owner_view" => %{
+           "work_items" => [
+             %{
+               "number" => 401,
+               "model" => %{
+                 "selected_tier" => "terra",
+                 "actual_model" => "gpt-5.6-terra",
+                 "routing_reason" => "escalation:max_turns_exhausted",
+                 "escalated_from" => "luna"
+               }
+             }
+           ]
+         }
+       })}
+    end)
+
+    assert {:ok,
+            %{
+              models: %{terra: %{active: 1, completed: 2}},
+              owner_view: %{
+                work_items: [
+                  %{
+                    model: %{
+                      selected_tier: "terra",
+                      actual_model: "gpt-5.6-terra",
+                      routing_reason: "escalation:max_turns_exhausted",
+                      escalated_from: "luna"
+                    }
+                  }
+                ]
+              }
+            }} = Client.snapshot()
+  end
+
   test "orchestrator dispatch eligibility honors the shared intake gate" do
     state = %Orchestrator.State{
       max_concurrent_agents: 2,
@@ -166,6 +211,11 @@ defmodule SymphonyElixir.OwnerControlTest do
 
     assert html =~ "Intake Active"
     assert html =~ "Workers 1/2"
+    assert html =~ "Routing Auto"
+    assert html =~ "Luna 0"
+    assert html =~ "Terra 1"
+    assert html =~ "gpt-5.6-terra"
+    assert html =~ "Luna → Terra"
     assert html =~ "Ready for AI"
     assert html =~ "Canonical"
     assert html =~ "be44cf15"
@@ -176,6 +226,9 @@ defmodule SymphonyElixir.OwnerControlTest do
     assert html =~ "Rework"
     assert html =~ "Start"
     assert html =~ "Open Issue"
+    assert has_element?(view, "details.runtime-details > summary", "Runtime diagnostics")
+    assert has_element?(view, "details.runtime-details section.runtime-section h2", "Running sessions")
+    refute has_element?(view, "details.runtime-details[open]")
 
     view |> element(~s(button[phx-click="pause-intake"])) |> render_click()
     assert_receive {:control_action, :pause, %{}}
@@ -251,6 +304,11 @@ defmodule SymphonyElixir.OwnerControlTest do
       service: %{live: true},
       intake: %{active: true, status: "active"},
       workers: %{running: 1, limit: 2},
+      models: %{
+        luna: %{active: 0, completed: 4},
+        terra: %{active: 1, completed: 2},
+        sol: %{active: 0, completed: 1}
+      },
       canonical: %{sha: "be44cf15aaaaaaaa", url: "https://example.org/commit/be44cf15"},
       test: %{sha: "be44cf15aaaaaaaa", url: "https://test.example.org", synced: true, drift: false},
       counts: %{
@@ -291,6 +349,15 @@ defmodule SymphonyElixir.OwnerControlTest do
             stage: "In Progress",
             status: "running",
             started_at: "2026-08-23T09:45:00Z",
+            model: %{
+              selected_tier: "terra",
+              actual_model: "gpt-5.6-terra",
+              routing_reason: "escalation:max_turns_exhausted",
+              escalated_from: "luna",
+              escalation_history: [
+                %{from: "luna", to: "terra", reason: "max_turns_exhausted"}
+              ]
+            },
             pr: nil,
             ci: nil,
             test: nil

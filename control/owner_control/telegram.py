@@ -80,6 +80,7 @@ class TelegramCommandHandler:
         service = snapshot.get("service", {})
         intake = snapshot.get("intake", {})
         workers = snapshot.get("workers", {})
+        models = snapshot.get("models") or {}
         canonical = _short_sha((snapshot.get("canonical") or {}).get("sha"))
         test = snapshot.get("test") or {}
         test_suffix = " ✓" if test.get("synced") else " ⚠ drift"
@@ -88,6 +89,7 @@ class TelegramCommandHandler:
                 f"Symphony {'● Live' if service.get('live') else '○ Down'}",
                 f"Intake: {'Active' if intake.get('active') else 'Paused'}",
                 f"Workers: {workers.get('running', 0)}/{workers.get('limit', 0)}",
+                f"Models: {_model_count(models, 'luna')} · {_model_count(models, 'terra')} · {_model_count(models, 'sol')}",
                 "",
                 f"Backlog: {counts.get('backlog', 0)}",
                 f"Ready for AI: {counts.get('ready_for_ai', 0)}",
@@ -110,6 +112,9 @@ class TelegramCommandHandler:
         for item in items[:20]:
             number = item.get("number") or item.get("issue_identifier") or "?"
             line = f"#{number} {item.get('title') or ''}" if str(number).isdigit() else f"{number} {item.get('title') or ''}"
+            model = item.get("model") or {}
+            if model.get("selected_tier"):
+                line += f" · {_title(model['selected_tier'])}"
             if include_question and item.get("question"):
                 line += f"\nQuestion: {item['question']}"
             lines.append(line.strip())
@@ -215,3 +220,13 @@ def _short_sha(value: Any) -> str:
 
 def _ready_sha(item: dict[str, Any], snapshot: dict[str, Any]) -> Any:
     return ((item.get("test") or snapshot.get("test") or {}).get("sha"))
+
+
+def _model_count(models: dict[str, Any], tier: str) -> str:
+    value = models.get(tier) or {}
+    return f"{_title(tier)} {value.get('active', 0)}"
+
+
+def _title(value: Any) -> str:
+    text = str(value or "")
+    return text[:1].upper() + text[1:]

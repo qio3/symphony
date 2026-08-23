@@ -141,6 +141,61 @@ class SnapshotBuilderTest(unittest.TestCase):
             "Should the migration preserve legacy IDs?",
         )
 
+    def test_projects_runtime_model_routing_without_reclassifying_issues(self):
+        model = {
+            "selected_tier": "terra",
+            "actual_model": "gpt-5.6-terra",
+            "routing_reason": "escalation:max_turns_exhausted",
+            "escalated_from": "luna",
+            "escalation_history": [
+                {"from": "luna", "to": "terra", "reason": "max_turns_exhausted"}
+            ],
+        }
+        runtime = {
+            "generated_at": "2026-08-23T10:00:00Z",
+            "running": [
+                {
+                    "issue_id": "406",
+                    "issue_identifier": "GH-406",
+                    "started_at": "2026-08-23T09:50:00Z",
+                    "model": model,
+                }
+            ],
+            "retrying": [],
+            "blocked": [],
+            "models": {
+                "luna": {"active": 0, "completed": 4},
+                "terra": {"active": 1, "completed": 2},
+                "sol": {"active": 0, "completed": 1},
+            },
+            "codex_totals": {},
+            "rate_limits": None,
+        }
+
+        snapshot = SnapshotBuilder().build(
+            service={"live": True},
+            intake_active=True,
+            worker_limit=2,
+            runtime=runtime,
+            project={
+                "items": [
+                    {
+                        "number": 406,
+                        "identifier": "#406",
+                        "title": "Escalated task",
+                        "url": "https://github.test/issues/406",
+                        "status": "In Progress",
+                        "state": "OPEN",
+                    }
+                ]
+            },
+            canonical={"sha": "aaaaaaaa11111111"},
+            test={"sha": "aaaaaaaa11111111", "url": "https://test.example"},
+        )
+
+        self.assertEqual(snapshot["models"], runtime["models"])
+        self.assertEqual(snapshot["owner_view"]["work_items"][0]["model"], model)
+
 
 if __name__ == "__main__":
     unittest.main()
