@@ -35,6 +35,9 @@ class TelegramCommandHandler:
         text = str(text or "").strip()
         if not text:
             return "Send /help for commands."
+        mention, separator, mentioned_text = text.partition(" ")
+        if mention.startswith("@") and len(mention) > 1 and separator and mentioned_text.lstrip().startswith("/"):
+            text = mentioned_text.lstrip()
         if not text.startswith("/"):
             return self._ai.answer(text, self._snapshot_provider())
 

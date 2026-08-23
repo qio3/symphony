@@ -89,6 +89,13 @@ class TelegramCommandHandlerTest(unittest.TestCase):
         self.assertIn("Models: Luna 0 · Terra 1 · Sol 0", text)
         self.assertNotIn("tokens", text.casefold())
 
+    def test_leading_bot_mention_still_routes_slash_command(self):
+        text = self.handler.handle("@Contentzavod_PM_bot /status")
+
+        self.assertIn("Symphony ● Live", text)
+        self.assertEqual(self.ai.questions, [])
+        self.assertEqual(self.actions.calls, [])
+
     def test_work_includes_the_actual_routed_model(self):
         text = self.handler.handle("/work")
 
