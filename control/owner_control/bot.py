@@ -59,10 +59,12 @@ class TelegramBot:
     def poll_once(self, *, timeout: int = 15) -> None:
         offset = int(self._state_store.read().get("telegram_offset", 0))
         updates = self._api.get_updates(offset=offset, timeout=timeout)
-        next_offset = offset
         for update in updates:
             update_id = int(update.get("update_id", -1))
-            next_offset = max(next_offset, update_id + 1)
+            next_offset = max(offset, update_id + 1)
+            if next_offset != offset:
+                self._state_store.update({"telegram_offset": next_offset})
+                offset = next_offset
             if not update_is_allowed(
                 update,
                 owner_chat_id=self._owner_chat_id,
@@ -75,8 +77,6 @@ class TelegramBot:
             except Exception:
                 reply = "Owner Control is temporarily unavailable."
             self._api.send(reply)
-        if next_offset != offset:
-            self._state_store.update({"telegram_offset": next_offset})
 
 
 class NotificationPublisher:
@@ -95,7 +95,8 @@ class NotificationPublisher:
         state = self._state_store.read()
         previous = state.get("last_notification_snapshot")
         known = set(state.get("notification_fingerprints") or [])
-        events = self._detector.detect(previous, snapshot)
+        comparison_snapshot = self._preserve_attention_baseline(previous, snapshot)
+        events = self._detector.detect(previous, comparison_snapshot)
         expected_restart = float(state.get("expected_service_restart_until") or 0)
         suppress_service_stop = (
             expected_restart > time.time() and not bool((snapshot.get("service") or {}).get("live"))
@@ -108,15 +109,40 @@ class NotificationPublisher:
                 continue
             self._api.send(event["text"])
             known.add(fingerprint)
-        projection = self._notification_projection(snapshot)
+            self._state_store.update({"notification_fingerprints": sorted(known)[-500:]})
+        projection = self._notification_projection(comparison_snapshot)
         if suppress_service_stop and previous:
             projection["service"] = previous.get("service") or {"live": True}
-        self._state_store.update(
-            {
-                "last_notification_snapshot": projection,
-                "notification_fingerprints": sorted(known)[-500:],
-            }
-        )
+        state_update = {"notification_fingerprints": sorted(known)[-500:]}
+        if previous is not None or not self._attention_source_unavailable(snapshot):
+            state_update["last_notification_snapshot"] = projection
+        self._state_store.update(state_update)
+
+    @staticmethod
+    def _preserve_attention_baseline(
+        previous: dict[str, Any] | None,
+        snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        if previous is None or not NotificationPublisher._attention_source_unavailable(snapshot):
+            return snapshot
+        current_owner = snapshot.get("owner_view") or {}
+        previous_owner = previous.get("owner_view") or {}
+        return {
+            **snapshot,
+            "owner_view": {
+                **current_owner,
+                "blocked": previous_owner.get("blocked") or [],
+                "ready_for_acceptance": previous_owner.get("ready_for_acceptance") or [],
+            },
+        }
+
+    @staticmethod
+    def _attention_source_unavailable(snapshot: dict[str, Any]) -> bool:
+        unavailable_sources = {
+            str(failure.get("fingerprint") or "").partition(":")[0]
+            for failure in snapshot.get("failures") or []
+        }
+        return bool(unavailable_sources.intersection({"github", "test"}))
 
     @staticmethod
     def _notification_projection(snapshot: dict[str, Any]) -> dict[str, Any]:

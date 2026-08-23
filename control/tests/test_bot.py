@@ -22,6 +22,23 @@ class FakeTelegramApi:
         self.sent.append(text)
 
 
+class FailingTelegramApi(FakeTelegramApi):
+    def __init__(self, *, updates=None, fail_send_calls=None):
+        super().__init__(updates)
+        self.send_calls = 0
+        self.fail_send_calls = set(fail_send_calls or [])
+
+    def get_updates(self, *, offset, timeout):
+        self.offsets.append((offset, timeout))
+        return [update for update in self.updates if update["update_id"] >= offset]
+
+    def send(self, text):
+        self.send_calls += 1
+        if self.send_calls in self.fail_send_calls:
+            raise RuntimeError("simulated Telegram failure")
+        self.sent.append(text)
+
+
 class FakeHandler:
     def __init__(self):
         self.texts = []
@@ -67,6 +84,31 @@ class TelegramBotTest(unittest.TestCase):
         self.assertEqual(api.sent, ["reply:/status"])
         self.assertEqual(self.store.read()["telegram_offset"], 13)
 
+    def test_checkpoints_each_update_before_a_later_reply_failure(self):
+        api = FailingTelegramApi(
+            updates=[
+                {"update_id": 11, "message": {"chat": {"id": 10}, "from": {"id": 20}, "text": "/status"}},
+                {"update_id": 12, "message": {"chat": {"id": 10}, "from": {"id": 20}, "text": "/work"}},
+            ],
+            fail_send_calls={2},
+        )
+        handler = FakeHandler()
+        bot = TelegramBot(
+            api=api,
+            handler=handler,
+            state_store=self.store,
+            owner_chat_id=10,
+            owner_user_id=20,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "simulated Telegram failure"):
+            bot.poll_once(timeout=0)
+        bot.poll_once(timeout=0)
+
+        self.assertEqual(handler.texts, ["/status", "/work"])
+        self.assertEqual(api.sent, ["reply:/status"])
+        self.assertEqual(self.store.read()["telegram_offset"], 13)
+
 
 class NotificationPublisherTest(unittest.TestCase):
     def setUp(self):
@@ -109,6 +151,66 @@ class NotificationPublisherTest(unittest.TestCase):
 
         self.assertEqual(len(self.api.sent), 1)
         self.assertIn("unexpectedly stopped", self.api.sent[0])
+
+    def test_transient_source_failure_does_not_turn_recovery_into_new_attention_events(self):
+        healthy = base_snapshot()
+        healthy["owner_view"]["ready_for_acceptance"] = [
+            {"number": 401, "title": "Already ready", "test": {"sha": "abc12345"}}
+        ]
+        self.publisher.publish(healthy)
+
+        transient = base_snapshot()
+        transient["failures"] = [
+            {
+                "fingerprint": "github:RuntimeError:transient",
+                "message": "github snapshot unavailable",
+                "unrecoverable": False,
+            }
+        ]
+        self.publisher.publish(transient)
+        self.publisher.publish(healthy)
+
+        self.assertEqual(self.api.sent, [])
+
+    def test_initial_transient_source_failure_waits_for_a_healthy_attention_baseline(self):
+        transient = base_snapshot()
+        transient["failures"] = [
+            {
+                "fingerprint": "github:RuntimeError:transient",
+                "message": "github snapshot unavailable",
+                "unrecoverable": False,
+            }
+        ]
+        healthy = base_snapshot()
+        healthy["owner_view"]["ready_for_acceptance"] = [
+            {"number": 401, "title": "Already ready", "test": {"sha": "abc12345"}}
+        ]
+
+        self.publisher.publish(transient)
+        self.publisher.publish(healthy)
+
+        self.assertEqual(self.api.sent, [])
+
+    def test_checkpoints_successful_notification_before_a_later_send_failure(self):
+        api = FailingTelegramApi(fail_send_calls={2})
+        publisher = NotificationPublisher(
+            api=api,
+            state_store=self.store,
+            detector=NotificationDetector(),
+        )
+        publisher.publish(base_snapshot())
+        changed = base_snapshot()
+        changed["owner_view"]["ready_for_acceptance"] = [
+            {"number": 401, "title": "First", "test": {"sha": "abc12345"}},
+            {"number": 402, "title": "Second", "test": {"sha": "abc12345"}},
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "simulated Telegram failure"):
+            publisher.publish(changed)
+        publisher.publish(changed)
+
+        self.assertEqual(sum("#401" in message for message in api.sent), 1)
+        self.assertEqual(sum("#402" in message for message in api.sent), 1)
 
 
 if __name__ == "__main__":
