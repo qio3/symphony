@@ -227,6 +227,72 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule ModelRouting do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    @default_models %{
+      "luna" => "gpt-5.6-luna",
+      "terra" => "gpt-5.6-terra",
+      "sol" => "gpt-5.6-sol"
+    }
+    @default_classifier_command "codex --disable shell_tool --disable unified_exec --disable code_mode_host --disable browser_use --disable in_app_browser --disable computer_use --disable apps --disable plugins --disable multi_agent --disable workspace_dependencies --disable skill_search --disable view_image --disable image_generation --disable tool_suggest app-server"
+
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      field(:classifier_model, :string, default: "gpt-5.6-luna")
+      field(:classifier_command, :string, default: @default_classifier_command)
+      field(:confidence_threshold, :float, default: 0.65)
+      field(:timeout_ms, :integer, default: 90_000)
+      field(:models, :map, default: @default_models)
+      field(:force_sol_labels, {:array, :string}, default: [])
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [
+          :enabled,
+          :classifier_model,
+          :classifier_command,
+          :confidence_threshold,
+          :timeout_ms,
+          :models,
+          :force_sol_labels
+        ],
+        empty_values: []
+      )
+      |> validate_required([:classifier_model, :classifier_command, :models])
+      |> validate_number(:confidence_threshold, greater_than_or_equal_to: 0.0, less_than_or_equal_to: 1.0)
+      |> validate_number(:timeout_ms, greater_than: 0)
+      |> validate_change(:models, &validate_models/2)
+      |> update_change(:force_sol_labels, fn labels ->
+        labels
+        |> Enum.map(&(String.trim(&1) |> String.downcase()))
+        |> Enum.reject(&(&1 == ""))
+        |> Enum.uniq()
+      end)
+    end
+
+    defp validate_models(:models, models) when is_map(models) do
+      invalid =
+        Enum.reject(["luna", "terra", "sol"], fn tier ->
+          case Map.get(models, tier) do
+            model when is_binary(model) -> String.trim(model) != ""
+            _ -> false
+          end
+        end)
+
+      if invalid == [], do: [], else: [models: "must define non-blank luna, terra, and sol model ids"]
+    end
+
+    defp validate_models(:models, _models), do: [models: "must be a map"]
+  end
+
   defmodule Hooks do
     @moduledoc false
     use Ecto.Schema
@@ -296,6 +362,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:model_routing, ModelRouting, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
@@ -390,6 +457,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:worker, with: &Worker.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
+    |> cast_embed(:model_routing, with: &ModelRouting.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)

@@ -277,7 +277,14 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "last_message" => "rendered",
                  "started_at" => state_payload["running"] |> List.first() |> Map.fetch!("started_at"),
                  "last_event_at" => nil,
-                 "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
+                 "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12},
+                 "model" => %{
+                   "selected_tier" => "terra",
+                   "actual_model" => "gpt-5.6-terra",
+                   "routing_reason" => "classifier:multi_file_feature",
+                   "escalated_from" => nil,
+                   "escalation_history" => []
+                 }
                }
              ],
              "retrying" => [
@@ -289,7 +296,16 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "due_at" => state_payload["retrying"] |> List.first() |> Map.fetch!("due_at"),
                  "error" => "boom",
                  "worker_host" => nil,
-                 "workspace_path" => nil
+                 "workspace_path" => nil,
+                 "model" => %{
+                   "selected_tier" => "terra",
+                   "actual_model" => "gpt-5.6-terra",
+                   "routing_reason" => "escalation:max_turns_exhausted",
+                   "escalated_from" => "luna",
+                   "escalation_history" => [
+                     %{"from" => "luna", "to" => "terra", "reason" => "max_turns_exhausted"}
+                   ]
+                 }
                }
              ],
              "blocked" => [
@@ -305,7 +321,14 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "blocked_at" => state_payload["blocked"] |> List.first() |> Map.fetch!("blocked_at"),
                  "last_event" => "turn_input_required",
                  "last_message" => "turn blocked: waiting for user input",
-                 "last_event_at" => state_payload["blocked"] |> List.first() |> Map.fetch!("last_event_at")
+                 "last_event_at" => state_payload["blocked"] |> List.first() |> Map.fetch!("last_event_at"),
+                 "model" => %{
+                   "selected_tier" => "sol",
+                   "actual_model" => "gpt-5.6-sol",
+                   "routing_reason" => "label_override:model:sol",
+                   "escalated_from" => nil,
+                   "escalation_history" => []
+                 }
                }
              ],
              "codex_totals" => %{
@@ -313,6 +336,11 @@ defmodule SymphonyElixir.ExtensionsTest do
                "output_tokens" => 8,
                "total_tokens" => 12,
                "seconds_running" => 42.5
+             },
+             "models" => %{
+               "luna" => %{"active" => 0, "completed" => 4},
+               "terra" => %{"active" => 1, "completed" => 2},
+               "sol" => %{"active" => 0, "completed" => 1}
              },
              "rate_limits" => %{"primary" => %{"remaining" => 11}}
            }
@@ -339,7 +367,14 @@ defmodule SymphonyElixir.ExtensionsTest do
                "last_event" => "notification",
                "last_message" => "rendered",
                "last_event_at" => nil,
-               "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
+               "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12},
+               "model" => %{
+                 "selected_tier" => "terra",
+                 "actual_model" => "gpt-5.6-terra",
+                 "routing_reason" => "classifier:multi_file_feature",
+                 "escalated_from" => nil,
+                 "escalation_history" => []
+               }
              },
              "retry" => nil,
              "blocked" => nil,
@@ -669,6 +704,11 @@ defmodule SymphonyElixir.ExtensionsTest do
           codex_input_tokens: 4,
           codex_output_tokens: 8,
           codex_total_tokens: 12,
+          selected_model_tier: :terra,
+          actual_model: "gpt-5.6-terra",
+          routing_reason: "classifier:multi_file_feature",
+          escalated_from: nil,
+          escalation_history: [],
           started_at: DateTime.utc_now()
         }
       ],
@@ -679,7 +719,12 @@ defmodule SymphonyElixir.ExtensionsTest do
           issue_url: "https://example.org/issues/MT-RETRY",
           attempt: 2,
           due_in_ms: 2_000,
-          error: "boom"
+          error: "boom",
+          selected_model_tier: :terra,
+          actual_model: "gpt-5.6-terra",
+          routing_reason: "escalation:max_turns_exhausted",
+          escalated_from: :luna,
+          escalation_history: [%{from: :luna, to: :terra, reason: "max_turns_exhausted"}]
         }
       ],
       blocked: [
@@ -699,10 +744,20 @@ defmodule SymphonyElixir.ExtensionsTest do
             message: %{"method" => "turn/input_required"},
             timestamp: DateTime.utc_now()
           },
-          last_codex_timestamp: DateTime.utc_now()
+          last_codex_timestamp: DateTime.utc_now(),
+          selected_model_tier: :sol,
+          actual_model: "gpt-5.6-sol",
+          routing_reason: "label_override:model:sol",
+          escalated_from: nil,
+          escalation_history: []
         }
       ],
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
+      model_counts: %{
+        luna: %{active: 0, completed: 4},
+        terra: %{active: 1, completed: 2},
+        sol: %{active: 0, completed: 1}
+      },
       rate_limits: %{"primary" => %{"remaining" => 11}}
     }
   end

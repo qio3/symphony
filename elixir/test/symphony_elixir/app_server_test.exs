@@ -1,6 +1,151 @@
 defmodule SymphonyElixir.AppServerTest do
   use SymphonyElixir.TestSupport
 
+  test "worker thread receives the selected model and never inherits OPENAI_API_KEY" do
+    test_root =
+      Path.join(System.tmp_dir!(), "symphony-elixir-app-server-model-#{System.unique_integer([:positive])}")
+
+    previous_api_key = System.get_env("OPENAI_API_KEY")
+    previous_trace = System.get_env("SYMPHONY_MODEL_TRACE")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "GH-1")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "trace.jsonl")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      if [ "${OPENAI_API_KEY+x}" = "x" ]; then
+        printf '%s\n' 'OPENAI_API_KEY=INHERITED' >> "$SYMPHONY_MODEL_TRACE"
+      else
+        printf '%s\n' 'OPENAI_API_KEY=UNSET' >> "$SYMPHONY_MODEL_TRACE"
+      fi
+      count=0
+      while IFS= read -r line; do
+        printf '%s\n' "$line" >> "$SYMPHONY_MODEL_TRACE"
+        count=$((count + 1))
+        case "$count" in
+          1) printf '%s\n' '{"id":1,"result":{}}' ;;
+          2) ;;
+          3) printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-model"}}}' ;;
+          4)
+            printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-model"}}}'
+            printf '%s\n' '{"method":"turn/completed"}'
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      System.put_env("OPENAI_API_KEY", "forbidden")
+      System.put_env("SYMPHONY_MODEL_TRACE", trace_file)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{id: "1", identifier: "GH-1", title: "Model contract", state: "In Progress"}
+
+      assert {:ok, _result} =
+               AppServer.run(workspace, "work", issue, model: "gpt-5.6-terra")
+
+      [environment | messages] = File.read!(trace_file) |> String.split("\n", trim: true)
+      assert environment == "OPENAI_API_KEY=UNSET"
+
+      thread_start =
+        messages
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["method"] == "thread/start"))
+
+      assert thread_start["params"]["model"] == "gpt-5.6-terra"
+    after
+      restore_env("OPENAI_API_KEY", previous_api_key)
+      restore_env("SYMPHONY_MODEL_TRACE", previous_trace)
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "classifier app-server command disables repository tools and constrains output" do
+    test_root =
+      Path.join(System.tmp_dir!(), "symphony-elixir-classifier-tools-#{System.unique_integer([:positive])}")
+
+    previous_trace = System.get_env("SYMPHONY_CLASSIFIER_TRACE")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, ".model-classifier")
+      codex_binary = Path.join(test_root, "fake-classifier-codex")
+      trace_file = Path.join(test_root, "trace.jsonl")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      printf 'ARGS=%s\n' "$*" >> "$SYMPHONY_CLASSIFIER_TRACE"
+      count=0
+      while IFS= read -r line; do
+        printf '%s\n' "$line" >> "$SYMPHONY_CLASSIFIER_TRACE"
+        count=$((count + 1))
+        case "$count" in
+          1) printf '%s\n' '{"id":1,"result":{}}' ;;
+          2) ;;
+          3) printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-classifier"}}}' ;;
+          4)
+            printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-classifier"}}}'
+            printf '%s\n' '{"method":"turn/completed"}'
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMPHONY_CLASSIFIER_TRACE", trace_file)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      issue = %Issue{id: "router", identifier: "ROUTER", title: "classify", state: "In Progress"}
+      output_schema = %{"type" => "object", "required" => ["tier"]}
+
+      command =
+        "#{codex_binary} --disable shell_tool --disable unified_exec --disable code_mode_host app-server"
+
+      assert {:ok, _result} =
+               AppServer.run(workspace, "metadata only", issue,
+                 command: command,
+                 dynamic_tools: false,
+                 approval_policy: "never",
+                 thread_sandbox: "read-only",
+                 turn_sandbox_policy: %{"type" => "readOnly", "networkAccess" => false},
+                 output_schema: output_schema
+               )
+
+      [args | messages] = File.read!(trace_file) |> String.split("\n", trim: true)
+      assert args =~ "--disable shell_tool"
+      assert args =~ "--disable unified_exec"
+      assert args =~ "--disable code_mode_host"
+
+      decoded = Enum.map(messages, &Jason.decode!/1)
+      thread_start = Enum.find(decoded, &(&1["method"] == "thread/start"))
+      turn_start = Enum.find(decoded, &(&1["method"] == "turn/start"))
+
+      assert thread_start["params"]["dynamicTools"] == []
+      assert thread_start["params"]["sandbox"] == "read-only"
+
+      assert turn_start["params"]["sandboxPolicy"] == %{
+               "type" => "readOnly",
+               "networkAccess" => false
+             }
+
+      assert turn_start["params"]["outputSchema"] == output_schema
+    after
+      restore_env("SYMPHONY_CLASSIFIER_TRACE", previous_trace)
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server rejects the workspace root and paths outside workspace root" do
     test_root =
       Path.join(

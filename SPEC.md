@@ -490,6 +490,26 @@ fields locally if they want stricter startup checks.
   - Default: `300000` (5 minutes)
   - If `<= 0`, stall detection is disabled.
 
+#### 5.3.7 `model_routing` (object)
+
+Fields:
+
+- `enabled` (boolean, default `false`)
+- `classifier_model` (string, default `gpt-5.6-luna`)
+- `classifier_command` (non-empty string launching an app-server with repository and external tools disabled)
+- `confidence_threshold` (number between `0` and `1`, default `0.65`)
+- `timeout_ms` (positive integer, default `90000`)
+- `models` (map containing non-empty `luna`, `terra`, and `sol` model IDs)
+- `force_sol_labels` (list of exact issue labels, default empty)
+
+When enabled, `model:luna`, `model:terra`, and `model:sol` labels MUST override automatic routing.
+Otherwise the classifier receives issue metadata only and MUST NOT inspect the repository. A result
+below the confidence threshold MUST select Terra. The selected model ID MUST be passed explicitly
+to app-server. Exhaustion MAY escalate one tier per attempt from Luna to Terra to Sol; ordinary CI,
+network, or owner-blocked outcomes MUST NOT escalate. Two consecutive identical non-transient worker
+failures MAY count as an unresolved root cause and escalate one tier. App-server child environments
+MUST NOT inherit `OPENAI_API_KEY`.
+
 ### 5.4 Prompt Template Contract
 
 The Markdown body of `WORKFLOW.md` is the per-issue prompt template.
@@ -1402,6 +1422,9 @@ SHOULD return:
   - `total_tokens`
   - `seconds_running` (aggregate runtime seconds as of snapshot time, including active sessions)
 - `rate_limits` (latest coding-agent rate limit payload, if available)
+- `model_counts`, containing active and successfully completed worker counts for Luna, Terra, and Sol
+- model-routed running, retry, and blocked rows SHOULD include selected tier, actual model ID,
+  routing reason, and escalation history
 
 RECOMMENDED snapshot error modes:
 

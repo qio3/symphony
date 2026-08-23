@@ -1033,11 +1033,23 @@ defmodule SymphonyElixir.CoreTest do
 
     initial_state = :sys.get_state(pid)
 
+    route = %{
+      selected_tier: :luna,
+      actual_model: "gpt-5.6-luna",
+      routing_reason: "classifier:bounded_local_fix",
+      confidence: 0.9,
+      escalated_from: nil,
+      escalation_history: [],
+      models: %{"luna" => "gpt-5.6-luna", "terra" => "gpt-5.6-terra", "sol" => "gpt-5.6-sol"}
+    }
+
     running_entry = %{
       pid: self(),
       ref: ref,
       identifier: "MT-558",
       issue: %Issue{id: issue_id, identifier: "MT-558", state: "In Progress"},
+      model_route: route,
+      selected_model_tier: :luna,
       started_at: DateTime.utc_now()
     }
 
@@ -1055,8 +1067,61 @@ defmodule SymphonyElixir.CoreTest do
     refute Map.has_key?(state.running, issue_id)
     assert MapSet.member?(state.completed, issue_id)
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
+    assert state.retry_attempts[issue_id].model_route == route
+    assert state.model_completed_counts.luna == 1
     assert is_integer(due_at_ms)
     assert_due_in_range(due_at_ms, 500, 1_100)
+  end
+
+  test "reasoning exhaustion schedules the next attempt one model tier higher" do
+    issue_id = "issue-model-exhaustion"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :ModelEscalationOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    route = %{
+      selected_tier: :luna,
+      actual_model: "gpt-5.6-luna",
+      routing_reason: "classifier:bounded_local_fix",
+      confidence: 0.9,
+      escalated_from: nil,
+      escalation_history: [],
+      models: %{
+        "luna" => "gpt-5.6-luna",
+        "terra" => "gpt-5.6-terra",
+        "sol" => "gpt-5.6-sol"
+      }
+    }
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "GH-12",
+      issue: %Issue{id: issue_id, identifier: "GH-12", state: "In Progress"},
+      model_route: route,
+      selected_model_tier: :luna,
+      actual_model: "gpt-5.6-luna",
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      %{initial_state | running: %{issue_id => running_entry}, claimed: MapSet.new([issue_id])}
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), {:model_exhausted, route, :max_turns_exhausted}})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    assert state.retry_attempts[issue_id].model_route.selected_tier == :terra
+    assert state.retry_attempts[issue_id].model_route.actual_model == "gpt-5.6-terra"
+    assert state.retry_attempts[issue_id].escalation_reason == :max_turns_exhausted
+    assert state.model_completed_counts.luna == 0
   end
 
   test "abnormal worker exit increments retry attempt progressively" do
@@ -1969,7 +2034,8 @@ defmodule SymphonyElixir.CoreTest do
         workspace_root: workspace_root,
         hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
         codex_command: "#{codex_binary} app-server",
-        max_turns: 2
+        max_turns: 2,
+        model_routing_enabled: true
       )
 
       state_fetcher = fn [_issue_id] ->
@@ -1993,10 +2059,14 @@ defmodule SymphonyElixir.CoreTest do
         description: "Still active",
         state: "In Progress",
         url: "https://example.org/issues/MT-248",
-        labels: []
+        labels: ["model:luna"]
       }
 
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      assert {:model_exhausted, route, :max_turns_exhausted} =
+               AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+
+      assert route.selected_tier == :luna
+      assert route.actual_model == "gpt-5.6-luna"
 
       trace = File.read!(trace_file)
       assert length(String.split(trace, "RUN", trim: true)) == 1

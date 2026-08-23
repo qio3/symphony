@@ -22,6 +22,7 @@ defmodule SymphonyElixirWeb.Presenter do
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
           codex_totals: snapshot.codex_totals,
+          models: Map.get(snapshot, :model_counts, empty_model_counts()),
           rate_limits: snapshot.rate_limits
         }
 
@@ -117,7 +118,8 @@ defmodule SymphonyElixirWeb.Presenter do
         input_tokens: entry.codex_input_tokens,
         output_tokens: entry.codex_output_tokens,
         total_tokens: entry.codex_total_tokens
-      }
+      },
+      model: model_payload(entry)
     }
   end
 
@@ -130,7 +132,8 @@ defmodule SymphonyElixirWeb.Presenter do
       due_at: due_at_iso8601(entry.due_in_ms),
       error: entry.error,
       worker_host: Map.get(entry, :worker_host),
-      workspace_path: Map.get(entry, :workspace_path)
+      workspace_path: Map.get(entry, :workspace_path),
+      model: model_payload(entry)
     }
   end
 
@@ -147,7 +150,8 @@ defmodule SymphonyElixirWeb.Presenter do
       blocked_at: iso8601(entry.blocked_at),
       last_event: entry.last_codex_event,
       last_message: summarize_message(entry.last_codex_message),
-      last_event_at: iso8601(entry.last_codex_timestamp)
+      last_event_at: iso8601(entry.last_codex_timestamp),
+      model: model_payload(entry)
     }
   end
 
@@ -166,7 +170,8 @@ defmodule SymphonyElixirWeb.Presenter do
         input_tokens: running.codex_input_tokens,
         output_tokens: running.codex_output_tokens,
         total_tokens: running.codex_total_tokens
-      }
+      },
+      model: model_payload(running)
     }
   end
 
@@ -176,7 +181,8 @@ defmodule SymphonyElixirWeb.Presenter do
       due_at: due_at_iso8601(retry.due_in_ms),
       error: retry.error,
       worker_host: Map.get(retry, :worker_host),
-      workspace_path: Map.get(retry, :workspace_path)
+      workspace_path: Map.get(retry, :workspace_path),
+      model: model_payload(retry)
     }
   end
 
@@ -190,7 +196,8 @@ defmodule SymphonyElixirWeb.Presenter do
       blocked_at: iso8601(blocked.blocked_at),
       last_event: blocked.last_codex_event,
       last_message: summarize_message(blocked.last_codex_message),
-      last_event_at: iso8601(blocked.last_codex_timestamp)
+      last_event_at: iso8601(blocked.last_codex_timestamp),
+      model: model_payload(blocked)
     }
   end
 
@@ -222,6 +229,24 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp summarize_message(nil), do: nil
   defp summarize_message(message), do: StatusDashboard.humanize_codex_message(message)
+
+  defp model_payload(entry) do
+    %{
+      selected_tier: Map.get(entry, :selected_model_tier),
+      actual_model: Map.get(entry, :actual_model),
+      routing_reason: Map.get(entry, :routing_reason),
+      escalated_from: Map.get(entry, :escalated_from),
+      escalation_history: Map.get(entry, :escalation_history, [])
+    }
+  end
+
+  defp empty_model_counts do
+    %{
+      luna: %{active: 0, completed: 0},
+      terra: %{active: 0, completed: 0},
+      sol: %{active: 0, completed: 0}
+    }
+  end
 
   defp due_at_iso8601(due_in_ms) when is_integer(due_in_ms) do
     DateTime.utc_now()
