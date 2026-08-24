@@ -118,6 +118,49 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "account rate-limit probe reads subscription windows without starting a thread or turn" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-elixir-rate-limit-probe-#{System.unique_integer([:positive])}")
+    workspace_root = Path.join(test_root, "workspaces")
+    codex_binary = Path.join(test_root, "fake-codex")
+    trace_file = Path.join(test_root, "trace.jsonl")
+
+    try do
+      File.mkdir_p!(workspace_root)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r line; do
+        printf '%s\\n' "$line" >> "$SYMPHONY_RATE_LIMIT_TRACE"
+        count=$((count + 1))
+        case "$count" in
+          1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+          2) ;;
+          3) printf '%s\\n' '{"id":5,"result":{"rateLimits":{"primary":{"usedPercent":17,"windowDurationMins":300},"secondary":{"usedPercent":42,"windowDurationMins":10080}}}}' ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMPHONY_RATE_LIMIT_TRACE", trace_file)
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root, codex_command: "#{codex_binary} app-server")
+
+      assert {:ok,
+              %{
+                "rateLimits" => %{
+                  "primary" => %{"usedPercent" => 17, "windowDurationMins" => 300},
+                  "secondary" => %{"usedPercent" => 42, "windowDurationMins" => 10_080}
+                }
+              }} = AppServer.read_rate_limits()
+
+      methods = trace_file |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!(&1)["method"])
+      assert methods == ["initialize", "initialized", "account/rateLimits/read"]
+    after
+      System.delete_env("SYMPHONY_RATE_LIMIT_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
   test "runtime account observability failures do not prevent a worker session" do
     test_root =
       Path.join(

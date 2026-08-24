@@ -229,38 +229,50 @@ function renderRunning(snapshot) {
 function renderReady(snapshot) {
   clear(targets.ready);
   const items = snapshot.owner_view?.ready_for_acceptance || [];
+  document.getElementById("ready-title").textContent = items.length ? `Ready for Acceptance · ${items.length}` : "Ready for Acceptance";
   if (!items.length) return targets.ready.append(emptyState("Nothing waiting for acceptance", "Completed delivery evidence will appear here."));
   const list = el("div", "issue-list");
   const githubFresh = snapshot.sources?.github?.status === "fresh";
   const testFresh = snapshot.sources?.test?.status === "fresh";
-  for (const item of items) {
-    const card = issueCard(item, "ready");
-    card.append(evidenceRow(item), usageRow(item.usage));
-    const actions = el("div", "row-actions");
-    const itemTest = item.test || snapshot.test || {};
-    const itemTestSynced = itemTest.synced === true;
-    const globalTestSynced = snapshot.test?.synced === true;
-    const acceptDisabled = !githubFresh || !testFresh || !globalTestSynced || !itemTestSynced;
-    const accept = actionButton("Accept", "accept", "primary", acceptDisabled, item.number);
-    const rework = actionButton("Rework", "rework", "secondary", !githubFresh, item.number);
-    actions.append(
-      externalLink(itemTest.url, "Open TEST", "button secondary"),
-      accept,
-      rework,
-    );
-    card.append(actions);
-    if (!githubFresh) {
-      card.append(actionHint("Actions are unavailable until GitHub state is fresh."));
-    } else if (!testFresh) {
-      card.append(actionHint("Acceptance is unavailable until TEST evidence is fresh."));
-    } else if (!globalTestSynced) {
-      card.append(actionHint("Acceptance is unavailable: TEST is not on the canonical SHA."));
-    } else if (!itemTestSynced) {
-      card.append(actionHint("Acceptance is unavailable: this Issue's TEST evidence is not synced."));
-    }
-    list.append(card);
+  const previewCount = 5;
+  for (const item of items.slice(0, previewCount)) list.append(readyCard(item, snapshot, githubFresh, testFresh));
+  if (items.length > previewCount) {
+    const more = el("details", "ready-more");
+    more.append(el("summary", "", `Show ${items.length - previewCount} more`));
+    const remaining = el("div", "issue-list ready-more-list");
+    for (const item of items.slice(previewCount)) remaining.append(readyCard(item, snapshot, githubFresh, testFresh));
+    more.append(remaining);
+    list.append(more);
   }
   targets.ready.append(list);
+}
+
+function readyCard(item, snapshot, githubFresh, testFresh) {
+  const card = issueCard(item, "ready");
+  card.append(evidenceRow(item), usageRow(item.usage));
+  const actions = el("div", "row-actions");
+  const itemTest = item.test || snapshot.test || {};
+  const itemTestSynced = itemTest.synced === true;
+  const globalTestSynced = snapshot.test?.synced === true;
+  const acceptDisabled = !githubFresh || !testFresh || !globalTestSynced || !itemTestSynced;
+  const accept = actionButton("Accept", "accept", "primary", acceptDisabled, item.number);
+  const rework = actionButton("Rework", "rework", "secondary", !githubFresh, item.number);
+  actions.append(
+    externalLink(itemTest.url, "Open TEST", "button secondary"),
+    accept,
+    rework,
+  );
+  card.append(actions);
+  if (!githubFresh) {
+    card.append(actionHint("Actions are unavailable until GitHub state is fresh."));
+  } else if (!testFresh) {
+    card.append(actionHint("Acceptance is unavailable until TEST evidence is fresh."));
+  } else if (!globalTestSynced) {
+    card.append(actionHint("Acceptance is unavailable: TEST is not on the canonical SHA."));
+  } else if (!itemTestSynced) {
+    card.append(actionHint("Acceptance is unavailable: this Issue's TEST evidence is not synced."));
+  }
+  return card;
 }
 
 function renderBacklog(snapshot) {
@@ -627,6 +639,8 @@ function captureViewState() {
   return {
     openUsage,
     serviceAdvancedOpen: Boolean(document.querySelector("details.service-advanced[open]")),
+    readyMoreOpen: Boolean(document.querySelector("details.ready-more[open]")),
+    backlogMoreOpen: Boolean(document.querySelector("details.backlog-more[open]")),
     focus,
   };
 }
@@ -639,6 +653,10 @@ function restoreViewState(state) {
   }
   const advanced = document.querySelector("details.service-advanced");
   if (advanced) advanced.open = state.serviceAdvancedOpen;
+  const readyMore = document.querySelector("details.ready-more");
+  if (readyMore) readyMore.open = state.readyMoreOpen;
+  const backlogMore = document.querySelector("details.backlog-more");
+  if (backlogMore) backlogMore.open = state.backlogMoreOpen;
   if (state.focus?.action) {
     const issueSelector = state.focus.issue
       ? `[data-issue="${CSS.escape(state.focus.issue)}"]`

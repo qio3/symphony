@@ -32,6 +32,54 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert GenServer.call(pid, :snapshot).max_concurrent_agents == Config.settings!().agent.max_concurrent_agents
   end
 
+  test "startup account probe publishes exact rate-limit windows without dispatching work" do
+    parent = self()
+    orchestrator_name = Module.concat(__MODULE__, :AccountRateLimitProbeOrchestrator)
+
+    {:ok, pid} =
+      Orchestrator.start_link(
+        name: orchestrator_name,
+        account_rate_limits_reader: fn ->
+          send(parent, :account_rate_limits_probe_called)
+
+          {:ok,
+           %{
+             "rateLimits" => %{
+               "primary" => %{"usedPercent" => 17, "windowDurationMins" => 300},
+               "secondary" => %{"usedPercent" => 42, "windowDurationMins" => 10_080}
+             }
+           }}
+        end
+      )
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    assert_receive :account_rate_limits_probe_called, 1_000
+
+    wait_for_snapshot(
+      pid,
+      fn snapshot ->
+        case snapshot.rate_limits do
+          %{
+            "primary" => %{"windowDurationMins" => 300},
+            "secondary" => %{"windowDurationMins" => 10_080}
+          } ->
+            true
+
+          _ ->
+            false
+        end
+      end,
+      1_000
+    )
+
+    send(pid, {:account_rate_limits_result, {:error, :unavailable}})
+    assert GenServer.call(pid, :snapshot).rate_limits["secondary"]["usedPercent"] == 42
+    assert GenServer.call(pid, :snapshot).running == []
+  end
+
   test "orchestrator snapshot reflects last codex update and session id" do
     issue_id = "issue-snapshot"
 

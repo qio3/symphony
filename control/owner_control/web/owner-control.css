@@ -134,9 +134,10 @@ h3 { font-size: 15px; line-height: 1.35; letter-spacing: -.01em; }
 .diagnostics pre { overflow: auto; max-height: 340px; padding: 14px; background: #17211b; color: #d7e3da; border-radius: 12px; font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
 .action-error { margin-top: 10px; padding: 10px 12px; border: 1px solid #e7bebe; border-radius: 10px; background: #fff0f0; color: #922e2e; font-size: 12px; }
 .action-hint { margin-top: 9px; color: #765818; font-size: 12px; line-height: 1.4; }
-.backlog-more { border-top: 1px solid #e4e8e4; }
-.backlog-more > summary { padding: 13px 2px; color: #466050; cursor: pointer; font-size: 13px; font-weight: 740; }
+.backlog-more, .ready-more { border-top: 1px solid #e4e8e4; }
+.backlog-more > summary, .ready-more > summary { padding: 13px 2px; color: #466050; cursor: pointer; font-size: 13px; font-weight: 740; }
 .backlog-more-list { padding-left: 12px; border-left: 2px solid #e3e9e4; }
+.ready-more-list { margin-top: 4px; }
 .toast-region { position: fixed; right: 18px; bottom: 18px; display: grid; gap: 8px; z-index: 20; }
 .toast { max-width: min(420px, calc(100vw - 36px)); padding: 12px 15px; border-radius: 12px; background: #17211b; color: #fff; box-shadow: 0 12px 40px rgba(0,0,0,.2); }
 .toast.error { background: #902f2f; }

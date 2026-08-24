@@ -40,6 +40,37 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
+  @doc """
+  Reads the account rate-limit snapshot without creating a Codex thread or turn.
+  """
+  @spec read_rate_limits() :: {:ok, map()} | {:error, term()}
+  def read_rate_limits do
+    workspace = Config.local_workspace_root()
+    dynamic_tool_binding = dynamic_tool_binding(dynamic_tools: false)
+    command = Config.settings!().codex.command
+
+    with {:ok, canonical_workspace} <- PathSafety.canonicalize(workspace),
+         {:ok, port} <- start_port(canonical_workspace, nil, dynamic_tool_binding, command) do
+      try do
+        with :ok <- send_initialize(port),
+             {:ok, rate_limits} <-
+               request_runtime(
+                 port,
+                 @rate_limits_read_id,
+                 "account/rateLimits/read",
+                 %{},
+                 &default_on_message/1
+               ) do
+          {:ok, rate_limits}
+        end
+      after
+        stop_port(port)
+      end
+    end
+  rescue
+    exception -> {:error, {:account_rate_limits_failed, Exception.message(exception)}}
+  end
+
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)

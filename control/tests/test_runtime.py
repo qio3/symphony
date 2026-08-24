@@ -358,6 +358,8 @@ class DockerComposeSupervisorTest(unittest.TestCase):
         )
         self.assertTrue(all(call[1].get("shell") is False for call in calls))
         self.assertEqual(lines, ["line one", "line two"])
+        self.assertTrue(all(call[1].get("encoding") == "utf-8" for call in calls))
+        self.assertTrue(all(call[1].get("errors") == "replace" for call in calls))
 
 
 if __name__ == "__main__":

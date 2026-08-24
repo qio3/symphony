@@ -87,6 +87,22 @@ class ControlHttpServerTest(unittest.TestCase):
             css,
             r"\.service-panel \.section-heading\s*\{[^}]*z-index:\s*2",
         )
+        self.assertRegex(
+            css,
+            r"\.service-panel \.service-facts\s*\{[^}]*z-index:\s*1",
+        )
+
+    def test_ready_queue_has_a_bounded_expandable_preview(self):
+        with self.request("/assets/owner-control.js", authorized=False) as response:
+            javascript = response.read().decode("utf-8")
+
+        ready_renderer = javascript.split("function renderReady", 1)[1].split(
+            "function renderBacklog", 1
+        )[0]
+        self.assertIn("const previewCount = 5", ready_renderer)
+        self.assertIn("items.slice(0, previewCount)", ready_renderer)
+        self.assertIn("Show ${items.length - previewCount} more", ready_renderer)
+        self.assertIn("readyMoreOpen", javascript)
 
     def test_browser_snapshot_and_actions_require_same_origin_csrf(self):
         _html, csrf, _headers = self.browser_session()

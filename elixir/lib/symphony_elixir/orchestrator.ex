@@ -8,6 +8,7 @@ defmodule SymphonyElixir.Orchestrator do
   import Bitwise, only: [<<<: 2]
 
   alias SymphonyElixir.{AgentRunner, Config, ModelRouter, StatusDashboard, Tracker, UsageLedger, Workspace}
+  alias SymphonyElixir.Codex.AppServer
   alias SymphonyElixir.OwnerControl.Client, as: OwnerControlClient
   alias SymphonyElixir.Tracker.Issue
 
@@ -15,6 +16,7 @@ defmodule SymphonyElixir.Orchestrator do
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
+  @account_rate_limit_refresh_ms 300_000
   @empty_codex_totals %{
     input_tokens: 0,
     output_tokens: 0,
@@ -34,6 +36,8 @@ defmodule SymphonyElixir.Orchestrator do
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
+      account_rate_limits_reader: &AppServer.read_rate_limits/0,
+      account_rate_limit_refresh_in_flight: false,
       task_supervisor: SymphonyElixir.TaskSupervisor,
       running: %{},
       completed: MapSet.new(),
@@ -70,6 +74,9 @@ defmodule SymphonyElixir.Orchestrator do
             poll_check_in_progress: false,
             tick_timer_ref: nil,
             tick_token: nil,
+            account_rate_limits_reader:
+              Keyword.get(opts, :account_rate_limits_reader, &AppServer.read_rate_limits/0),
+            account_rate_limit_refresh_in_flight: false,
             task_supervisor: Keyword.get(opts, :task_supervisor, SymphonyElixir.TaskSupervisor),
             codex_totals: @empty_codex_totals,
             codex_rate_limits: nil,
@@ -78,6 +85,7 @@ defmodule SymphonyElixir.Orchestrator do
 
           run_terminal_workspace_cleanup()
           state = schedule_tick(state, 0)
+          send(self(), :refresh_account_rate_limits)
 
           {:ok, state}
         end
@@ -131,6 +139,35 @@ defmodule SymphonyElixir.Orchestrator do
 
     notify_dashboard()
     {:noreply, state}
+  end
+
+  def handle_info(:refresh_account_rate_limits, state) do
+    Process.send_after(self(), :refresh_account_rate_limits, @account_rate_limit_refresh_ms)
+    {:noreply, start_account_rate_limit_refresh(state)}
+  end
+
+  def handle_info({:account_rate_limits_result, {:ok, rate_limits}}, state) when is_map(rate_limits) do
+    state =
+      state
+      |> Map.put(:account_rate_limit_refresh_in_flight, false)
+      |> apply_codex_rate_limits(%{
+        event: :rate_limits_snapshot,
+        payload: rate_limits,
+        timestamp: DateTime.utc_now()
+      })
+
+    notify_dashboard()
+    {:noreply, state}
+  end
+
+  def handle_info({:account_rate_limits_result, {:error, reason}}, state) do
+    Logger.debug("Codex account rate-limit refresh unavailable: #{inspect(reason)}")
+    {:noreply, %{state | account_rate_limit_refresh_in_flight: false}}
+  end
+
+  def handle_info({:account_rate_limits_result, unexpected}, state) do
+    Logger.warning("Codex account rate-limit refresh returned an invalid result: #{inspect(unexpected)}")
+    {:noreply, %{state | account_rate_limit_refresh_in_flight: false}}
   end
 
   def handle_info(
@@ -2019,6 +2056,34 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp apply_codex_token_delta(state, _token_delta), do: state
+
+  defp start_account_rate_limit_refresh(%State{account_rate_limit_refresh_in_flight: true} = state),
+    do: state
+
+  defp start_account_rate_limit_refresh(%State{} = state) do
+    recipient = self()
+    reader = state.account_rate_limits_reader
+
+    task = fn ->
+      result =
+        try do
+          reader.()
+        rescue
+          exception -> {:error, {:account_rate_limits_failed, Exception.message(exception)}}
+        catch
+          kind, reason -> {:error, {:account_rate_limits_failed, {kind, reason}}}
+        end
+
+      send(recipient, {:account_rate_limits_result, result})
+    end
+
+    case Task.Supervisor.start_child(state.task_supervisor, task) do
+      {:ok, _pid} -> %{state | account_rate_limit_refresh_in_flight: true}
+      {:error, reason} ->
+        Logger.warning("Failed to start Codex account rate-limit refresh: #{inspect(reason)}")
+        state
+    end
+  end
 
   defp apply_codex_rate_limits(%State{} = state, update) when is_map(update) do
     case extract_rate_limits(update) do
