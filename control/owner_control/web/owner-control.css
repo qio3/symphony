@@ -36,6 +36,7 @@ h3 { font-size: 15px; line-height: 1.35; letter-spacing: -.01em; }
 .service-panel .section-heading { z-index: 2; }
 .service-panel .service-facts { z-index: 1; }
 .service-running { color: #145a38; font-size: 30px; }
+.service-starting { color: #8a5a0a; font-size: 30px; }
 .service-stopped { color: #9a3131; font-size: 30px; }
 .service-facts { margin-top: 22px; }
 .service-fact { min-width: 112px; padding: 9px 12px; border: 1px solid #d9e2db; border-radius: 12px; background: rgba(255,255,255,.7); }
@@ -186,7 +187,7 @@ dialog::backdrop { background: rgba(16,27,20,.48); backdrop-filter: blur(3px); }
   .topbar-actions { justify-content: flex-start; }
   .quiet-link { width: auto; text-align: left; }
   .service-panel, .panel { padding: 16px; border-radius: 16px; }
-  .service-running, .service-stopped { font-size: 25px; }
+  .service-running, .service-starting, .service-stopped { font-size: 25px; }
   .service-fact { flex: 1 1 calc(50% - 8px); }
   .issue-heading { display: grid; }
   .runtime-meta { grid-template-columns: repeat(2, minmax(0, 1fr)); }

@@ -104,15 +104,18 @@ function renderFreshness(snapshot) {
 function renderService(snapshot) {
   const service = snapshot.service || {};
   const runtimeSource = snapshot.sources?.runtime || {};
-  const serviceKnown = service.status !== "unknown";
+  const serviceStatus = String(service.status || "unknown").toLowerCase();
+  const serviceKnown = serviceStatus !== "unknown";
   const isRunning = service.live === true;
+  const isTransitioning = ["created", "restarting", "starting", "stopping"].includes(serviceStatus);
+  const transitionLabel = serviceStatus === "stopping" ? "Stopping…" : "Starting…";
   const serviceTitle = document.getElementById("service-title");
-  serviceTitle.textContent = serviceKnown ? (isRunning ? "Running" : "Stopped") : "Status unavailable";
-  serviceTitle.className = isRunning ? "service-running" : "service-stopped";
+  serviceTitle.textContent = isTransitioning ? transitionLabel : serviceKnown ? (isRunning ? "Running" : "Stopped") : "Status unavailable";
+  serviceTitle.className = isTransitioning ? "service-starting" : isRunning ? "service-running" : "service-stopped";
 
   clear(targets.serviceFacts);
   targets.serviceFacts.append(
-    fact("Service", serviceKnown ? (isRunning ? "Running" : "Stopped") : "Unknown", isRunning ? "good" : "danger"),
+    fact("Service", isTransitioning ? transitionLabel : serviceKnown ? (isRunning ? "Running" : "Stopped") : "Unknown", isTransitioning ? "warning" : isRunning ? "good" : "danger"),
     fact("Intake", snapshot.intake?.active ? "Active" : "Paused", snapshot.intake?.active ? "good" : "warning"),
     fact("Workers", `${number(snapshot.workers?.running)}/${number(snapshot.workers?.limit)}`, "neutral"),
     fact("Runtime API", titleCase(runtimeSource.status || "unknown"), runtimeSource.status === "fresh" ? "good" : "warning"),
@@ -122,7 +125,13 @@ function renderService(snapshot) {
   const supervisorFresh = snapshot.sources?.supervisor?.status === "fresh";
   const runtimeFresh = snapshot.sources?.runtime?.status === "fresh";
   const githubFresh = snapshot.sources?.github?.status === "fresh";
-  if (isRunning) {
+  if (isTransitioning) {
+    const pending = el("button", "button secondary", transitionLabel);
+    pending.type = "button";
+    pending.disabled = true;
+    pending.title = "Waiting for the fixed Symphony service state to be confirmed.";
+    targets.serviceActions.append(pending);
+  } else if (isRunning) {
     const intakeActive = snapshot.intake?.active === true;
     const intake = actionButton(
       intakeActive ? "Pause intake" : "Resume intake",

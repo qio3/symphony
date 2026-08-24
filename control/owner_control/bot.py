@@ -100,6 +100,20 @@ class NotificationPublisher:
         expected_restart = float(state.get("expected_service_restart_until") or 0)
         expected_stop = bool(state.get("expected_service_stop"))
         service_live = bool((snapshot.get("service") or {}).get("live"))
+        service_status = str((snapshot.get("service") or {}).get("status") or "").casefold()
+        runtime_fresh = (
+            ((snapshot.get("sources") or {}).get("runtime") or {}).get("status")
+            == "fresh"
+        )
+        service_action_active = bool(state.get("service_action_in_progress")) and float(
+            state.get("service_action_in_progress_until") or 0
+        ) > time.time()
+        service_ready = service_live and runtime_fresh and service_status not in {
+            "created",
+            "restarting",
+            "starting",
+            "stopping",
+        } and not service_action_active
         suppress_service_stop = (
             (expected_restart > time.time() or expected_stop)
             and not service_live
@@ -117,11 +131,13 @@ class NotificationPublisher:
         if suppress_service_stop and previous:
             projection["service"] = previous.get("service") or {"live": True}
         state_update = {"notification_fingerprints": sorted(known)[-500:]}
-        if service_live:
+        if service_ready:
             state_update.update(
                 {
                     "expected_service_stop": False,
                     "expected_service_restart_until": 0,
+                    "service_action_in_progress": None,
+                    "service_action_in_progress_until": 0,
                 }
             )
         if previous is not None or not self._attention_source_unavailable(snapshot):
