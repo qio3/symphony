@@ -52,12 +52,7 @@ defmodule SymphonyElixir.ModelRouter do
       title: issue.title || "",
       body: issue.description || "",
       labels: issue.labels || [],
-      acceptance_criteria: extract_acceptance_criteria(issue.description),
-      metadata: %{
-        identifier: issue.identifier,
-        priority: issue.priority,
-        state: issue.state
-      }
+      acceptance_criteria: extract_acceptance_criteria(issue.description)
     }
   end
 
