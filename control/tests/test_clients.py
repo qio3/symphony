@@ -1,6 +1,9 @@
+import io
 import unittest
+import urllib.error
+from unittest.mock import patch
 
-from owner_control.clients import GitHubClient, extract_owner_question
+from owner_control.clients import GitHubClient, extract_owner_question, request_json
 
 
 class FakeTransport:
@@ -139,6 +142,48 @@ class GitHubClientTest(unittest.TestCase):
                 "optionId": "done",
             },
         )
+
+    def test_graphql_rate_limit_variant_is_owner_readable(self):
+        transport = FakeTransport(
+            [
+                {
+                    "errors": [
+                        {
+                            "type": "RATE_LIMITED",
+                            "message": "API rate limit already exceeded for user ID 123",
+                        }
+                    ]
+                }
+            ]
+        )
+        client = GitHubClient(
+            token="token",
+            repository="qio3/zavod",
+            project_id="project-id",
+            transport=transport,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "GitHub GraphQL rate limit exhausted"):
+            client.project_snapshot()
+
+    def test_rest_rate_limit_error_is_owner_readable_without_leaking_response(self):
+        error = urllib.error.HTTPError(
+            "https://api.github.com/repos/qio3/zavod/git/ref/heads/main",
+            403,
+            "Forbidden",
+            {"X-RateLimit-Remaining": "0"},
+            io.BytesIO(b'{"message":"API rate limit exceeded for user ID 123"}'),
+        )
+
+        with patch("urllib.request.urlopen", side_effect=error):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "^GitHub API rate limit exhausted$",
+            ):
+                request_json(
+                    "GET",
+                    "https://api.github.com/repos/qio3/zavod/git/ref/heads/main",
+                )
 
     def test_extract_owner_question_requires_explicit_marker(self):
         self.assertEqual(extract_owner_question([{"body": "Вопрос владельцу: какой вариант?"}]), "какой вариант?")

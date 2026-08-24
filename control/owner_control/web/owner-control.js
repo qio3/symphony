@@ -93,7 +93,12 @@ function renderFreshness(snapshot) {
   snapshotStatus.className = `status-chip ${stale ? "is-stale" : "is-live"}`;
   if (stale) {
     const names = staleSources.map(([name]) => sourceName(name)).join(", ");
-    globalNotice.textContent = `Last confirmed data remains visible. Waiting for ${names || "a source"}.`;
+    const githubRateLimited = staleSources.some(([name, source]) => (
+      name === "github" && /rate limit exhausted/i.test(String(source?.error || ""))
+    ));
+    globalNotice.textContent = githubRateLimited
+      ? "GitHub request quota is exhausted. Last confirmed data remains visible; retrying automatically."
+      : `Last confirmed data remains visible. Waiting for ${names || "a source"}.`;
     globalNotice.className = "notice is-stale-notice";
   } else {
     globalNotice.className = "notice is-hidden";

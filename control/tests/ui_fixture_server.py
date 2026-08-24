@@ -143,6 +143,20 @@ if __name__ == "__main__":
                 "unrecoverable": False,
             }
         ]
+    elif mode == "rate_limit":
+        SNAPSHOT["stale"] = True
+        SNAPSHOT["sources"]["github"] = {
+            "status": "stale",
+            "confirmed_at": "2026-08-24T09:25:00Z",
+            "error": "GitHub GraphQL rate limit exhausted",
+        }
+        SNAPSHOT["failures"] = [
+            {
+                "fingerprint": "github:RuntimeError:transient",
+                "message": "github snapshot unavailable: GitHub GraphQL rate limit exhausted",
+                "unrecoverable": False,
+            }
+        ]
     elif mode == "drift":
         SNAPSHOT["test"].update({"sha": "deadbeef00000000", "synced": False, "drift": True})
     elif mode == "item_drift":

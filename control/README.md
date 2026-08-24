@@ -82,6 +82,11 @@ When configured control or its GitHub source is unavailable, new unleased dispat
 while already-running workers continue. The native Phoenix page remains a runtime diagnostics
 surface.
 
+Runtime and service facts keep the five-second owner refresh cadence. The heavier GitHub Project
+projection is reused for up to 60 seconds and enters a 60-second retry cooldown after a source
+failure. Typed actions bypass that cache for fail-closed preflight, and successful actions invalidate
+it so the resulting lifecycle state is read back immediately.
+
 ## Telegram and AI boundary
 
 Both the Telegram chat ID and sender user ID must match the allowlist. Slash commands call the same
