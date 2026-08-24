@@ -33,9 +33,12 @@ defmodule SymphonyElixir.ModelRouterTest do
     assert routing.force_sol_labels == ["risk:data-integrity"]
   end
 
-  test "classifier prompt contains only issue metadata and parses structured output" do
+  test "classifier receives only the approved issue metadata fields" do
     metadata = ModelRouter.metadata(issue("simple"))
     prompt = MetadataClassifier.prompt_for_test(metadata)
+
+    assert Map.keys(metadata) |> Enum.sort() ==
+             [:acceptance_criteria, :body, :labels, :title]
 
     assert prompt =~ Jason.encode!(metadata)
     refute prompt =~ "inspect the repository"
@@ -59,7 +62,7 @@ defmodule SymphonyElixir.ModelRouterTest do
   test "metadata-only classifier routes simple normal and complex issues" do
     classifier = fn metadata ->
       assert Map.keys(metadata) |> Enum.sort() ==
-               [:acceptance_criteria, :body, :labels, :metadata, :title]
+               [:acceptance_criteria, :body, :labels, :title]
 
       case metadata.title do
         "simple" -> %{tier: "luna", confidence: 0.92, reason: "bounded_local_fix"}
