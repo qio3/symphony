@@ -494,7 +494,8 @@ defmodule SymphonyElixir.Orchestrator do
       state,
       active_state_set(),
       terminal_state_set(),
-      owner_control_intake_active?()
+      owner_control_intake_active?(),
+      %{}
     )
   end
 
@@ -897,13 +898,23 @@ defmodule SymphonyElixir.Orchestrator do
   defp choose_issues(issues, state) do
     active_states = active_state_set()
     terminal_states = terminal_state_set()
-    intake_active = owner_control_intake_active?()
+    owner_control = owner_control_dispatch_context()
 
     issues
     |> sort_issues_for_dispatch()
     |> Enum.reduce(state, fn issue, state_acc ->
-      if should_dispatch_issue?(issue, state_acc, active_states, terminal_states, intake_active) do
-        dispatch_issue(state_acc, issue)
+      if should_dispatch_issue?(
+           issue,
+           state_acc,
+           active_states,
+           terminal_states,
+           owner_control.intake_active,
+           owner_control.ready_issue_numbers
+         ) do
+        case acquire_owner_control_lease(issue, owner_control.ready_issue_numbers) do
+          :ok -> dispatch_issue(state_acc, issue)
+          {:error, _reason} -> state_acc
+        end
       else
         state_acc
       end
@@ -935,10 +946,11 @@ defmodule SymphonyElixir.Orchestrator do
          %State{running: running, claimed: claimed, blocked: blocked} = state,
          active_states,
          terminal_states,
-         intake_active
+         intake_active,
+         ready_issue_numbers
        ) do
     intake_active and
-      candidate_issue?(issue, active_states, terminal_states) and
+      candidate_issue?(issue, active_states, terminal_states, ready_issue_numbers) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
       !Map.has_key?(blocked, issue.id) and
@@ -947,8 +959,15 @@ defmodule SymphonyElixir.Orchestrator do
       worker_slots_available?(state)
   end
 
-  defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states, _intake_active),
-    do: false
+  defp should_dispatch_issue?(
+         _issue,
+         _state,
+         _active_states,
+         _terminal_states,
+         _intake_active,
+         _ready_issue_numbers
+       ),
+       do: false
 
   defp state_slots_available?(%Issue{state: issue_state}, running) when is_map(running) do
     limit = Config.max_concurrent_agents_for_state(issue_state)
@@ -978,16 +997,30 @@ defmodule SymphonyElixir.Orchestrator do
            state: state_name
          } = issue,
          active_states,
-         terminal_states
+         terminal_states,
+         ready_issue_numbers
        )
        when is_binary(id) and is_binary(identifier) and is_binary(title) and is_binary(state_name) do
     Enum.all?([id, identifier, title, state_name], &present_string?/1) and
-      issue_routable?(issue) and
+      issue_dispatch_routable?(issue, ready_issue_numbers) and
       active_issue_state?(state_name, active_states) and
       !terminal_issue_state?(state_name, terminal_states)
   end
 
-  defp candidate_issue?(_issue, _active_states, _terminal_states), do: false
+  defp candidate_issue?(_issue, _active_states, _terminal_states, _ready_issue_numbers), do: false
+
+  defp issue_dispatch_routable?(%Issue{} = issue, ready_issue_numbers)
+       when is_map(ready_issue_numbers) do
+    issue_routable?(issue) or
+      (Map.has_key?(ready_issue_numbers, issue.id) and issue_routable_without_owner_lease?(issue))
+  end
+
+  defp issue_routable_without_owner_lease?(%Issue{} = issue) do
+    required_labels = Config.settings!().tracker.required_labels
+
+    Enum.any?(required_labels, &(normalize_label(&1) == "symphony")) and
+      Issue.routable?(issue, Enum.reject(required_labels, &(normalize_label(&1) == "symphony")))
+  end
 
   defp issue_routable?(%Issue{} = issue) do
     Issue.routable?(issue, Config.settings!().tracker.required_labels)
@@ -1009,6 +1042,14 @@ defmodule SymphonyElixir.Orchestrator do
   defp normalize_issue_state(state_name) when is_binary(state_name) do
     String.downcase(String.trim(state_name))
   end
+
+  defp normalize_label(label) when is_binary(label) do
+    label
+    |> String.trim()
+    |> String.downcase()
+  end
+
+  defp normalize_label(_label), do: ""
 
   defp terminal_state_set do
     Config.settings!().tracker.terminal_states
@@ -1395,6 +1436,97 @@ defmodule SymphonyElixir.Orchestrator do
       retry_candidate_issue?(issue, terminal_state_set()) and
       dispatch_slots_available?(issue, state) and
       worker_slots_available?(state, worker_host)
+  end
+
+  defp owner_control_dispatch_context do
+    client = Application.get_env(:symphony_elixir, :owner_control_client_module, OwnerControlClient)
+    intake_active = owner_control_intake_active?()
+
+    if intake_active do
+      case client.snapshot() do
+        :disabled ->
+          %{intake_active: true, ready_issue_numbers: %{}}
+
+        {:ok, snapshot} when is_map(snapshot) ->
+          ready_issue_numbers =
+            if fresh_owner_control_snapshot?(snapshot) do
+              ready_issue_numbers(snapshot)
+            else
+              %{}
+            end
+
+          %{intake_active: true, ready_issue_numbers: ready_issue_numbers}
+
+        _other ->
+          %{intake_active: true, ready_issue_numbers: %{}}
+      end
+    else
+      %{intake_active: false, ready_issue_numbers: %{}}
+    end
+  rescue
+    _exception -> %{intake_active: false, ready_issue_numbers: %{}}
+  catch
+    _kind, _reason -> %{intake_active: false, ready_issue_numbers: %{}}
+  end
+
+  defp fresh_owner_control_snapshot?(snapshot) when is_map(snapshot) do
+    Map.get(snapshot, :stale) == false and
+      get_in(snapshot, [:sources, :github, :status]) == "fresh"
+  end
+
+  defp ready_issue_numbers(%{issues: issues}) when is_map(issues) do
+    Enum.reduce(issues, %{}, fn
+      {key, %{number: number, status: status, state: state}}, ready
+      when is_binary(key) and is_integer(number) and number > 0 and is_binary(status) and
+             is_binary(state) ->
+        canonical_number = Integer.to_string(number)
+
+        if key == canonical_number and normalize_issue_state(status) == "ready for ai" and
+             normalize_issue_state(state) == "open" do
+          Map.put(ready, canonical_number, number)
+        else
+          ready
+        end
+
+      _entry, ready ->
+        ready
+    end)
+  end
+
+  defp ready_issue_numbers(_snapshot), do: %{}
+
+  defp acquire_owner_control_lease(%Issue{} = issue, ready_issue_numbers)
+       when is_map(ready_issue_numbers) do
+    with true <- owner_control_intake_active?() do
+      if issue_routable?(issue) do
+        :ok
+      else
+        with {:ok, issue_number} <- Map.fetch(ready_issue_numbers, issue.id),
+             client <- Application.get_env(:symphony_elixir, :owner_control_client_module, OwnerControlClient),
+             {:ok, response} when is_map(response) <- client.action(:lease, %{issue: issue_number}) do
+          :ok
+        else
+          error ->
+            Logger.warning("Skipping dispatch; failed to acquire Owner Control lease for #{issue_context(issue)}: #{inspect(error)}")
+
+            {:error, error}
+        end
+      end
+    else
+      false ->
+        Logger.info("Skipping dispatch while Owner Control intake is paused for #{issue_context(issue)}")
+        {:error, :intake_paused}
+    end
+  rescue
+    exception ->
+      Logger.warning("Skipping dispatch; Owner Control lease request failed for #{issue_context(issue)}: #{Exception.message(exception)}")
+
+      {:error, exception}
+  catch
+    kind, reason ->
+      Logger.warning("Skipping dispatch; Owner Control lease request failed for #{issue_context(issue)}: #{inspect({kind, reason})}")
+
+      {:error, {kind, reason}}
   end
 
   defp owner_control_intake_active? do
@@ -2039,7 +2171,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_candidate_issue?(%Issue{} = issue, terminal_states) do
-    candidate_issue?(issue, active_state_set(), terminal_states)
+    candidate_issue?(issue, active_state_set(), terminal_states, %{})
   end
 
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do

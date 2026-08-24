@@ -112,14 +112,9 @@ class SnapshotBuilder:
                 lanes["work_items"].append(item)
                 counts["running"] += 1
             elif runtime_retry is not None:
-                item = self._with_runtime(item, runtime_retry)
-                item["status"] = "retrying"
-                item["stage"] = "Queued / retrying"
-                item["test"] = item.get("test") or normalized_test
-                lanes["work_items"].append(item)
                 counts["queued"] += 1
             elif status.casefold() == "in progress":
-                lanes["work_items"].append(item)
+                pass
             elif status.casefold() == "done" or str(item.get("state", "")).casefold() == "closed":
                 counts["done"] += 1
             else:

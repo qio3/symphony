@@ -16,6 +16,8 @@ UI uses a per-process same-origin CSRF token and never exposes the bearer token 
 - `GET /v1/intake`
 - `GET /v1/logs?tail=100`
 - `POST /v1/actions/run` with `{"issue": 401}`
+- `POST /v1/actions/lease` with `{"issue": 401}` (runtime-only preflight; requires active intake
+  and a fresh open `Ready for AI` Issue)
 - `POST /v1/actions/accept` with `{"issue": 401}`
 - `POST /v1/actions/rework` with `{"issue": 401, "reason": "short reason"}`
 - `POST /v1/actions/pause`
@@ -73,9 +75,12 @@ $env:PYTHONPATH = "control"
 python -m owner_control
 ```
 
-The Symphony runtime uses `SYMPHONY_OWNER_CONTROL_URL` and `SYMPHONY_OWNER_CONTROL_TOKEN` only for
-the lightweight intake gate. When configured control is unavailable, dispatch fails closed while
-already-running workers continue. The native Phoenix page remains a runtime diagnostics surface.
+The Symphony runtime uses `SYMPHONY_OWNER_CONTROL_URL` and `SYMPHONY_OWNER_CONTROL_TOKEN` for the
+authoritative intake gate, one fresh Ready-for-AI projection per dispatch cycle, and the fixed
+`lease` action. A lease only adds the durable `symphony` label; it never promotes Backlog work.
+When configured control or its GitHub source is unavailable, new unleased dispatch fails closed
+while already-running workers continue. The native Phoenix page remains a runtime diagnostics
+surface.
 
 ## Telegram and AI boundary
 

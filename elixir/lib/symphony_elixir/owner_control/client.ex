@@ -5,7 +5,7 @@ defmodule SymphonyElixir.OwnerControl.Client do
 
   alias SymphonyElixir.Config
 
-  @actions ~w(run accept rework pause resume start_service stop_service restart)a
+  @actions ~w(run lease accept rework pause resume start_service stop_service restart)a
   @known_keys ~w(
     version generated_at service live reason container status started_at restart_count
     intake active workers running limit counts backlog ready_for_ai queued retrying blocked

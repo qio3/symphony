@@ -65,6 +65,7 @@ class ActionServiceTest(unittest.TestCase):
             "issues": {
                 "401": {"number": 401, "status": "Backlog", "state": "OPEN", "labels": []},
                 "402": {"number": 402, "status": "Ready for Acceptance", "state": "OPEN", "labels": []},
+                "403": {"number": 403, "status": "Ready for AI", "state": "OPEN", "labels": []},
             },
         }
         self.actions = ActionService(
@@ -82,6 +83,43 @@ class ActionServiceTest(unittest.TestCase):
             self.lifecycle.calls,
             [("set_status", 401, "Ready for AI"), ("add_label", 401, "symphony")],
         )
+
+    def test_lease_only_accepts_an_open_ready_for_ai_issue(self):
+        result = self.actions.execute("lease", {"issue": 403})
+
+        self.assertEqual(
+            result,
+            {"status": "accepted", "action": "lease", "issue": 403},
+        )
+        self.assertEqual(self.lifecycle.calls, [("add_label", 403, "symphony")])
+
+        self.lifecycle.calls.clear()
+        self.snapshot["issues"]["403"]["labels"] = ["Symphony"]
+        self.actions.execute("lease", {"issue": 403})
+        self.assertEqual(self.lifecycle.calls, [])
+
+        for status in ("Backlog", "In Progress"):
+            self.snapshot["issues"]["403"].update({"status": status, "state": "OPEN", "labels": []})
+            with self.assertRaisesRegex(ActionError, "Ready for AI"):
+                self.actions.execute("lease", {"issue": 403})
+
+        self.snapshot["issues"]["403"].update(
+            {"status": "Ready for AI", "state": "CLOSED"}
+        )
+        with self.assertRaisesRegex(ActionError, "open issue"):
+            self.actions.execute("lease", {"issue": 403})
+
+        self.snapshot["issues"]["403"].update(
+            {"number": 999, "status": "Ready for AI", "state": "OPEN"}
+        )
+        with self.assertRaisesRegex(ActionError, "canonical issue number"):
+            self.actions.execute("lease", {"issue": 403})
+
+        self.snapshot["issues"]["403"]["number"] = 403
+        self.store.set_intake_active(False)
+        with self.assertRaisesRegex(ActionError, "active intake"):
+            self.actions.execute("lease", {"issue": 403})
+        self.assertEqual(self.lifecycle.calls, [])
 
     def test_rework_requires_reason_and_comments_before_requeue(self):
         with self.assertRaisesRegex(ActionError, "reason is required"):
@@ -189,6 +227,8 @@ class ActionServiceTest(unittest.TestCase):
         self.snapshot["sources"]["github"] = {"status": "stale"}
         with self.assertRaisesRegex(ActionError, "fresh github"):
             self.actions.execute("run", {"issue": 401})
+        with self.assertRaisesRegex(ActionError, "fresh github"):
+            self.actions.execute("lease", {"issue": 403})
         with self.assertRaisesRegex(ActionError, "fresh github"):
             self.actions.execute("rework", {"issue": 402, "reason": "retry"})
 

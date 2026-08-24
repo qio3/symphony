@@ -99,7 +99,7 @@ class ActionService:
                 self._state_store.update({"expected_service_stop": False})
                 raise
             return {"status": "accepted", "service": service}
-        if action not in {"run", "accept", "rework"}:
+        if action not in {"run", "lease", "accept", "rework"}:
             raise ActionError(f"unsupported action: {action}")
 
         issue_number = self._issue_number(params.get("issue"))
@@ -113,6 +113,8 @@ class ActionService:
 
         if action == "run":
             return self._run(issue_number, issue)
+        if action == "lease":
+            return self._lease(issue_number, issue)
         if action == "accept":
             return self._accept(issue_number, issue, snapshot)
         return self._rework(issue_number, issue, params.get("reason"))
@@ -126,6 +128,19 @@ class ActionService:
         if "symphony" not in {str(label).casefold() for label in issue.get("labels", [])}:
             self._lifecycle.add_label(issue_number, "symphony")
         return {"status": "accepted", "action": "run", "issue": issue_number}
+
+    def _lease(self, issue_number: int, issue: dict[str, Any]) -> dict[str, Any]:
+        if not self._state_store.intake_active():
+            raise ActionError("lease requires active intake")
+        if type(issue.get("number")) is not int or issue.get("number") != issue_number:
+            raise ActionError("lease requires a canonical issue number")
+        if str(issue.get("state", "OPEN")).upper() != "OPEN":
+            raise ActionError("lease requires an open issue")
+        if str(issue.get("status", "")).casefold() != "ready for ai":
+            raise ActionError("lease requires Ready for AI")
+        if "symphony" not in {str(label).casefold() for label in issue.get("labels", [])}:
+            self._lifecycle.add_label(issue_number, "symphony")
+        return {"status": "accepted", "action": "lease", "issue": issue_number}
 
     def _accept(
         self, issue_number: int, issue: dict[str, Any], snapshot: dict[str, Any]

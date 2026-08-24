@@ -4,6 +4,37 @@ from owner_control.snapshot import SnapshotBuilder
 
 
 class SnapshotBuilderTest(unittest.TestCase):
+    def test_owner_work_items_contains_only_runtime_running_entries(self):
+        snapshot = SnapshotBuilder().build(
+            service={"live": True},
+            intake_active=True,
+            worker_limit=2,
+            runtime={
+                "generated_at": "2026-08-24T10:00:00Z",
+                "running": [{"issue_id": "501", "issue_identifier": "GH-501"}],
+                "retrying": [{"issue_id": "503", "issue_identifier": "GH-503"}],
+                "blocked": [],
+                "codex_totals": {},
+                "rate_limits": None,
+            },
+            project={
+                "items": [
+                    {"number": 501, "title": "Has a worker", "status": "In Progress", "state": "OPEN"},
+                    {"number": 502, "title": "No worker", "status": "In Progress", "state": "OPEN"},
+                ]
+            },
+            canonical={"sha": "aaaaaaaa11111111"},
+            test={"sha": "aaaaaaaa11111111", "url": "https://test.example"},
+        )
+
+        self.assertEqual([item["number"] for item in snapshot["owner_view"]["work_items"]], [501])
+        self.assertEqual(snapshot["workers"]["running"], 1)
+        self.assertEqual(snapshot["counts"]["running"], 1)
+        self.assertEqual(snapshot["counts"]["queued"], 1)
+        self.assertIn("502", snapshot["issues"])
+        self.assertIn("503", snapshot["issues"])
+        self.assertEqual([item["issue_id"] for item in snapshot["retrying"]], ["503"])
+
     def test_places_each_issue_in_one_owner_lane_and_reports_sha_sync(self):
         project = {
             "items": [

@@ -15,6 +15,7 @@ from .actions import ActionError, ActionService
 
 _ACTIONS = {
     "run",
+    "lease",
     "accept",
     "rework",
     "pause",

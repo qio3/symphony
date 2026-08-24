@@ -158,7 +158,11 @@ class ControlHttpServerTest(unittest.TestCase):
     def test_exposes_only_typed_action_routes(self):
         with self.request("/v1/actions/pause", method="POST", body={}) as response:
             self.assertEqual(json.load(response)["action"], "pause")
-        self.assertEqual(self.actions.calls, [("pause", {})])
+        with self.request(
+            "/v1/actions/lease", method="POST", body={"issue": 401}
+        ) as response:
+            self.assertEqual(json.load(response)["action"], "lease")
+        self.assertEqual(self.actions.calls, [("pause", {}), ("lease", {"issue": 401})])
 
         with self.assertRaises(urllib.error.HTTPError) as raised:
             self.request("/v1/actions/shell", method="POST", body={"command": "whoami"})

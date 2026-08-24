@@ -5,6 +5,34 @@ defmodule SymphonyElixir.OwnerControlTest do
   alias SymphonyElixir.OwnerControl.Client
   alias SymphonyElixir.Tracker.Issue
 
+  setup_all do
+    runtime_was_running = is_pid(Process.whereis(SymphonyElixir.AgentRuntimeSupervisor))
+
+    if runtime_was_running do
+      :ok =
+        Supervisor.terminate_child(
+          SymphonyElixir.Supervisor,
+          SymphonyElixir.AgentRuntimeSupervisor
+        )
+    end
+
+    on_exit(fn ->
+      Workflow.clear_workflow_file_path()
+
+      if runtime_was_running and is_nil(Process.whereis(SymphonyElixir.AgentRuntimeSupervisor)) do
+        case Supervisor.restart_child(
+               SymphonyElixir.Supervisor,
+               SymphonyElixir.AgentRuntimeSupervisor
+             ) do
+          {:ok, _pid} -> :ok
+          {:error, {:already_started, _pid}} -> :ok
+        end
+      end
+    end)
+
+    :ok
+  end
+
   defmodule PausedControl do
     def intake_active?, do: false
   end
@@ -13,11 +41,69 @@ defmodule SymphonyElixir.OwnerControlTest do
     def intake_active?, do: true
   end
 
+  defmodule DispatchControl do
+    def snapshot do
+      if test_orchestrator?() do
+        test_pid = Application.fetch_env!(:symphony_elixir, :owner_control_test_pid)
+        cycle_ref = Application.fetch_env!(:symphony_elixir, :owner_control_test_cycle_ref)
+        send(test_pid, {:owner_control_snapshot, cycle_ref})
+        Application.fetch_env!(:symphony_elixir, :owner_control_test_snapshot)
+      else
+        {:error, :outside_owner_control_dispatch_test}
+      end
+    end
+
+    def action(:lease, %{issue: issue_number} = params) do
+      unless test_orchestrator?(), do: raise("unexpected lease caller")
+
+      test_pid = Application.fetch_env!(:symphony_elixir, :owner_control_test_pid)
+      cycle_ref = Application.fetch_env!(:symphony_elixir, :owner_control_test_cycle_ref)
+      response = Application.fetch_env!(:symphony_elixir, :owner_control_test_action_response)
+
+      send(test_pid, {:owner_control_action, cycle_ref, :lease, params})
+
+      if match?({:ok, _}, response) do
+        issues = Application.fetch_env!(:symphony_elixir, :memory_tracker_issues)
+        issue_id = Integer.to_string(issue_number)
+
+        Application.put_env(
+          :symphony_elixir,
+          :memory_tracker_issues,
+          Enum.map(issues, fn
+            %Issue{id: ^issue_id} = issue ->
+              %{issue | labels: Enum.uniq(["symphony" | issue.labels])}
+
+            issue ->
+              issue
+          end)
+        )
+      end
+
+      response
+    end
+
+    def intake_active? do
+      test_orchestrator?() and
+        Application.fetch_env!(:symphony_elixir, :owner_control_test_intake_active)
+    end
+
+    defp test_orchestrator? do
+      Process.info(self(), :registered_name) ==
+        {:registered_name, Application.get_env(:symphony_elixir, :owner_control_test_orchestrator_name)}
+    end
+  end
+
   setup do
     keys = [
       :owner_control_settings,
       :owner_control_request_fun,
-      :owner_control_client_module
+      :owner_control_client_module,
+      :owner_control_test_pid,
+      :owner_control_test_cycle_ref,
+      :owner_control_test_snapshot,
+      :owner_control_test_action_response,
+      :owner_control_test_intake_active,
+      :owner_control_test_orchestrator_name
     ]
 
     previous = Map.new(keys, &{&1, Application.get_env(:symphony_elixir, &1)})
@@ -61,6 +147,9 @@ defmodule SymphonyElixir.OwnerControlTest do
 
     assert {:ok, %{status: "accepted"}} = Client.action(:run, %{issue: 401})
     assert_receive {:request, :post, "http://127.0.0.1:4080/v1/actions/run", _headers, %{issue: 401}}
+
+    assert {:ok, %{status: "accepted"}} = Client.action(:lease, %{issue: 401})
+    assert_receive {:request, :post, "http://127.0.0.1:4080/v1/actions/lease", _headers, %{issue: 401}}
 
     assert {:ok, %{status: "accepted"}} = Client.action(:start_service, %{})
     assert_receive {:request, :post, "http://127.0.0.1:4080/v1/actions/start_service", _headers, %{}}
@@ -281,6 +370,154 @@ defmodule SymphonyElixir.OwnerControlTest do
     assert Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
+  test "fresh Ready for AI issues acquire their durable leases from one snapshot before dispatch" do
+    issues = [dispatch_issue(401), dispatch_issue(402)]
+
+    snapshot =
+      dispatch_snapshot([
+        %{number: 401, status: "Ready for AI", state: "OPEN"},
+        %{number: 402, status: "Ready for AI", state: "OPEN"}
+      ])
+
+    {pid, task_supervisor, cycle_ref, test_root} =
+      start_dispatch_cycle(issues, snapshot, {:ok, %{status: "accepted"}})
+
+    on_exit(fn -> stop_dispatch_cycle(pid, task_supervisor, test_root) end)
+
+    assert_receive {:owner_control_snapshot, ^cycle_ref}, 1_000
+    assert_receive {:owner_control_action, ^cycle_ref, :lease, %{issue: 401}}, 1_000
+    assert_receive {:owner_control_action, ^cycle_ref, :lease, %{issue: 402}}, 1_000
+
+    assert eventually(fn -> map_size(:sys.get_state(pid).running) == 2 end)
+    refute_receive {:owner_control_snapshot, ^cycle_ref}, 100
+  end
+
+  test "labeled issues keep the existing dispatch path without reacquiring the lease" do
+    issue = %{dispatch_issue(403) | labels: ["symphony"]}
+    snapshot = dispatch_snapshot([], stale: true, github_status: "unavailable")
+
+    {pid, task_supervisor, cycle_ref, test_root} =
+      start_dispatch_cycle([issue], snapshot, {:ok, %{status: "accepted"}})
+
+    on_exit(fn -> stop_dispatch_cycle(pid, task_supervisor, test_root) end)
+
+    assert_receive {:owner_control_snapshot, ^cycle_ref}, 1_000
+    assert eventually(fn -> Map.has_key?(:sys.get_state(pid).running, "403") end)
+    refute_receive {:owner_control_action, ^cycle_ref, :lease, _params}, 100
+  end
+
+  test "labeled issues keep dispatching when readiness snapshot is unavailable but intake is active" do
+    issue = %{dispatch_issue(409) | labels: ["symphony"]}
+
+    {pid, task_supervisor, cycle_ref, test_root} =
+      start_dispatch_cycle([issue], %{}, {:ok, %{status: "accepted"}}, snapshot_response: {:error, :owner_control_unavailable})
+
+    on_exit(fn -> stop_dispatch_cycle(pid, task_supervisor, test_root) end)
+
+    assert_receive {:owner_control_snapshot, ^cycle_ref}, 1_000
+    assert eventually(fn -> Map.has_key?(:sys.get_state(pid).running, "409") end)
+    refute_receive {:owner_control_action, ^cycle_ref, :lease, _params}, 100
+  end
+
+  test "unleased issues fail closed outside a fresh active Ready for AI snapshot" do
+    cases = [
+      {:backlog, dispatch_snapshot([%{number: 404, status: "Backlog", state: "OPEN"}])},
+      {:blocked, dispatch_snapshot([%{number: 404, status: "Blocked", state: "OPEN"}])},
+      {:acceptance, dispatch_snapshot([%{number: 404, status: "Ready for Acceptance", state: "OPEN"}])},
+      {:done, dispatch_snapshot([%{number: 404, status: "Done", state: "CLOSED"}])},
+      {:stale, dispatch_snapshot([%{number: 404, status: "Ready for AI", state: "OPEN"}], stale: true)},
+      {:github_unavailable,
+       dispatch_snapshot([%{number: 404, status: "Ready for AI", state: "OPEN"}],
+         github_status: "unavailable"
+       )},
+      {:missing_number, dispatch_snapshot([%{status: "Ready for AI", state: "OPEN"}])},
+      {:non_numeric_number, dispatch_snapshot([%{number: "GH-404", status: "Ready for AI", state: "OPEN"}])}
+    ]
+
+    mismatched_key =
+      dispatch_snapshot([%{number: 404, status: "Ready for AI", state: "OPEN"}])
+      |> put_in([:issues], %{"999" => %{number: 404, status: "Ready for AI", state: "OPEN"}})
+
+    malformed_key =
+      dispatch_snapshot([%{number: 404, status: "Ready for AI", state: "OPEN"}])
+      |> put_in([:issues], %{"#404" => %{number: 404, status: "Ready for AI", state: "OPEN"}})
+
+    cases = cases ++ [{:mismatched_key, mismatched_key}, {:malformed_key, malformed_key}]
+
+    Enum.each(cases, fn {case_name, snapshot} ->
+      {pid, task_supervisor, cycle_ref, test_root} =
+        start_dispatch_cycle([dispatch_issue(404)], snapshot, {:ok, %{status: "accepted"}})
+
+      assert_receive {:owner_control_snapshot, ^cycle_ref}, 1_000, "missing snapshot for #{case_name}"
+      assert :sys.get_state(pid).running == %{}
+
+      refute_receive {:owner_control_action, ^cycle_ref, :lease, _params},
+                     25,
+                     "unexpected action for #{case_name}"
+
+      stop_dispatch_cycle(pid, task_supervisor, test_root)
+    end)
+  end
+
+  test "a rejected lease action does not dispatch an unleased Ready for AI issue" do
+    issue = dispatch_issue(405)
+    snapshot = dispatch_snapshot([%{number: 405, status: "Ready for AI", state: "OPEN"}])
+
+    {pid, task_supervisor, cycle_ref, test_root} =
+      start_dispatch_cycle(
+        [issue],
+        snapshot,
+        {:error, {:owner_control_action_rejected, "issue moved"}}
+      )
+
+    on_exit(fn -> stop_dispatch_cycle(pid, task_supervisor, test_root) end)
+
+    assert_receive {:owner_control_snapshot, ^cycle_ref}, 1_000
+    assert_receive {:owner_control_action, ^cycle_ref, :lease, %{issue: 405}}, 1_000
+    assert :sys.get_state(pid).running == %{}
+  end
+
+  test "authoritative paused intake blocks a fresh cached Ready for AI snapshot" do
+    snapshot =
+      dispatch_snapshot([%{number: 407, status: "Ready for AI", state: "OPEN"}],
+        intake_active: true
+      )
+
+    {pid, task_supervisor, cycle_ref, test_root} =
+      start_dispatch_cycle([dispatch_issue(407)], snapshot, {:ok, %{status: "accepted"}}, intake_active: false)
+
+    on_exit(fn -> stop_dispatch_cycle(pid, task_supervisor, test_root) end)
+
+    refute_receive {:owner_control_snapshot, ^cycle_ref}, 100
+    assert :sys.get_state(pid).running == %{}
+    refute_receive {:owner_control_action, ^cycle_ref, :lease, _params}, 100
+  end
+
+  test "disabled Owner Control leaves generic label routing unchanged" do
+    Application.delete_env(:symphony_elixir, :owner_control_settings)
+    Application.delete_env(:symphony_elixir, :owner_control_client_module)
+
+    issue = %{dispatch_issue(406) | labels: ["symphony"]}
+
+    {pid, task_supervisor, _cycle_ref, test_root} =
+      start_dispatch_cycle([issue], :disabled, {:ok, %{status: "accepted"}}, configure_control: false)
+
+    on_exit(fn -> stop_dispatch_cycle(pid, task_supervisor, test_root) end)
+
+    assert eventually(fn -> Map.has_key?(:sys.get_state(pid).running, "406") end)
+
+    unlabeled = dispatch_issue(408)
+
+    {unlabeled_pid, unlabeled_supervisor, _cycle_ref, unlabeled_root} =
+      start_dispatch_cycle([unlabeled], :disabled, {:ok, %{status: "accepted"}}, configure_control: false)
+
+    on_exit(fn ->
+      stop_dispatch_cycle(unlabeled_pid, unlabeled_supervisor, unlabeled_root)
+    end)
+
+    assert :sys.get_state(unlabeled_pid).running == %{}
+  end
+
   defp configure_client(url \\ "http://127.0.0.1:4080", token \\ String.duplicate("c", 32)) do
     Application.put_env(:symphony_elixir, :owner_control_settings, %{
       url: url,
@@ -291,6 +528,107 @@ defmodule SymphonyElixir.OwnerControlTest do
   defp stub_owner_response(response) do
     Application.put_env(:symphony_elixir, :owner_control_request_fun, fn _, _, _, _ -> response end)
   end
+
+  defp dispatch_issue(number) do
+    %Issue{
+      id: Integer.to_string(number),
+      identifier: "GH-#{number}",
+      title: "Ready work #{number}",
+      description: "Test dispatch",
+      state: "open",
+      url: "https://github.test/issues/#{number}",
+      labels: [],
+      dispatchable: true
+    }
+  end
+
+  defp dispatch_snapshot(items, opts \\ []) do
+    %{
+      stale: Keyword.get(opts, :stale, false),
+      intake: %{active: Keyword.get(opts, :intake_active, true)},
+      sources: %{github: %{status: Keyword.get(opts, :github_status, "fresh")}},
+      issues:
+        Map.new(items, fn item ->
+          key = if is_integer(item[:number]), do: Integer.to_string(item.number), else: inspect(item[:number])
+          {key, item}
+        end)
+    }
+  end
+
+  defp start_dispatch_cycle(issues, snapshot, action_response, opts \\ []) do
+    cycle_ref = make_ref()
+    test_root = Path.join(System.tmp_dir!(), "symphony-owner-dispatch-#{System.unique_integer([:positive])}")
+    orchestrator_name = Module.concat(__MODULE__, "OwnerDispatch#{System.unique_integer([:positive])}")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_required_labels: ["symphony"],
+      tracker_active_states: ["open"],
+      poll_interval_ms: 60_000,
+      workspace_root: test_root,
+      hook_before_run: "sleep 30"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, issues)
+    {:ok, task_supervisor} = Task.Supervisor.start_link()
+    Process.unlink(task_supervisor)
+
+    if Keyword.get(opts, :configure_control, true) do
+      Application.put_env(:symphony_elixir, :owner_control_client_module, DispatchControl)
+      Application.put_env(:symphony_elixir, :owner_control_test_pid, self())
+      Application.put_env(:symphony_elixir, :owner_control_test_cycle_ref, cycle_ref)
+
+      Application.put_env(
+        :symphony_elixir,
+        :owner_control_test_snapshot,
+        Keyword.get(opts, :snapshot_response, {:ok, snapshot})
+      )
+
+      Application.put_env(:symphony_elixir, :owner_control_test_action_response, action_response)
+
+      Application.put_env(
+        :symphony_elixir,
+        :owner_control_test_intake_active,
+        Keyword.get(opts, :intake_active, true)
+      )
+
+      Application.put_env(
+        :symphony_elixir,
+        :owner_control_test_orchestrator_name,
+        orchestrator_name
+      )
+    end
+
+    {:ok, pid} =
+      Orchestrator.start_link(
+        name: orchestrator_name,
+        task_supervisor: task_supervisor,
+        account_rate_limits_reader: fn -> {:error, :test_disabled} end,
+        usage_ledger_path: Path.join(test_root, "usage-ledger.json")
+      )
+
+    Process.unlink(pid)
+    {pid, task_supervisor, cycle_ref, test_root}
+  end
+
+  defp stop_dispatch_cycle(pid, task_supervisor, test_root) do
+    if Process.alive?(pid), do: GenServer.stop(pid)
+    if Process.alive?(task_supervisor), do: Supervisor.stop(task_supervisor)
+    File.rm_rf(test_root)
+  end
+
+  defp eventually(fun, attempts \\ 100)
+
+  defp eventually(fun, attempts) when attempts > 0 do
+    if fun.() do
+      true
+    else
+      Process.sleep(10)
+      eventually(fun, attempts - 1)
+    end
+  end
+
+  defp eventually(_fun, 0), do: false
 
   defp start_loopback_server(responses, parent) do
     {:ok, listen_socket} =
