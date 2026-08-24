@@ -1177,6 +1177,184 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert remaining_ms <= 10_500
   end
 
+  test "fresh account rate-limit telemetry does not keep a stalled worker alive" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      codex_stall_timeout_ms: 1_000,
+      poll_interval_ms: 60_000
+    )
+
+    issue_id = "issue-stall-rate-limits"
+    orchestrator_name = Module.concat(__MODULE__, :RateLimitTelemetryStallOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    Process.sleep(100)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    stale_progress_at = DateTime.add(DateTime.utc_now(), -5, :second)
+    fresh_telemetry_at = DateTime.utc_now()
+    initial_state = :sys.get_state(pid)
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-STALL-RATE-LIMITS",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-STALL-RATE-LIMITS"
+    }
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: "thread-stall-rate-limits",
+      last_codex_message: nil,
+      last_codex_timestamp: stale_progress_at,
+      last_progress_timestamp: stale_progress_at,
+      last_codex_event: :notification,
+      started_at: stale_progress_at
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :notification,
+         payload: %{
+           "method" => "account/rateLimits/updated",
+           "params" => %{"rateLimits" => %{"primary" => %{"usedPercent" => 23}}}
+         },
+         timestamp: fresh_telemetry_at
+       }}
+    )
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :notification,
+         payload: %{"method" => "item/heartbeat", "params" => %{}},
+         timestamp: DateTime.add(fresh_telemetry_at, 1, :second)
+       }}
+    )
+
+    send(pid, :tick)
+    Process.sleep(100)
+    state = :sys.get_state(pid)
+
+    refute Process.alive?(worker_pid)
+    refute Map.has_key?(state.running, issue_id)
+    assert %{error: "stalled for " <> _} = state.retry_attempts[issue_id]
+  end
+
+  test "fresh item and turn progress keeps a worker inside the stall timeout" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      codex_stall_timeout_ms: 1_000,
+      poll_interval_ms: 60_000
+    )
+
+    issue_id = "issue-stall-real-progress"
+    orchestrator_name = Module.concat(__MODULE__, :RealProgressStallOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    Process.sleep(100)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    stale_progress_at = DateTime.add(DateTime.utc_now(), -5, :second)
+    item_started_at = DateTime.utc_now()
+    turn_started_at = DateTime.add(item_started_at, 1, :second)
+    initial_state = :sys.get_state(pid)
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-STALL-REAL-PROGRESS",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-STALL-REAL-PROGRESS",
+      dispatchable: true
+    }
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: "thread-stall-real-progress",
+      last_codex_message: nil,
+      last_codex_timestamp: stale_progress_at,
+      last_progress_timestamp: stale_progress_at,
+      last_codex_event: :notification,
+      started_at: stale_progress_at
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :notification,
+         payload: %{"method" => "item/started", "params" => %{"item" => %{"id" => "item-1"}}},
+         timestamp: item_started_at
+       }}
+    )
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :notification,
+         payload: %{"method" => "turn/started", "params" => %{"turn" => %{"id" => "turn-1"}}},
+         timestamp: turn_started_at
+       }}
+    )
+
+    Process.sleep(20)
+    assert :sys.get_state(pid).running[issue_id].last_progress_timestamp == turn_started_at
+
+    send(pid, :tick)
+    Process.sleep(100)
+    state = :sys.get_state(pid)
+
+    assert Process.alive?(worker_pid)
+    assert state.running[issue_id].last_progress_timestamp == turn_started_at
+    refute Map.has_key?(state.retry_attempts, issue_id)
+
+    send(worker_pid, :done)
+  end
+
   test "orchestrator blocks stalled workers that are waiting on MCP elicitation" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",

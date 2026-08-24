@@ -45,7 +45,9 @@ class SnapshotBuilder:
             "work_items": [],
             "blocked": [],
             "ready_for_acceptance": [],
+            "follow_ups": [],
         }
+        project_only_in_progress: list[dict[str, Any]] = []
         counts = {
             "backlog": 0,
             "ready_for_ai": 0,
@@ -112,9 +114,12 @@ class SnapshotBuilder:
                 lanes["work_items"].append(item)
                 counts["running"] += 1
             elif runtime_retry is not None:
+                item = self._with_runtime(item, runtime_retry)
+                item["stage"] = item.get("stage") or "Delivery follow-up"
+                lanes["follow_ups"].append(item)
                 counts["queued"] += 1
             elif status.casefold() == "in progress":
-                pass
+                project_only_in_progress.append(deepcopy(item))
             elif status.casefold() == "done" or str(item.get("state", "")).casefold() == "closed":
                 counts["done"] += 1
             else:
@@ -128,6 +133,9 @@ class SnapshotBuilder:
             "available": True,
             "updated_at": project.get("updated_at") or runtime.get("generated_at"),
             **lanes,
+            "diagnostics": {
+                "project_only_in_progress": project_only_in_progress,
+            },
             "counts": {
                 "backlog": counts["backlog"] + counts["ready_for_ai"],
                 "blocked": counts["blocked"],
@@ -189,10 +197,14 @@ class SnapshotBuilder:
             "last_message",
             "last_event",
             "last_event_at",
+            "last_progress_at",
             "error",
+            "deferred_reason",
+            "delay_type",
             "due_at",
             "model",
             "turn_count",
+            "attempt",
         ):
             if runtime.get(key) is not None:
                 item[key] = runtime[key]

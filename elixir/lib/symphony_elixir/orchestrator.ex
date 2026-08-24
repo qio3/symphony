@@ -13,6 +13,8 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.Tracker.Issue
 
   @continuation_retry_delay_ms 1_000
+  @capacity_retry_delay_ms 5_000
+  @paused_retry_delay_ms 30_000
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
@@ -363,10 +365,11 @@ defmodule SymphonyElixir.Orchestrator do
       state
       |> reconcile_running_issues()
       |> reconcile_blocked_issues()
+      |> wake_paused_retries()
 
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_issues_by_states(Config.settings!().tracker.active_states),
-         true <- available_slots(state) > 0 do
+         true <- fresh_dispatch_slots_available?(state) do
       choose_issues(issues, state)
     else
       {:error, :missing_linear_api_token} ->
@@ -495,8 +498,14 @@ defmodule SymphonyElixir.Orchestrator do
       active_state_set(),
       terminal_state_set(),
       owner_control_intake_active?(),
-      %{}
+      :owner_control_disabled
     )
+  end
+
+  @doc false
+  @spec retry_dispatch_allowed_for_test(Issue.t(), term()) :: boolean()
+  def retry_dispatch_allowed_for_test(%Issue{} = issue, %State{} = state) do
+    retry_dispatch_allowed?(true, issue, state, nil)
   end
 
   @doc false
@@ -763,7 +772,16 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp last_activity_timestamp(running_entry) when is_map(running_entry) do
-    Map.get(running_entry, :last_codex_timestamp) || Map.get(running_entry, :started_at)
+    case Map.fetch(running_entry, :last_progress_timestamp) do
+      {:ok, %DateTime{} = timestamp} ->
+        timestamp
+
+      {:ok, _missing_progress} ->
+        Map.get(running_entry, :started_at)
+
+      :error ->
+        Map.get(running_entry, :last_codex_timestamp) || Map.get(running_entry, :started_at)
+    end
   end
 
   defp last_activity_timestamp(_running_entry), do: nil
@@ -933,7 +951,11 @@ defmodule SymphonyElixir.Orchestrator do
   defp sort_issues_for_dispatch(issues) when is_list(issues) do
     Enum.sort_by(issues, fn
       %Issue{} = issue ->
-        {priority_rank(issue.priority), issue_created_at_sort_key(issue), issue.identifier || issue.id || ""}
+        {
+          priority_rank(issue.priority),
+          issue_created_at_sort_key(issue),
+          issue.identifier || issue.id || ""
+        }
 
       _ ->
         {priority_rank(nil), issue_created_at_sort_key(nil), ""}
@@ -963,7 +985,7 @@ defmodule SymphonyElixir.Orchestrator do
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
       !Map.has_key?(blocked, issue.id) and
-      available_slots(state) > 0 and
+      fresh_dispatch_slots_available?(state) and
       state_slots_available?(issue, running) and
       worker_slots_available?(state)
   end
@@ -1020,9 +1042,12 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp issue_dispatch_routable?(%Issue{} = issue, ready_issue_numbers)
        when is_map(ready_issue_numbers) do
-    issue_routable?(issue) or
-      (Map.has_key?(ready_issue_numbers, issue.id) and issue_routable_without_owner_lease?(issue))
+    Map.has_key?(ready_issue_numbers, issue.id) and
+      (issue_routable?(issue) or issue_routable_without_owner_lease?(issue))
   end
+
+  defp issue_dispatch_routable?(%Issue{} = issue, :owner_control_disabled),
+    do: issue_routable?(issue)
 
   defp issue_routable_without_owner_lease?(%Issue{} = issue) do
     required_labels = Config.settings!().tracker.required_labels
@@ -1178,6 +1203,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp new_running_entry(issue, pid, ref, worker_host, model_route, attempt) do
     route = model_route || %{}
+    started_at = DateTime.utc_now()
 
     %{
       pid: pid,
@@ -1189,6 +1215,7 @@ defmodule SymphonyElixir.Orchestrator do
       session_id: nil,
       last_codex_message: nil,
       last_codex_timestamp: nil,
+      last_progress_timestamp: started_at,
       last_codex_event: nil,
       codex_app_server_pid: nil,
       codex_input_tokens: 0,
@@ -1205,7 +1232,7 @@ defmodule SymphonyElixir.Orchestrator do
       escalated_from: Map.get(route, :escalated_from),
       escalation_history: Map.get(route, :escalation_history, []),
       retry_attempt: normalize_retry_attempt(attempt),
-      started_at: DateTime.utc_now()
+      started_at: started_at
     }
   end
 
@@ -1240,8 +1267,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp schedule_issue_retry(%State{} = state, issue_id, attempt, metadata)
        when is_binary(issue_id) and is_map(metadata) do
     previous_retry = Map.get(state.retry_attempts, issue_id, %{attempt: 0})
-    next_attempt = if is_integer(attempt), do: attempt, else: previous_retry.attempt + 1
-    delay_ms = retry_delay(next_attempt, metadata)
+    next_attempt = retry_attempt_number(attempt, previous_retry)
+    delay_type = Map.get(metadata, :delay_type, Map.get(previous_retry, :delay_type, :failure))
+    delay_ms = retry_delay(next_attempt, delay_type)
     old_timer = Map.get(previous_retry, :timer_ref)
     retry_token = make_ref()
     due_at_ms = System.monotonic_time(:millisecond) + delay_ms
@@ -1253,15 +1281,11 @@ defmodule SymphonyElixir.Orchestrator do
     model_route = metadata[:model_route] || Map.get(previous_retry, :model_route)
     escalation_reason = metadata[:escalation_reason] || Map.get(previous_retry, :escalation_reason)
 
-    if is_reference(old_timer) do
-      Process.cancel_timer(old_timer)
-    end
+    deferred_reason = retry_deferred_reason(delay_type, metadata, previous_retry)
+    cancel_retry_timer(old_timer)
 
     timer_ref = Process.send_after(self(), {:retry_issue, issue_id, retry_token}, delay_ms)
-
-    error_suffix = if is_binary(error), do: " error=#{error}", else: ""
-
-    Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{identifier} in #{delay_ms}ms (attempt #{next_attempt})#{error_suffix}")
+    log_retry_schedule(issue_id, identifier, delay_ms, next_attempt, error, delay_type, deferred_reason)
 
     %{
       state
@@ -1277,10 +1301,54 @@ defmodule SymphonyElixir.Orchestrator do
             worker_host: worker_host,
             workspace_path: workspace_path,
             model_route: model_route,
-            escalation_reason: escalation_reason
+            escalation_reason: escalation_reason,
+            delay_type: delay_type,
+            deferred_reason: deferred_reason
           })
     }
   end
+
+  defp retry_attempt_number(attempt, _previous_retry) when is_integer(attempt), do: attempt
+  defp retry_attempt_number(_attempt, previous_retry), do: previous_retry.attempt + 1
+
+  defp retry_deferred_reason(delay_type, metadata, previous_retry)
+       when delay_type in [:capacity, :paused] do
+    Map.get(metadata, :deferred_reason) || Map.get(previous_retry, :deferred_reason)
+  end
+
+  defp retry_deferred_reason(_delay_type, _metadata, _previous_retry), do: nil
+
+  defp cancel_retry_timer(timer_ref) when is_reference(timer_ref) do
+    Process.cancel_timer(timer_ref)
+    :ok
+  end
+
+  defp cancel_retry_timer(_timer_ref), do: :ok
+
+  defp log_retry_schedule(
+         issue_id,
+         identifier,
+         delay_ms,
+         attempt,
+         error,
+         delay_type,
+         deferred_reason
+       ) do
+    error_suffix = if is_binary(error), do: " error=#{error}", else: ""
+
+    message =
+      "Retrying issue_id=#{issue_id} issue_identifier=#{identifier} in #{delay_ms}ms " <>
+        "(attempt #{attempt})#{error_suffix}"
+
+    log_retry_message(message, delay_type, deferred_reason)
+  end
+
+  defp log_retry_message(message, delay_type, deferred_reason)
+       when delay_type in [:capacity, :paused] do
+    Logger.debug("#{message} deferred=#{deferred_reason}")
+  end
+
+  defp log_retry_message(message, _delay_type, _deferred_reason), do: Logger.warning(message)
 
   defp pop_retry_attempt_state(%State{} = state, issue_id, retry_token) when is_reference(retry_token) do
     case Map.get(state.retry_attempts, issue_id) do
@@ -1292,7 +1360,9 @@ defmodule SymphonyElixir.Orchestrator do
           worker_host: Map.get(retry_entry, :worker_host),
           workspace_path: Map.get(retry_entry, :workspace_path),
           model_route: Map.get(retry_entry, :model_route),
-          escalation_reason: Map.get(retry_entry, :escalation_reason)
+          escalation_reason: Map.get(retry_entry, :escalation_reason),
+          delay_type: Map.get(retry_entry, :delay_type, :failure),
+          deferred_reason: Map.get(retry_entry, :deferred_reason)
         }
 
         {:ok, attempt, metadata, %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}}
@@ -1317,7 +1387,11 @@ defmodule SymphonyElixir.Orchestrator do
            state,
            issue_id,
            attempt + 1,
-           Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}"})
+           Map.merge(metadata, %{
+             error: "retry poll failed: #{inspect(reason)}",
+             delay_type: :failure,
+             deferred_reason: nil
+           })
          )}
     end
   end
@@ -1419,22 +1493,29 @@ defmodule SymphonyElixir.Orchestrator do
              attempt + 1,
              Map.merge(metadata, %{
                identifier: issue.identifier,
-               error: "retry dispatch refresh failed: #{inspect(reason)}"
+               error: "retry dispatch refresh failed: #{inspect(reason)}",
+               delay_type: :failure,
+               deferred_reason: nil
              })
            )}
       end
     else
-      retry_reason = if intake_active, do: "no available orchestrator slots", else: "intake paused"
+      {delay_type, retry_reason} =
+        if intake_active,
+          do: {:capacity, "no available orchestrator slots"},
+          else: {:paused, "intake paused"}
+
       Logger.debug("Retry deferred for #{issue_context(issue)} reason=#{retry_reason}")
 
       {:noreply,
        schedule_issue_retry(
          state,
          issue.id,
-         attempt + 1,
+         attempt,
          Map.merge(metadata, %{
            identifier: issue.identifier,
-           error: retry_reason
+           delay_type: delay_type,
+           deferred_reason: retry_reason
          })
        )}
     end
@@ -1448,16 +1529,20 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp owner_control_dispatch_context do
-    client = Application.get_env(:symphony_elixir, :owner_control_client_module, OwnerControlClient)
+    if owner_control_enabled?() do
+      client = Application.get_env(:symphony_elixir, :owner_control_client_module, OwnerControlClient)
 
-    case owner_control_intake_active?() do
-      true -> owner_control_ready_context(client)
-      false -> %{intake_active: false, ready_issue_numbers: %{}}
+      case owner_control_intake_active?() do
+        true -> owner_control_ready_context(client)
+        false -> empty_owner_control_dispatch_context(false)
+      end
+    else
+      legacy_owner_control_dispatch_context()
     end
   rescue
-    _exception -> %{intake_active: false, ready_issue_numbers: %{}}
+    _exception -> empty_owner_control_dispatch_context(false)
   catch
-    _kind, _reason -> %{intake_active: false, ready_issue_numbers: %{}}
+    _kind, _reason -> empty_owner_control_dispatch_context(false)
   end
 
   defp owner_control_ready_context(client) do
@@ -1469,8 +1554,27 @@ defmodule SymphonyElixir.Orchestrator do
         }
 
       _disabled_or_unavailable ->
-        %{intake_active: true, ready_issue_numbers: %{}}
+        empty_owner_control_dispatch_context(true)
     end
+  end
+
+  defp empty_owner_control_dispatch_context(intake_active) do
+    %{
+      intake_active: intake_active,
+      ready_issue_numbers: %{}
+    }
+  end
+
+  defp legacy_owner_control_dispatch_context do
+    %{
+      intake_active: true,
+      ready_issue_numbers: :owner_control_disabled
+    }
+  end
+
+  defp owner_control_enabled? do
+    not is_nil(Application.get_env(:symphony_elixir, :owner_control_client_module)) or
+      OwnerControlClient.enabled?()
   end
 
   defp fresh_ready_issue_numbers(snapshot) do
@@ -1482,14 +1586,16 @@ defmodule SymphonyElixir.Orchestrator do
       get_in(snapshot, [:sources, :github, :status]) == "fresh"
   end
 
-  defp ready_issue_numbers(%{issues: issues}) when is_map(issues) do
+  defp ready_issue_numbers(snapshot), do: project_issue_numbers(snapshot, "ready for ai")
+
+  defp project_issue_numbers(%{issues: issues}, expected_status) when is_map(issues) do
     Enum.reduce(issues, %{}, fn
       {key, %{number: number, status: status, state: state}}, ready
       when is_binary(key) and is_integer(number) and number > 0 and is_binary(status) and
              is_binary(state) ->
         canonical_number = Integer.to_string(number)
 
-        if key == canonical_number and normalize_issue_state(status) == "ready for ai" and
+        if key == canonical_number and normalize_issue_state(status) == expected_status and
              normalize_issue_state(state) == "open" do
           Map.put(ready, canonical_number, number)
         else
@@ -1501,7 +1607,7 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
-  defp ready_issue_numbers(_snapshot), do: %{}
+  defp project_issue_numbers(_snapshot, _expected_status), do: %{}
 
   defp acquire_owner_control_lease(%Issue{} = issue, ready_issue_numbers)
        when is_map(ready_issue_numbers) do
@@ -1525,12 +1631,10 @@ defmodule SymphonyElixir.Orchestrator do
       {:error, {kind, reason}}
   end
 
+  defp acquire_owner_control_lease(%Issue{}, :owner_control_disabled), do: :ok
+
   defp acquire_owner_control_lease_while_active(%Issue{} = issue, ready_issue_numbers) do
-    if issue_routable?(issue) do
-      :ok
-    else
-      request_owner_control_lease(issue, ready_issue_numbers)
-    end
+    request_owner_control_lease(issue, ready_issue_numbers)
   end
 
   defp request_owner_control_lease(%Issue{} = issue, ready_issue_numbers) do
@@ -1564,13 +1668,48 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
-    if metadata[:delay_type] == :continuation and attempt == 1 do
-      @continuation_retry_delay_ms
-    else
-      failure_retry_delay(attempt)
+  defp retry_delay(attempt, delay_type) when is_integer(attempt) and attempt > 0 do
+    case delay_type do
+      :continuation when attempt == 1 -> @continuation_retry_delay_ms
+      :capacity -> @capacity_retry_delay_ms
+      :paused -> @paused_retry_delay_ms
+      _failure -> failure_retry_delay(attempt)
     end
   end
+
+  defp wake_paused_retries(%State{} = state) do
+    if owner_control_intake_active?() do
+      now_ms = System.monotonic_time(:millisecond)
+      retry_attempts = Map.new(state.retry_attempts, &wake_paused_retry_entry(&1, now_ms))
+      %{state | retry_attempts: retry_attempts}
+    else
+      state
+    end
+  end
+
+  defp wake_paused_retry_entry({issue_id, retry_entry}, now_ms) do
+    if paused_retry?(retry_entry) do
+      cancel_retry_timer(Map.get(retry_entry, :timer_ref))
+      retry_token = make_ref()
+      send(self(), {:retry_issue, issue_id, retry_token})
+
+      {issue_id,
+       retry_entry
+       |> Map.put(:timer_ref, nil)
+       |> Map.put(:retry_token, retry_token)
+       |> Map.put(:due_at_ms, now_ms)
+       |> Map.put(:delay_type, :capacity)
+       |> Map.put(:deferred_reason, "intake resumed")}
+    else
+      {issue_id, retry_entry}
+    end
+  end
+
+  defp paused_retry?(retry_entry) when is_map(retry_entry) do
+    Map.get(retry_entry, :delay_type) == :paused or Map.get(retry_entry, :error) == "intake paused"
+  end
+
+  defp paused_retry?(_retry_entry), do: false
 
   defp failure_retry_delay(attempt) do
     max_delay_power = min(attempt - 1, 10)
@@ -1709,6 +1848,12 @@ defmodule SymphonyElixir.Orchestrator do
     )
   end
 
+  defp fresh_dispatch_slots_available?(%State{} = state) do
+    # A retry is already claimed owner work. Count it against the same WIP ceiling
+    # so a fast poll cannot replace a continuation before its timer fires.
+    available_slots(state) > map_size(state.retry_attempts)
+  end
+
   @spec request_refresh() :: map() | :unavailable
   def request_refresh do
     request_refresh(__MODULE__)
@@ -1764,6 +1909,7 @@ defmodule SymphonyElixir.Orchestrator do
           turn_count: Map.get(metadata, :turn_count, 0),
           started_at: metadata.started_at,
           last_codex_timestamp: metadata.last_codex_timestamp,
+          last_progress_timestamp: Map.get(metadata, :last_progress_timestamp),
           last_codex_message: metadata.last_codex_message,
           last_codex_event: metadata.last_codex_event,
           selected_model_tier: Map.get(metadata, :selected_model_tier),
@@ -1792,7 +1938,9 @@ defmodule SymphonyElixir.Orchestrator do
           routing_reason: get_in(retry, [:model_route, :routing_reason]),
           escalated_from: get_in(retry, [:model_route, :escalated_from]),
           escalation_history: get_in(retry, [:model_route, :escalation_history]) || [],
-          escalation_reason: Map.get(retry, :escalation_reason)
+          escalation_reason: Map.get(retry, :escalation_reason),
+          delay_type: Map.get(retry, :delay_type),
+          deferred_reason: Map.get(retry, :deferred_reason)
         }
       end)
 
@@ -1870,10 +2018,16 @@ defmodule SymphonyElixir.Orchestrator do
     last_reported_total = Map.get(running_entry, :codex_last_reported_total_tokens, 0)
     turn_count = Map.get(running_entry, :turn_count, 0)
 
+    last_progress_timestamp =
+      if codex_progress_update?(update, token_delta),
+        do: timestamp,
+        else: Map.get(running_entry, :last_progress_timestamp)
+
     {
       running_entry
       |> Map.merge(%{
         last_codex_timestamp: timestamp,
+        last_progress_timestamp: last_progress_timestamp,
         last_codex_message: summarize_codex_update(update),
         session_id: session_id_for_update(running_entry.session_id, update),
         thread_id: thread_id_for_update(Map.get(running_entry, :thread_id), update),
@@ -1891,6 +2045,70 @@ defmodule SymphonyElixir.Orchestrator do
       token_delta
     }
   end
+
+  defp codex_progress_update?(_update, %{input_tokens: input, output_tokens: output, total_tokens: total})
+       when input > 0 or output > 0 or total > 0,
+       do: true
+
+  defp codex_progress_update?(%{event: :notification, payload: payload}, _token_delta) do
+    payload
+    |> codex_message_method()
+    |> progress_notification_method?()
+  end
+
+  defp codex_progress_update?(%{event: event}, _token_delta)
+       when event in [
+              :session_started,
+              :turn_completed,
+              :turn_failed,
+              :turn_cancelled,
+              :turn_input_required,
+              :turn_ended_with_error,
+              :approval_required,
+              :approval_auto_approved,
+              :tool_call_completed,
+              :tool_call_failed,
+              :unsupported_tool_call
+            ],
+       do: true
+
+  defp codex_progress_update?(_update, _token_delta), do: false
+
+  defp progress_notification_method?(method)
+       when method in [
+              "item/started",
+              "item/updated",
+              "item/completed",
+              "item/agentMessage/delta",
+              "item/agent_message/delta",
+              "item/commandExecution/outputDelta",
+              "item/commandExecution/requestApproval",
+              "item/fileChange/outputDelta",
+              "item/fileChange/requestApproval",
+              "item/plan/delta",
+              "item/reasoning/summaryPartAdded",
+              "item/reasoning/summaryTextDelta",
+              "item/reasoning/textDelta",
+              "item/tool/call",
+              "item/tool/requestUserInput",
+              "turn/started",
+              "turn/start",
+              "turn/completed",
+              "turn/failed",
+              "turn/cancelled",
+              "turn/diff/updated",
+              "turn/plan/updated",
+              "turn/input_required",
+              "turn/need_input",
+              "turn/needs_input",
+              "turn/provide_input",
+              "turn/request_input",
+              "turn/request_response",
+              "turn/approval_required"
+            ],
+       do: true
+
+  defp progress_notification_method?(_method), do: false
 
   defp codex_app_server_pid_for_update(_existing, %{codex_app_server_pid: pid})
        when is_binary(pid),
@@ -2188,7 +2406,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_candidate_issue?(%Issue{} = issue, terminal_states) do
-    candidate_issue?(issue, active_state_set(), terminal_states, %{})
+    candidate_issue?(issue, active_state_set(), terminal_states, :owner_control_disabled)
   end
 
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do
