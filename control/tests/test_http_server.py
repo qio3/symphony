@@ -79,6 +79,15 @@ class ControlHttpServerTest(unittest.TestCase):
         with self.request("/assets/owner-control.js", authorized=False) as response:
             self.assertEqual(response.headers.get_content_type(), "text/javascript")
 
+    def test_service_action_menu_stacks_above_service_facts(self):
+        with self.request("/assets/owner-control.css", authorized=False) as response:
+            css = response.read().decode("utf-8")
+
+        self.assertRegex(
+            css,
+            r"\.service-panel \.section-heading\s*\{[^}]*z-index:\s*2",
+        )
+
     def test_browser_snapshot_and_actions_require_same_origin_csrf(self):
         _html, csrf, _headers = self.browser_session()
         with self.assertRaises(urllib.error.HTTPError) as raised:

@@ -32,7 +32,9 @@ h3 { font-size: 15px; line-height: 1.35; letter-spacing: -.01em; }
 .service-advanced-actions .button { width: 100%; }
 .panel { background: rgba(255,255,255,.92); border: 1px solid #dce3dc; border-radius: 19px; padding: 20px; margin-bottom: 14px; box-shadow: 0 12px 35px rgba(21,40,27,.035); }
 .service-panel { position: relative; overflow: visible; padding: 24px; border-color: #bdcec2; background: linear-gradient(135deg, #fafffb 0%, #edf5ef 100%); }
-.service-panel .section-heading, .service-panel .service-facts { position: relative; z-index: 1; }
+.service-panel .section-heading, .service-panel .service-facts { position: relative; }
+.service-panel .section-heading { z-index: 2; }
+.service-panel .service-facts { z-index: 1; }
 .service-running { color: #145a38; font-size: 30px; }
 .service-stopped { color: #9a3131; font-size: 30px; }
 .service-facts { margin-top: 22px; }
