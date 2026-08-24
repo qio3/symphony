@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="owner-control-csrf" content="{{OWNER_CONTROL_CSRF}}">
+    <meta name="runtime-diagnostics-url" content="{{RUNTIME_DIAGNOSTICS_URL}}">
+    <title>Symphony Owner Control</title>
+    <link rel="stylesheet" href="/assets/owner-control.css">
+    <script src="/assets/owner-control.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell" id="app" aria-busy="true">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Symphony</p>
+          <h1>Owner Control</h1>
+        </div>
+        <div class="topbar-actions">
+          <span class="status-chip is-loading" id="snapshot-status">Loading…</span>
+          <button class="icon-button" id="refresh-button" type="button" aria-label="Refresh snapshot">↻</button>
+          <a class="quiet-link" id="runtime-link" href="{{RUNTIME_DIAGNOSTICS_URL}}">Runtime diagnostics ↗</a>
+        </div>
+      </header>
+
+      <div class="notice is-hidden" id="global-notice" role="status"></div>
+
+      <main>
+        <section class="panel service-panel" aria-labelledby="service-title">
+          <div class="section-heading">
+            <div>
+              <p class="section-kicker">Service</p>
+              <h2 id="service-title">Checking Symphony…</h2>
+            </div>
+            <div class="service-actions" id="service-actions"></div>
+          </div>
+          <div class="service-facts" id="service-facts"></div>
+        </section>
+
+        <div class="overview-grid">
+          <section class="panel" aria-labelledby="delivery-title">
+            <div class="section-heading compact"><h2 id="delivery-title">Delivery</h2></div>
+            <div id="delivery-content" class="loading-block" role="status" aria-label="Loading delivery state"></div>
+          </section>
+          <section class="panel" aria-labelledby="quota-title">
+            <div class="section-heading compact"><h2 id="quota-title">Codex quota</h2></div>
+            <div id="quota-content" class="loading-block" role="status" aria-label="Loading Codex quota"></div>
+          </section>
+        </div>
+
+        <section class="counter-strip" id="counter-strip" aria-label="Task counters"></section>
+
+        <section class="panel attention-panel" aria-labelledby="needs-owner-title">
+          <div class="section-heading compact">
+            <div><p class="section-kicker">Attention first</p><h2 id="needs-owner-title">Needs owner</h2></div>
+          </div>
+          <div id="needs-owner-content" class="loading-block" role="status" aria-label="Loading owner decisions"></div>
+        </section>
+
+        <section class="panel" aria-labelledby="running-title">
+          <div class="section-heading compact"><h2 id="running-title">Running</h2></div>
+          <div id="running-content" class="loading-block" role="status" aria-label="Loading running tasks"></div>
+        </section>
+
+        <section class="panel" aria-labelledby="ready-title">
+          <div class="section-heading compact"><h2 id="ready-title">Ready for Acceptance</h2></div>
+          <div id="ready-content" class="loading-block" role="status" aria-label="Loading acceptance queue"></div>
+        </section>
+
+        <section class="panel" aria-labelledby="backlog-title">
+          <div class="section-heading compact"><h2 id="backlog-title">Ready AI / Backlog</h2></div>
+          <div id="backlog-content" class="loading-block" role="status" aria-label="Loading backlog"></div>
+        </section>
+
+        <details class="panel diagnostics" id="runtime-diagnostics">
+          <summary>Runtime diagnostics</summary>
+          <div id="source-health"></div>
+          <pre id="diagnostic-logs">Open to load recent logs.</pre>
+        </details>
+      </main>
+    </div>
+
+    <div class="toast-region" id="toast-region" aria-live="polite"></div>
+    <dialog id="action-dialog" aria-labelledby="dialog-title">
+      <form method="dialog" id="dialog-form">
+        <div class="dialog-heading">
+          <div><p class="section-kicker" id="dialog-kicker">Confirm action</p><h2 id="dialog-title"></h2></div>
+          <button class="icon-button" id="dialog-close" type="button" aria-label="Close dialog">×</button>
+        </div>
+        <div id="dialog-body"></div>
+        <div class="dialog-actions">
+          <button class="button secondary" id="dialog-cancel" type="button">Cancel</button>
+          <button class="button primary" id="dialog-confirm" type="submit">Confirm</button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>

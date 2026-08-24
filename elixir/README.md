@@ -157,7 +157,10 @@ Notes:
   `api_key`, `project_slug`, and `assignee` aliases for compatibility.
 - `tracker.required_labels` is optional. When set, an issue must have every
   configured label to dispatch or continue running. Label matching ignores
-  case and surrounding whitespace. A blank configured label matches no issue.
+  case and surrounding whitespace. A blank configured label matches no issue. When external Owner
+  Control is enabled, a fresh open `Ready for AI` Issue that is missing only the configured
+  `symphony` label may enter lease preflight; the worker still starts only after the typed lease
+  action succeeds and tracker revalidation observes every required label.
 - Safer Codex defaults are used when policy fields are omitted:
   - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
   - `codex.thread_sandbox` defaults to `workspace-write`
@@ -317,6 +320,20 @@ The observability UI now runs on a minimal Phoenix stack:
 - Bandit as the HTTP server
 - Phoenix dependency static assets for the LiveView client bootstrap
 - Tracker issue identifiers link to the tracker-provided URL when it uses `http` or `https`
+
+An optional external owner-control process supplies the separate owner UI, deterministic project and
+deployment snapshot, Telegram adapter, and typed owner actions. Configure both
+`SYMPHONY_OWNER_CONTROL_URL` and a 32-character-or-longer `SYMPHONY_OWNER_CONTROL_TOKEN`; the runtime
+uses the authoritative `/v1/intake` gate, one fresh `/v1/snapshot` Ready-for-AI projection per active
+dispatch cycle, and the fixed `/v1/actions/lease` preflight. The lease endpoint accepts only an open
+`Ready for AI` Issue while intake is active and adds the durable `symphony` label without changing
+Project status. Snapshot, intake, or lease failures fail closed for new unleased work; retries remain
+label-gated, while already-running workers and reconciliation continue. The native Phoenix page
+remains a read-only runtime diagnostics surface.
+
+Per-Issue Codex token and estimated-credit samples are appended to
+`SYMPHONY_USAGE_LEDGER_PATH`. Point it at a persistent host-mounted path to retain completed attempts
+across runtime restarts; the ledger contains no credentials.
 
 ## Project Layout
 

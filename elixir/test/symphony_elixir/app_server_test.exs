@@ -69,6 +69,194 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "runtime account reads preserve interleaved notifications and response ordering" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-elixir-account-#{System.unique_integer([:positive])}")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-300")
+    codex_binary = Path.join(test_root, "fake-codex")
+    trace_file = Path.join(test_root, "trace.jsonl")
+    File.mkdir_p!(workspace)
+
+    try do
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r line; do
+        printf '%s\\n' "$line" >> "$SYMPHONY_ACCOUNT_TRACE"
+        count=$((count + 1))
+        case "$count" in
+          1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+          3)
+            printf '%s\\n' '{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"total":{"inputTokens":2,"totalTokens":2}}}}'
+            printf '%s\\n' '{"id":4,"result":{"account":{"plan":"pro"}}}'
+            ;;
+          4) printf '%s\\n' '{"id":5,"result":{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300},"secondary":{"usedPercent":20,"windowDurationMins":10080}},"rateLimitsByLimitId":{"codex":{}}}}' ;;
+          5) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-account"}}}' ;;
+          6) printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-account"}}}'; printf '%s\\n' '{"method":"turn/completed"}' ;;
+          7) printf '%s\\n' '{"id":6,"result":{"summary":{},"threadUsage":{"estimatedUsageCreditsMicros":123,"estimatedUsageUsdMicros":4,"groups":["pro"]}}}' ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMPHONY_ACCOUNT_TRACE", trace_file)
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root, codex_command: "#{codex_binary} app-server")
+      issue = %Issue{id: "300", identifier: "MT-300", title: "Account reads", state: "In Progress"}
+      parent = self()
+
+      assert {:ok, _} = AppServer.run(workspace, "work", issue, runtime_account_reads: true, on_message: &send(parent, {:codex, &1}))
+
+      methods = File.read!(trace_file) |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!(&1)["method"])
+      assert methods == ["initialize", "initialized", "account/read", "account/rateLimits/read", "thread/start", "turn/start", "account/usage/read"]
+      assert_receive {:codex, %{event: :notification, payload: %{"method" => "thread/tokenUsage/updated"}}}
+      assert_receive {:codex, %{event: :account_snapshot, payload: %{"account" => %{"plan" => "pro"}}}}
+      assert_receive {:codex, %{event: :rate_limits_snapshot, payload: %{"rateLimits" => %{}}}}
+      assert_receive {:codex, %{event: :account_usage, thread_id: "thread-account", payload: %{"threadUsage" => %{"estimatedUsageCreditsMicros" => 123}}}}
+    after
+      System.delete_env("SYMPHONY_ACCOUNT_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "account rate-limit probe reads subscription windows without starting a thread or turn" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-elixir-rate-limit-probe-#{System.unique_integer([:positive])}")
+    workspace_root = Path.join(test_root, "workspaces")
+    codex_binary = Path.join(test_root, "fake-codex")
+    trace_file = Path.join(test_root, "trace.jsonl")
+    environment_trace_file = Path.join(test_root, "environment.trace")
+    bash_home = Path.join(test_root, "bash-home")
+    profile_marker_env = "SYMPHONY_RATE_LIMIT_PROFILE_#{System.unique_integer([:positive])}"
+    previous_api_key = System.get_env("OPENAI_API_KEY")
+    previous_home = System.get_env("HOME")
+    previous_trace = System.get_env("SYMPHONY_RATE_LIMIT_TRACE")
+    previous_environment_trace = System.get_env("SYMPHONY_RATE_LIMIT_ENV_TRACE")
+
+    try do
+      File.mkdir_p!(workspace_root)
+      File.mkdir_p!(bash_home)
+
+      File.write!(Path.join(bash_home, ".bash_profile"), """
+      export OPENAI_API_KEY='profile-key-that-must-not-reach-codex'
+      export #{profile_marker_env}=1
+      """)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      printf 'PROFILE_LOADED:%s\n' "$#{profile_marker_env}" >> "$SYMPHONY_RATE_LIMIT_ENV_TRACE"
+      if [ "${OPENAI_API_KEY+x}" = "x" ]; then
+        printf '%s\n' 'OPENAI_API_KEY=INHERITED' >> "$SYMPHONY_RATE_LIMIT_ENV_TRACE"
+      else
+        printf '%s\n' 'OPENAI_API_KEY=UNSET' >> "$SYMPHONY_RATE_LIMIT_ENV_TRACE"
+      fi
+      count=0
+      while IFS= read -r line; do
+        printf '%s\\n' "$line" >> "$SYMPHONY_RATE_LIMIT_TRACE"
+        count=$((count + 1))
+        case "$count" in
+          1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+          2) ;;
+          3) printf '%s\\n' '{"id":5,"result":{"rateLimits":{"primary":{"usedPercent":17,"windowDurationMins":300},"secondary":{"usedPercent":42,"windowDurationMins":10080}}}}' ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("HOME", bash_home)
+      System.put_env("OPENAI_API_KEY", "parent-key-that-must-not-reach-codex")
+      System.put_env("SYMPHONY_RATE_LIMIT_TRACE", trace_file)
+      System.put_env("SYMPHONY_RATE_LIMIT_ENV_TRACE", environment_trace_file)
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root, codex_command: "#{codex_binary} app-server")
+
+      assert {:ok,
+              %{
+                "rateLimits" => %{
+                  "primary" => %{"usedPercent" => 17, "windowDurationMins" => 300},
+                  "secondary" => %{"usedPercent" => 42, "windowDurationMins" => 10_080}
+                }
+              }} = AppServer.read_rate_limits()
+
+      methods = trace_file |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!(&1)["method"])
+      assert methods == ["initialize", "initialized", "account/rateLimits/read"]
+      assert File.read!(environment_trace_file) == "PROFILE_LOADED:1\nOPENAI_API_KEY=UNSET\n"
+    after
+      restore_env("OPENAI_API_KEY", previous_api_key)
+      restore_env("HOME", previous_home)
+      restore_env("SYMPHONY_RATE_LIMIT_TRACE", previous_trace)
+      restore_env("SYMPHONY_RATE_LIMIT_ENV_TRACE", previous_environment_trace)
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "runtime account observability failures do not prevent a worker session" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-account-fallback-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-301")
+    codex_binary = Path.join(test_root, "fake-codex")
+    trace_file = Path.join(test_root, "trace.jsonl")
+    File.mkdir_p!(workspace)
+
+    try do
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r line; do
+        printf '%s\\n' "$line" >> "$SYMPHONY_ACCOUNT_TRACE"
+        count=$((count + 1))
+        case "$count" in
+          1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+          3) printf '%s\\n' '{"id":4,"error":{"message":"unsupported"}}' ;;
+          4) printf '%s\\n' '{"id":5,"error":{"message":"unsupported"}}' ;;
+          5) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-fallback"}}}' ;;
+          6) printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-fallback"}}}'; printf '%s\\n' '{"method":"turn/completed"}' ;;
+          7) printf '%s\\n' '{"id":6,"error":{"message":"unsupported"}}' ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMPHONY_ACCOUNT_TRACE", trace_file)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "301",
+        identifier: "MT-301",
+        title: "Account fallback",
+        state: "In Progress"
+      }
+
+      assert {:ok, _} =
+               AppServer.run(workspace, "work", issue, runtime_account_reads: true)
+
+      methods =
+        trace_file
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&Jason.decode!(&1)["method"])
+
+      assert methods == [
+               "initialize",
+               "initialized",
+               "account/read",
+               "account/rateLimits/read",
+               "thread/start",
+               "turn/start",
+               "account/usage/read"
+             ]
+    after
+      System.delete_env("SYMPHONY_ACCOUNT_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
   test "classifier app-server command disables repository tools and constrains output" do
     test_root =
       Path.join(System.tmp_dir!(), "symphony-elixir-classifier-tools-#{System.unique_integer([:positive])}")

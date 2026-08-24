@@ -342,7 +342,19 @@ defmodule SymphonyElixir.ExtensionsTest do
                "terra" => %{"active" => 1, "completed" => 2},
                "sol" => %{"active" => 0, "completed" => 1}
              },
-             "rate_limits" => %{"primary" => %{"remaining" => 11}}
+             "rate_limits" => %{"primary" => %{"remaining" => 11}},
+             "issue_usage" => %{
+               "HTTP" => %{
+                 "aggregate" => %{
+                   "token_usage" => %{"total_tokens" => 12},
+                   "estimated_usage_credits_micros" => 44_000
+                 }
+               }
+             },
+             "usage_aggregate" => %{
+               "token_usage" => %{"total_tokens" => 12},
+               "estimated_usage_credits_micros" => 44_000
+             }
            }
 
     conn = get(build_conn(), "/api/v1/MT-HTTP")
@@ -758,7 +770,19 @@ defmodule SymphonyElixir.ExtensionsTest do
         terra: %{active: 1, completed: 2},
         sol: %{active: 0, completed: 1}
       },
-      rate_limits: %{"primary" => %{"remaining" => 11}}
+      rate_limits: %{"primary" => %{"remaining" => 11}},
+      issue_usage: %{
+        "HTTP" => %{
+          aggregate: %{
+            token_usage: %{total_tokens: 12},
+            estimated_usage_credits_micros: 44_000
+          }
+        }
+      },
+      usage_aggregate: %{
+        token_usage: %{total_tokens: 12},
+        estimated_usage_credits_micros: 44_000
+      }
     }
   end
 

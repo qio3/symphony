@@ -765,8 +765,10 @@ Tick sequence:
 2. Run dispatch preflight validation.
 3. Fetch candidate issues from tracker using active states.
 4. Sort issues by dispatch priority.
-5. Dispatch eligible issues while slots remain.
-6. Notify observability/status consumers of state changes.
+5. If external Owner Control is enabled, perform bounded lease preflight for fresh `Ready for AI`
+   candidates that are missing only the configured `symphony` label.
+6. Dispatch eligible issues while slots remain.
+7. Notify observability/status consumers of state changes.
 
 If per-tick validation fails, dispatch is skipped for that tick, but reconciliation still happens
 first.
@@ -787,6 +789,14 @@ An issue is dispatch-eligible only if all are true:
 For refresh and continuation checks, `issue_routable(issue)` means only that adapter-provided
 `dispatchable` is true and all `tracker.required_labels` match. State, claims, and concurrency are
 checked separately by the surrounding algorithm.
+
+When external Owner Control is enabled, an open Issue from one fresh deterministic snapshot may
+enter lease preflight only when its Project status is exactly `Ready for AI` and it satisfies every
+configured required label except `symphony`. Preflight MUST recheck authoritative intake, call only
+the fixed typed lease action, and fail closed on stale, unavailable, malformed, or mismatched Issue
+state. It is not worker dispatch: the tracker MUST be refreshed afterward, and the worker may start
+only when that refresh observes every configured required label. Existing fully labeled candidates
+remain eligible without reacquiring the lease.
 
 Sorting order (stable intent):
 

@@ -108,7 +108,16 @@ defmodule SymphonyElixir.AgentRunner do
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issues_by_ids/1)
 
     session_opts =
-      [worker_host: worker_host]
+      [
+        worker_host: worker_host,
+        runtime_account_reads:
+          Keyword.get(
+            opts,
+            :runtime_account_reads,
+            Application.get_env(:symphony_elixir, :runtime_account_reads, true)
+          ),
+        on_message: codex_message_handler(codex_update_recipient, issue)
+      ]
       |> maybe_put_model_route(model_route)
 
     with {:ok, session} <- AppServer.start_session(workspace, session_opts) do

@@ -9,6 +9,10 @@ defmodule SymphonyElixir.Codex.AppServer do
   @initialize_id 1
   @thread_start_id 2
   @turn_start_id 3
+  @account_read_id 4
+  @rate_limits_read_id 5
+  @account_usage_read_id 6
+  @account_observability_timeout_ms 2_000
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
   @type session :: %{
@@ -22,6 +26,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           workspace: Path.t(),
           worker_host: String.t() | nil,
           model: String.t() | nil,
+          runtime_account_reads: boolean(),
           dynamic_tool_binding: map()
         }
 
@@ -34,6 +39,35 @@ defmodule SymphonyElixir.Codex.AppServer do
         stop_session(session)
       end
     end
+  end
+
+  @doc """
+  Reads the account rate-limit snapshot without creating a Codex thread or turn.
+  """
+  @spec read_rate_limits() :: {:ok, map()} | {:error, term()}
+  def read_rate_limits do
+    workspace = Config.local_workspace_root()
+    dynamic_tool_binding = dynamic_tool_binding(dynamic_tools: false)
+    command = Config.settings!().codex.command
+
+    with {:ok, canonical_workspace} <- PathSafety.canonicalize(workspace),
+         {:ok, port} <- start_port(canonical_workspace, nil, dynamic_tool_binding, command) do
+      try do
+        with :ok <- send_initialize(port) do
+          request_runtime(
+            port,
+            @rate_limits_read_id,
+            "account/rateLimits/read",
+            %{},
+            &default_on_message/1
+          )
+        end
+      after
+        stop_port(port)
+      end
+    end
+  rescue
+    exception -> {:error, {:account_rate_limits_failed, Exception.message(exception)}}
   end
 
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
@@ -50,7 +84,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       with {:ok, configured_policies} <- session_policies(expanded_workspace, worker_host),
            session_policies <- override_session_policies(configured_policies, opts),
            {:ok, thread_id} <-
-             do_start_session(port, expanded_workspace, session_policies, dynamic_tool_binding, model) do
+             do_start_session(port, expanded_workspace, session_policies, dynamic_tool_binding, model, opts) do
         {:ok,
          %{
            port: port,
@@ -63,6 +97,7 @@ defmodule SymphonyElixir.Codex.AppServer do
            workspace: expanded_workspace,
            worker_host: worker_host,
            model: model,
+           runtime_account_reads: Keyword.get(opts, :runtime_account_reads, false),
            dynamic_tool_binding: dynamic_tool_binding
          }}
       else
@@ -83,6 +118,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           turn_sandbox_policy: turn_sandbox_policy,
           thread_id: thread_id,
           workspace: workspace,
+          runtime_account_reads: runtime_account_reads,
           dynamic_tool_binding: dynamic_tool_binding
         },
         prompt,
@@ -128,6 +164,8 @@ defmodule SymphonyElixir.Codex.AppServer do
         case await_turn_completion(port, on_message, tool_executor, auto_approve_requests, turn_timeout_ms) do
           {:ok, result} ->
             Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
+
+            :ok = maybe_read_thread_usage(port, thread_id, runtime_account_reads, on_message)
 
             {:ok,
              %{
@@ -239,6 +277,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp local_launch_command(dynamic_tool_binding, command) do
     [
+      "unset OPENAI_API_KEY",
       tracker_secret_unset_command(dynamic_tool_binding),
       "exec #{command}"
     ]
@@ -326,10 +365,69 @@ defmodule SymphonyElixir.Codex.AppServer do
     Config.codex_runtime_settings(workspace, remote: true)
   end
 
-  defp do_start_session(port, workspace, session_policies, dynamic_tool_binding, model) do
+  defp do_start_session(port, workspace, session_policies, dynamic_tool_binding, model, opts) do
     case send_initialize(port) do
-      :ok -> start_thread(port, workspace, session_policies, dynamic_tool_binding, model)
-      {:error, reason} -> {:error, reason}
+      :ok ->
+        :ok = maybe_read_account_snapshot(port, opts)
+        start_thread(port, workspace, session_policies, dynamic_tool_binding, model)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp maybe_read_account_snapshot(port, opts) do
+    if Keyword.get(opts, :runtime_account_reads, false) do
+      on_message = Keyword.get(opts, :on_message, &default_on_message/1)
+
+      read_account_observation(
+        port,
+        @account_read_id,
+        "account/read",
+        :account_snapshot,
+        on_message
+      )
+
+      read_account_observation(
+        port,
+        @rate_limits_read_id,
+        "account/rateLimits/read",
+        :rate_limits_snapshot,
+        on_message
+      )
+    else
+      nil
+    end
+
+    :ok
+  end
+
+  defp read_account_observation(port, request_id, method, event, on_message) do
+    case request_runtime(port, request_id, method, %{}, on_message) do
+      {:ok, payload} ->
+        emit_message(on_message, event, %{payload: payload}, port_metadata(port, nil))
+
+      {:error, reason} ->
+        Logger.debug("Codex #{method} unavailable: #{inspect(reason)}")
+    end
+  end
+
+  defp request_runtime(port, request_id, method, params, on_message) do
+    send_message(port, %{"method" => method, "id" => request_id, "params" => params})
+    await_response(port, request_id, on_message, @account_observability_timeout_ms)
+  end
+
+  defp maybe_read_thread_usage(_port, _thread_id, false, _on_message), do: :ok
+
+  defp maybe_read_thread_usage(port, thread_id, true, on_message) do
+    case request_runtime(port, @account_usage_read_id, "account/usage/read", %{"threadId" => thread_id}, on_message) do
+      {:ok, usage} ->
+        emit_message(on_message, :account_usage, %{payload: usage, thread_id: thread_id}, port_metadata(port, nil))
+        :ok
+
+      {:error, reason} ->
+        Logger.debug("Codex account usage unavailable thread_id=#{thread_id}: #{inspect(reason)}")
+        :ok
     end
   end
 
@@ -957,17 +1055,26 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp await_response(port, request_id) do
-    with_timeout_response(port, request_id, Config.settings!().codex.read_timeout_ms, "")
+    await_response(port, request_id, &default_on_message/1)
   end
 
-  defp with_timeout_response(port, request_id, timeout_ms, pending_line) do
+  defp await_response(port, request_id, on_message) when is_function(on_message, 1) do
+    with_timeout_response(port, request_id, Config.settings!().codex.read_timeout_ms, "", on_message)
+  end
+
+  defp await_response(port, request_id, on_message, timeout_ms)
+       when is_function(on_message, 1) and is_integer(timeout_ms) and timeout_ms > 0 do
+    with_timeout_response(port, request_id, timeout_ms, "", on_message)
+  end
+
+  defp with_timeout_response(port, request_id, timeout_ms, pending_line, on_message) do
     receive do
       {^port, {:data, {:eol, chunk}}} ->
         complete_line = pending_line <> to_string(chunk)
-        handle_response(port, request_id, complete_line, timeout_ms)
+        handle_response(port, request_id, complete_line, timeout_ms, on_message)
 
       {^port, {:data, {:noeol, chunk}}} ->
-        with_timeout_response(port, request_id, timeout_ms, pending_line <> to_string(chunk))
+        with_timeout_response(port, request_id, timeout_ms, pending_line <> to_string(chunk), on_message)
 
       {^port, {:exit_status, status}} ->
         {:error, {:port_exit, status}}
@@ -977,7 +1084,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp handle_response(port, request_id, data, timeout_ms) do
+  defp handle_response(port, request_id, data, timeout_ms, on_message) do
     payload = to_string(data)
 
     case Jason.decode(payload) do
@@ -991,12 +1098,17 @@ defmodule SymphonyElixir.Codex.AppServer do
         {:error, {:response_error, response_payload}}
 
       {:ok, %{} = other} ->
-        Logger.debug("Ignoring message while waiting for response: #{inspect(other)}")
-        with_timeout_response(port, request_id, timeout_ms, "")
+        if Map.has_key?(other, "method") do
+          emit_message(on_message, :notification, %{payload: other, raw: payload}, metadata_from_message(port, other))
+        else
+          Logger.debug("Ignoring message while waiting for response: #{inspect(other)}")
+        end
+
+        with_timeout_response(port, request_id, timeout_ms, "", on_message)
 
       {:error, _} ->
         log_non_json_stream_line(payload, "response stream")
-        with_timeout_response(port, request_id, timeout_ms, "")
+        with_timeout_response(port, request_id, timeout_ms, "", on_message)
     end
   end
 

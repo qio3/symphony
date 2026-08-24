@@ -23,7 +23,9 @@ defmodule SymphonyElixirWeb.Presenter do
           blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
           codex_totals: snapshot.codex_totals,
           models: Map.get(snapshot, :model_counts, empty_model_counts()),
-          rate_limits: snapshot.rate_limits
+          rate_limits: snapshot.rate_limits,
+          issue_usage: Map.get(snapshot, :issue_usage, %{}),
+          usage_aggregate: Map.get(snapshot, :usage_aggregate, %{})
         }
 
       :timeout ->
