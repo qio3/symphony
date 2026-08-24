@@ -26,6 +26,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           workspace: Path.t(),
           worker_host: String.t() | nil,
           model: String.t() | nil,
+          runtime_account_reads: boolean(),
           dynamic_tool_binding: map()
         }
 
