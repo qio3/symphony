@@ -30,7 +30,16 @@ def request_json(
         with urllib.request.urlopen(request, timeout=timeout) as response:
             value = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
-        raise RuntimeError(f"HTTP {error.code} from {urllib.parse.urlsplit(url).netloc}") from error
+        host = urllib.parse.urlsplit(url).netloc
+        response_text = _http_error_text(error)
+        remaining = error.headers.get("X-RateLimit-Remaining") if error.headers else None
+        if host.casefold() == "api.github.com" and (
+            error.code == 429
+            or remaining == "0"
+            or "rate limit" in response_text.casefold()
+        ):
+            raise RuntimeError("GitHub API rate limit exhausted") from error
+        raise RuntimeError(f"HTTP {error.code} from {host}") from error
     if not isinstance(value, dict):
         raise RuntimeError("JSON endpoint returned a non-object response")
     return value
@@ -159,10 +168,12 @@ class GitHubClient:
             body={"query": query, "variables": variables, "operationName": operation_name},
             timeout=15,
         )
-        if value.get("errors"):
+        errors = value.get("errors") or []
+        if any(_is_graphql_rate_limit(error) for error in errors):
+            raise RuntimeError("GitHub GraphQL rate limit exhausted")
+        if errors:
             raise RuntimeError("GitHub GraphQL request failed")
         return value
-
     def _rest(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         return self._transport(
             method,
@@ -211,6 +222,26 @@ class GitHubClient:
             "pr": normalized_pr,
             "ci": ci,
         }
+
+
+def _http_error_text(error: urllib.error.HTTPError) -> str:
+    try:
+        return error.read(4096).decode("utf-8", errors="replace")
+    except (AttributeError, OSError):
+        return ""
+
+
+def _is_graphql_rate_limit(error: Any) -> bool:
+    if not isinstance(error, dict):
+        return False
+    error_type = str(error.get("type") or "").casefold()
+    error_code = str(error.get("code") or "").casefold()
+    message = str(error.get("message") or "").casefold()
+    return (
+        "rate_limit" in error_type
+        or "rate_limit" in error_code
+        or "rate limit" in message
+    )
 
 
 def extract_owner_question(comments: list[dict[str, Any]]) -> str | None:

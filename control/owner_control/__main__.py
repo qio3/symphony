@@ -15,6 +15,10 @@ from .supervisor import DockerComposeSupervisor
 from .telegram import NotificationDetector, TelegramCommandHandler
 
 
+def _publish_notifications_once(notifications: NotificationPublisher, snapshots: SnapshotService) -> None:
+    notifications.publish(snapshots.snapshot())
+
+
 def main() -> None:
     config = Config.from_env()
     store = StateStore(config.state_path)
@@ -81,7 +85,7 @@ def main() -> None:
         while True:
             try:
                 bot.poll_once(timeout=10)
-                notifications.publish(snapshots.snapshot(fresh=True))
+                _publish_notifications_once(notifications, snapshots)
             except Exception:
                 time.sleep(5)
     except KeyboardInterrupt:

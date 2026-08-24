@@ -4,6 +4,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from owner_control.runtime import SnapshotService
 from owner_control.state_store import StateStore
@@ -20,6 +21,15 @@ class FakeSymphony:
             "codex_totals": {},
             "rate_limits": None,
         }
+
+
+class CountingSymphony(FakeSymphony):
+    def __init__(self):
+        self.calls = 0
+
+    def state(self):
+        self.calls += 1
+        return super().state()
 
 
 class FailingSymphony:
@@ -41,6 +51,35 @@ class ChangingGitHub(FakeGitHub):
 
     def canonical(self, _ref):
         return {"sha": self.sha, "url": None}
+
+
+class CountingGitHub(ChangingGitHub):
+    def __init__(self):
+        super().__init__()
+        self.project_calls = 0
+        self.canonical_calls = 0
+        self.fail = False
+
+    def project_snapshot(self):
+        self.project_calls += 1
+        if self.fail:
+            raise RuntimeError("GitHub GraphQL rate limit exhausted")
+        return super().project_snapshot()
+
+    def canonical(self, ref):
+        self.canonical_calls += 1
+        return super().canonical(ref)
+
+
+class FakeClock:
+    def __init__(self, value=100.0):
+        self.value = value
+
+    def __call__(self):
+        return self.value
+
+    def advance(self, seconds):
+        self.value += seconds
 
 
 class BlockingGitHub(ChangingGitHub):
@@ -254,6 +293,99 @@ class SnapshotServiceTest(unittest.TestCase):
         while service.snapshot()["canonical"]["sha"] != "secondsha" and time.monotonic() < deadline:
             time.sleep(0.01)
         self.assertEqual(service.snapshot()["canonical"]["sha"], "secondsha")
+
+    def test_regular_refresh_keeps_runtime_fresh_without_requerying_github_inside_ttl(self):
+        symphony = CountingSymphony()
+        github = CountingGitHub()
+        service = SnapshotService(
+            symphony=symphony,
+            github=github,
+            test_environment=FakeTest(),
+            supervisor=FakeSupervisor(),
+            state_store=self.store,
+            worker_limit=5,
+            canonical_ref="rebrand/stanina",
+            cache_seconds=0,
+        )
+
+        service.snapshot()
+        service.snapshot()
+
+        deadline = time.monotonic() + 1
+        while symphony.calls < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertGreaterEqual(symphony.calls, 2)
+        self.assertEqual(github.project_calls, 1)
+        self.assertEqual(github.canonical_calls, 1)
+
+    def test_forced_snapshot_bypasses_github_ttl_for_action_preflight(self):
+        github = CountingGitHub()
+        service = SnapshotService(
+            symphony=FakeSymphony(),
+            github=github,
+            test_environment=FakeTest(),
+            supervisor=FakeSupervisor(),
+            state_store=self.store,
+            worker_limit=5,
+            canonical_ref="rebrand/stanina",
+        )
+        self.assertEqual(service.snapshot()["canonical"]["sha"], "firstsha")
+        github.sha = "secondsha"
+
+        forced = service.snapshot(fresh=True)
+
+        self.assertEqual(forced["canonical"]["sha"], "secondsha")
+        self.assertEqual(github.project_calls, 2)
+        self.assertEqual(github.canonical_calls, 2)
+
+    def test_github_failure_cooldown_preserves_runtime_refresh_and_then_recovers(self):
+        clock = FakeClock()
+        symphony = CountingSymphony()
+        github = CountingGitHub()
+        service = SnapshotService(
+            symphony=symphony,
+            github=github,
+            test_environment=FakeTest(),
+            supervisor=FakeSupervisor(),
+            state_store=self.store,
+            worker_limit=5,
+            canonical_ref="rebrand/stanina",
+            cache_seconds=0,
+        )
+
+        with patch("owner_control.runtime.time.monotonic", clock):
+            service.snapshot(fresh=True)
+            github.fail = True
+            stale = service.snapshot(fresh=True)
+            calls_after_failure = github.project_calls
+            runtime_calls_after_failure = symphony.calls
+
+            service.snapshot()
+            deadline = time.time() + 1
+            while symphony.calls == runtime_calls_after_failure and time.time() < deadline:
+                time.sleep(0.01)
+
+            self.assertGreater(symphony.calls, runtime_calls_after_failure)
+            self.assertEqual(github.project_calls, calls_after_failure)
+            self.assertTrue(stale["stale"])
+            self.assertEqual(stale["sources"]["github"]["status"], "stale")
+
+            github.fail = False
+            github.sha = "recoveredsha"
+            clock.advance(61)
+            service.snapshot()
+            deadline = time.time() + 1
+            while github.project_calls == calls_after_failure and time.time() < deadline:
+                time.sleep(0.01)
+
+            self.assertGreater(github.project_calls, calls_after_failure)
+            deadline = time.time() + 1
+            recovered = service.snapshot()
+            while recovered["sources"]["github"]["status"] != "fresh" and time.time() < deadline:
+                time.sleep(0.01)
+                recovered = service.snapshot()
+            self.assertEqual(recovered["canonical"]["sha"], "recoveredsha")
+            self.assertEqual(recovered["sources"]["github"]["status"], "fresh")
 
     def test_invalidate_immediately_patches_owner_truth_after_expected_stop(self):
         github = BlockingGitHub()
@@ -518,6 +650,7 @@ class SnapshotServiceTest(unittest.TestCase):
             worker_limit=2,
             canonical_ref="rebrand/stanina",
             cache_seconds=0,
+            github_cache_seconds=0,
         )
         self.assertEqual(service.snapshot()["canonical"]["sha"], "firstsha")
         github.sha = "secondsha"
@@ -535,6 +668,37 @@ class SnapshotServiceTest(unittest.TestCase):
         while service.snapshot()["canonical"]["sha"] != "secondsha" and time.monotonic() < deadline:
             time.sleep(0.01)
         self.assertEqual(service.snapshot()["canonical"]["sha"], "secondsha")
+
+    def test_slow_github_refresh_does_not_block_runtime_refresh(self):
+        symphony = CountingSymphony()
+        github = BlockingGitHub()
+        service = SnapshotService(
+            symphony=symphony,
+            github=github,
+            test_environment=FakeTest(),
+            supervisor=FakeSupervisor(),
+            state_store=self.store,
+            worker_limit=5,
+            canonical_ref="rebrand/stanina",
+            cache_seconds=0,
+            github_cache_seconds=0,
+        )
+        service.snapshot(fresh=True)
+        github.block = True
+
+        try:
+            service.snapshot()
+            self.assertTrue(github.refresh_started.wait(timeout=1))
+            runtime_calls_before = symphony.calls
+
+            deadline = time.monotonic() + 1
+            while symphony.calls == runtime_calls_before and time.monotonic() < deadline:
+                service.snapshot()
+                time.sleep(0.01)
+
+            self.assertGreater(symphony.calls, runtime_calls_before)
+        finally:
+            github.release_refresh.set()
 
     def test_authentication_failure_is_marked_systemic_for_attention_notification(self):
         service = SnapshotService(

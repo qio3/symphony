@@ -22,6 +22,8 @@ class SnapshotService:
         worker_limit: int,
         canonical_ref: str,
         cache_seconds: float = 5.0,
+        github_cache_seconds: float = 60.0,
+        github_retry_seconds: float = 60.0,
     ):
         self._symphony = symphony
         self._github = github
@@ -31,18 +33,25 @@ class SnapshotService:
         self._worker_limit = worker_limit
         self._canonical_ref = canonical_ref
         self._cache_seconds = cache_seconds
+        self._github_cache_seconds = github_cache_seconds
+        self._github_retry_seconds = github_retry_seconds
         self._builder = SnapshotBuilder()
         self._cache_lock = threading.Lock()
         self._refresh_lock = threading.Lock()
+        self._source_lock = threading.RLock()
+        self._github_refresh_lock = threading.Lock()
         self._cached: dict[str, Any] | None = None
         self._cached_at = 0.0
+        self._github_cached_at = 0.0
+        self._github_retry_at = 0.0
+        self._github_last_error: Exception | None = None
         self._control_generation = 0
         stored_sources = self._state_store.read().get("last_good_sources")
         self._last_good_sources = deepcopy(stored_sources) if isinstance(stored_sources, dict) else {}
 
     def snapshot(self, *, fresh: bool = False) -> dict[str, Any]:
         if fresh:
-            return self._refresh()
+            return self._refresh(force_github=True)
 
         with self._cache_lock:
             now = time.monotonic()
@@ -68,6 +77,10 @@ class SnapshotService:
         except Exception as error:
             service = {"live": False, "status": "unknown", "reason": str(error)}
             supervisor_source = _unavailable_source(error)
+        with self._source_lock:
+            self._github_cached_at = 0.0
+            self._github_retry_at = 0.0
+            self._github_last_error = None
         with self._cache_lock:
             self._control_generation += 1
             if self._cached is not None:
@@ -80,40 +93,42 @@ class SnapshotService:
                     refreshed_at=refreshed_at,
                 )
             self._cached_at = 0.0
-        self._start_refresh()
+        self._start_refresh(force_github=True)
 
-    def _refresh(self) -> dict[str, Any]:
+    def _refresh(self, *, force_github: bool = False) -> dict[str, Any]:
         with self._refresh_lock:
-            return self._collect_and_cache()
+            return self._collect_and_cache(force_github=force_github)
 
-    def _start_refresh(self) -> None:
+    def _start_refresh(self, *, force_github: bool = False) -> None:
         if not self._refresh_lock.acquire(blocking=False):
             return
         threading.Thread(
             target=self._refresh_from_acquired_lock,
+            args=(force_github,),
             name="owner-control-snapshot-refresh",
             daemon=True,
         ).start()
 
-    def _refresh_from_acquired_lock(self) -> None:
+    def _refresh_from_acquired_lock(self, force_github: bool) -> None:
         try:
-            self._collect_and_cache()
+            self._collect_and_cache(force_github=force_github)
         finally:
             self._refresh_lock.release()
 
-    def _collect_and_cache(self) -> dict[str, Any]:
+    def _collect_and_cache(self, *, force_github: bool = False) -> dict[str, Any]:
         while True:
             with self._cache_lock:
                 generation = self._control_generation
-            value = self._collect()
+            value = self._collect(force_github=force_github)
             with self._cache_lock:
                 if generation != self._control_generation:
+                    force_github = True
                     continue
                 self._cached = value
                 self._cached_at = time.monotonic()
                 return value
 
-    def _collect(self) -> dict[str, Any]:
+    def _collect(self, *, force_github: bool = False) -> dict[str, Any]:
         failures: list[dict[str, Any]] = []
         sources: dict[str, dict[str, Any]] = {}
         changed = False
@@ -132,7 +147,7 @@ class SnapshotService:
 
         if _service_is_transitioning(service) or _service_is_confirmed_stopped(service):
             runtime = self._inactive_runtime_projection()
-            last_runtime = self._last_good_sources.get("runtime")
+            last_runtime = self._stored_source("runtime")
             sources["runtime"] = {
                 "status": "stale",
                 "confirmed_at": last_runtime.get("confirmed_at") if isinstance(last_runtime, dict) else None,
@@ -164,7 +179,7 @@ class SnapshotService:
                 if _restart_expected(control_state) and service.get("live") is True:
                     service = {**service, "status": "starting"}
                     runtime = self._inactive_runtime_projection()
-                    stored_runtime = self._last_good_sources.get("runtime")
+                    stored_runtime = self._stored_source("runtime")
                     sources["runtime"] = {
                         "status": "stale" if isinstance(stored_runtime, dict) else "unavailable",
                         "confirmed_at": (
@@ -180,24 +195,14 @@ class SnapshotService:
                     )
                 failures.append(_source_failure("runtime", error))
 
-        try:
-            project = self._github.project_snapshot()
-            canonical = self._github.canonical(self._canonical_ref)
-            github_value = {"project": project, "canonical": canonical}
-            changed = self._remember_source("github", github_value, refreshed_at) or changed
-            sources["github"] = _fresh_source(refreshed_at)
-        except Exception as error:
-            github_value, sources["github"] = self._stale_or_unavailable(
-                "github",
-                {
-                    "project": {"items": []},
-                    "canonical": {"sha": None, "url": None, "ref": self._canonical_ref},
-                },
-                error,
-            )
-            project = github_value["project"]
-            canonical = github_value["canonical"]
-            failures.append(_source_failure("github", error))
+        github_value, sources["github"], github_error = self._github_projection(
+            force=force_github,
+            refreshed_at=refreshed_at,
+        )
+        project = github_value["project"]
+        canonical = github_value["canonical"]
+        if github_error is not None:
+            failures.append(_source_failure("github", github_error))
 
         try:
             test = self._test_environment.deployment()
@@ -210,7 +215,7 @@ class SnapshotService:
             failures.append(_source_failure("test", error))
 
         if changed:
-            self._state_store.update({"last_good_sources": deepcopy(self._last_good_sources)})
+            self._persist_last_good_sources()
 
         snapshot = self._builder.build(
             service=service,
@@ -226,6 +231,119 @@ class SnapshotService:
         snapshot["stale"] = any(source.get("status") != "fresh" for source in sources.values())
         snapshot["refreshed_at"] = refreshed_at
         return snapshot
+
+    def _github_projection(
+        self,
+        *,
+        force: bool,
+        refreshed_at: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], Exception | None]:
+        if force:
+            return self._refresh_github(refreshed_at)
+
+        now = time.monotonic()
+        with self._source_lock:
+            stored = deepcopy(self._last_good_sources.get("github"))
+            cached_at = self._github_cached_at
+            retry_at = self._github_retry_at
+            last_error = self._github_last_error
+
+        has_stored_value = isinstance(stored, dict) and "value" in stored
+        if (
+            has_stored_value
+            and cached_at > 0
+            and now - cached_at < self._github_cache_seconds
+        ):
+            return (
+                deepcopy(stored["value"]),
+                _fresh_source(stored.get("confirmed_at") or refreshed_at),
+                None,
+            )
+
+        if retry_at > now and last_error is not None:
+            value, source = self._stale_or_unavailable(
+                "github",
+                self._empty_github(),
+                last_error,
+            )
+            return value, source, last_error
+
+        if has_stored_value:
+            self._start_github_refresh()
+            if last_error is not None:
+                value, source = self._stale_or_unavailable(
+                    "github",
+                    self._empty_github(),
+                    last_error,
+                )
+                return value, source, last_error
+            return (
+                deepcopy(stored["value"]),
+                _fresh_source(stored.get("confirmed_at") or refreshed_at),
+                None,
+            )
+
+        return self._refresh_github(refreshed_at)
+
+    def _start_github_refresh(self) -> None:
+        if not self._github_refresh_lock.acquire(blocking=False):
+            return
+        threading.Thread(
+            target=self._refresh_github_from_acquired_lock,
+            name="owner-control-github-refresh",
+            daemon=True,
+        ).start()
+
+    def _refresh_github_from_acquired_lock(self) -> None:
+        try:
+            self._fetch_github(datetime.now(timezone.utc).isoformat())
+        finally:
+            self._github_refresh_lock.release()
+            with self._cache_lock:
+                self._cached_at = 0.0
+
+    def _refresh_github(
+        self,
+        refreshed_at: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], Exception | None]:
+        with self._github_refresh_lock:
+            return self._fetch_github(refreshed_at)
+
+    def _fetch_github(
+        self,
+        refreshed_at: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], Exception | None]:
+        try:
+            value = {
+                "project": self._github.project_snapshot(),
+                "canonical": self._github.canonical(self._canonical_ref),
+            }
+        except Exception as error:
+            with self._source_lock:
+                self._github_cached_at = 0.0
+                self._github_retry_at = time.monotonic() + self._github_retry_seconds
+                self._github_last_error = error
+            stale, source = self._stale_or_unavailable(
+                "github",
+                self._empty_github(),
+                error,
+            )
+            return stale, source, error
+
+        changed = self._remember_source("github", value, refreshed_at)
+        with self._source_lock:
+            self._github_cached_at = time.monotonic()
+            self._github_retry_at = 0.0
+            self._github_last_error = None
+        if changed:
+            self._persist_last_good_sources()
+        return value, _fresh_source(refreshed_at), None
+
+    def _empty_github(self) -> dict[str, Any]:
+        return {
+            "project": {"items": []},
+            "canonical": {"sha": None, "url": None, "ref": self._canonical_ref},
+        }
 
     @staticmethod
     def _patched_cached_snapshot(
@@ -273,7 +391,7 @@ class SnapshotService:
         return snapshot
 
     def _inactive_runtime_projection(self) -> dict[str, Any]:
-        stored = self._last_good_sources.get("runtime")
+        stored = self._stored_source("runtime")
         if isinstance(stored, dict) and isinstance(stored.get("value"), dict):
             runtime = deepcopy(stored["value"])
         else:
@@ -281,11 +399,22 @@ class SnapshotService:
         runtime["running"] = []
         return runtime
 
+    def _stored_source(self, name: str) -> dict[str, Any] | None:
+        with self._source_lock:
+            stored = self._last_good_sources.get(name)
+            return deepcopy(stored) if isinstance(stored, dict) else None
+
     def _remember_source(self, name: str, value: Any, confirmed_at: str) -> bool:
         stored = {"confirmed_at": confirmed_at, "value": deepcopy(value)}
-        changed = self._last_good_sources.get(name, {}).get("value") != stored["value"]
-        self._last_good_sources[name] = stored
-        return changed
+        with self._source_lock:
+            changed = self._last_good_sources.get(name, {}).get("value") != stored["value"]
+            self._last_good_sources[name] = stored
+            return changed
+
+    def _persist_last_good_sources(self) -> None:
+        with self._source_lock:
+            stored_sources = deepcopy(self._last_good_sources)
+        self._state_store.update({"last_good_sources": stored_sources})
 
     def _stale_or_unavailable(
         self,
@@ -293,7 +422,7 @@ class SnapshotService:
         empty_value: Any,
         error: Exception,
     ) -> tuple[Any, dict[str, Any]]:
-        stored = self._last_good_sources.get(name)
+        stored = self._stored_source(name)
         if isinstance(stored, dict) and "value" in stored:
             return deepcopy(stored["value"]), {
                 "status": "stale",
