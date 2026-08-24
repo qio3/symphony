@@ -39,6 +39,7 @@ defmodule SymphonyElixir.ModelRouterTest do
 
     assert Map.keys(metadata) |> Enum.sort() ==
              [:acceptance_criteria, :body, :labels, :title]
+
     assert prompt =~ Jason.encode!(metadata)
     refute prompt =~ "inspect the repository"
 
