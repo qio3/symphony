@@ -52,16 +52,14 @@ defmodule SymphonyElixir.Codex.AppServer do
     with {:ok, canonical_workspace} <- PathSafety.canonicalize(workspace),
          {:ok, port} <- start_port(canonical_workspace, nil, dynamic_tool_binding, command) do
       try do
-        with :ok <- send_initialize(port),
-             {:ok, rate_limits} <-
-               request_runtime(
-                 port,
-                 @rate_limits_read_id,
-                 "account/rateLimits/read",
-                 %{},
-                 &default_on_message/1
-               ) do
-          {:ok, rate_limits}
+        with :ok <- send_initialize(port) do
+          request_runtime(
+            port,
+            @rate_limits_read_id,
+            "account/rateLimits/read",
+            %{},
+            &default_on_message/1
+          )
         end
       after
         stop_port(port)
