@@ -903,22 +903,31 @@ defmodule SymphonyElixir.Orchestrator do
     issues
     |> sort_issues_for_dispatch()
     |> Enum.reduce(state, fn issue, state_acc ->
-      if should_dispatch_issue?(
-           issue,
-           state_acc,
-           active_states,
-           terminal_states,
-           owner_control.intake_active,
-           owner_control.ready_issue_numbers
-         ) do
-        case acquire_owner_control_lease(issue, owner_control.ready_issue_numbers) do
-          :ok -> dispatch_issue(state_acc, issue)
-          {:error, _reason} -> state_acc
-        end
-      else
-        state_acc
-      end
+      maybe_dispatch_issue(
+        issue,
+        state_acc,
+        active_states,
+        terminal_states,
+        owner_control
+      )
     end)
+  end
+
+  defp maybe_dispatch_issue(issue, state, active_states, terminal_states, owner_control) do
+    with true <-
+           should_dispatch_issue?(
+             issue,
+             state,
+             active_states,
+             terminal_states,
+             owner_control.intake_active,
+             owner_control.ready_issue_numbers
+           ),
+         :ok <- acquire_owner_control_lease(issue, owner_control.ready_issue_numbers) do
+      dispatch_issue(state, issue)
+    else
+      _not_dispatchable -> state
+    end
   end
 
   defp sort_issues_for_dispatch(issues) when is_list(issues) do
@@ -1440,33 +1449,32 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp owner_control_dispatch_context do
     client = Application.get_env(:symphony_elixir, :owner_control_client_module, OwnerControlClient)
-    intake_active = owner_control_intake_active?()
 
-    if intake_active do
-      case client.snapshot() do
-        :disabled ->
-          %{intake_active: true, ready_issue_numbers: %{}}
-
-        {:ok, snapshot} when is_map(snapshot) ->
-          ready_issue_numbers =
-            if fresh_owner_control_snapshot?(snapshot) do
-              ready_issue_numbers(snapshot)
-            else
-              %{}
-            end
-
-          %{intake_active: true, ready_issue_numbers: ready_issue_numbers}
-
-        _other ->
-          %{intake_active: true, ready_issue_numbers: %{}}
-      end
-    else
-      %{intake_active: false, ready_issue_numbers: %{}}
+    case owner_control_intake_active?() do
+      true -> owner_control_ready_context(client)
+      false -> %{intake_active: false, ready_issue_numbers: %{}}
     end
   rescue
     _exception -> %{intake_active: false, ready_issue_numbers: %{}}
   catch
     _kind, _reason -> %{intake_active: false, ready_issue_numbers: %{}}
+  end
+
+  defp owner_control_ready_context(client) do
+    case client.snapshot() do
+      {:ok, snapshot} when is_map(snapshot) ->
+        %{
+          intake_active: true,
+          ready_issue_numbers: fresh_ready_issue_numbers(snapshot)
+        }
+
+      _disabled_or_unavailable ->
+        %{intake_active: true, ready_issue_numbers: %{}}
+    end
+  end
+
+  defp fresh_ready_issue_numbers(snapshot) do
+    if fresh_owner_control_snapshot?(snapshot), do: ready_issue_numbers(snapshot), else: %{}
   end
 
   defp fresh_owner_control_snapshot?(snapshot) when is_map(snapshot) do
@@ -1497,22 +1505,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp acquire_owner_control_lease(%Issue{} = issue, ready_issue_numbers)
        when is_map(ready_issue_numbers) do
-    with true <- owner_control_intake_active?() do
-      if issue_routable?(issue) do
-        :ok
-      else
-        with {:ok, issue_number} <- Map.fetch(ready_issue_numbers, issue.id),
-             client <- Application.get_env(:symphony_elixir, :owner_control_client_module, OwnerControlClient),
-             {:ok, response} when is_map(response) <- client.action(:lease, %{issue: issue_number}) do
-          :ok
-        else
-          error ->
-            Logger.warning("Skipping dispatch; failed to acquire Owner Control lease for #{issue_context(issue)}: #{inspect(error)}")
+    case owner_control_intake_active?() do
+      true ->
+        acquire_owner_control_lease_while_active(issue, ready_issue_numbers)
 
-            {:error, error}
-        end
-      end
-    else
       false ->
         Logger.info("Skipping dispatch while Owner Control intake is paused for #{issue_context(issue)}")
         {:error, :intake_paused}
@@ -1527,6 +1523,27 @@ defmodule SymphonyElixir.Orchestrator do
       Logger.warning("Skipping dispatch; Owner Control lease request failed for #{issue_context(issue)}: #{inspect({kind, reason})}")
 
       {:error, {kind, reason}}
+  end
+
+  defp acquire_owner_control_lease_while_active(%Issue{} = issue, ready_issue_numbers) do
+    if issue_routable?(issue) do
+      :ok
+    else
+      request_owner_control_lease(issue, ready_issue_numbers)
+    end
+  end
+
+  defp request_owner_control_lease(%Issue{} = issue, ready_issue_numbers) do
+    with {:ok, issue_number} <- Map.fetch(ready_issue_numbers, issue.id),
+         client <- Application.get_env(:symphony_elixir, :owner_control_client_module, OwnerControlClient),
+         {:ok, response} when is_map(response) <- client.action(:lease, %{issue: issue_number}) do
+      :ok
+    else
+      error ->
+        Logger.warning("Skipping dispatch; failed to acquire Owner Control lease for #{issue_context(issue)}: #{inspect(error)}")
+
+        {:error, error}
+    end
   end
 
   defp owner_control_intake_active? do
