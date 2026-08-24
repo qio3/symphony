@@ -100,6 +100,47 @@ defmodule SymphonyElixir.CoreTest do
     assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
   end
 
+  test "config settings snapshots stay stable across workflow reloads" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    assert {:ok, %{settings: memory_settings, workflow_path: workflow_path}} =
+             Config.loaded_settings_snapshot()
+
+    assert workflow_path == Workflow.workflow_file_path()
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
+    linear_settings = Config.settings!()
+
+    Config.with_settings_snapshot(memory_settings, fn ->
+      assert Config.settings!().tracker.kind == "memory"
+
+      Config.with_settings_snapshot(linear_settings, fn ->
+        assert Config.settings!().tracker.kind == "linear"
+      end)
+
+      assert Config.settings!().tracker.kind == "memory"
+    end)
+
+    assert Config.settings!().tracker.kind == "linear"
+  end
+
+  test "config loads an atomic settings snapshot when workflow store is unavailable" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
+
+    on_exit(fn ->
+      if is_nil(Process.whereis(WorkflowStore)) do
+        assert {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
+      end
+    end)
+
+    assert {:ok, %{settings: settings, workflow_path: workflow_path}} =
+             Config.loaded_settings_snapshot()
+
+    assert settings.tracker.kind == "memory"
+    assert workflow_path == Workflow.workflow_file_path()
+  end
+
   test "current WORKFLOW.md file is valid and complete" do
     original_workflow_path = Workflow.workflow_file_path()
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
@@ -1177,6 +1218,9 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "abnormal worker exit increments retry attempt progressively" do
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
     issue_id = "issue-crash"
     ref = make_ref()
     orchestrator_name = Module.concat(__MODULE__, :CrashRetryOrchestrator)
@@ -1217,6 +1261,9 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "first abnormal worker exit waits before retrying" do
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
     issue_id = "issue-crash-initial"
     ref = make_ref()
     orchestrator_name = Module.concat(__MODULE__, :InitialCrashRetryOrchestrator)

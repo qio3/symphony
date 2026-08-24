@@ -62,8 +62,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   @impl true
   def init(opts) do
-    case Config.settings() do
-      {:ok, config} ->
+    case Config.loaded_settings_snapshot() do
+      {:ok, %{settings: config, workflow_path: workflow_path}} ->
         now_ms = System.monotonic_time(:millisecond)
 
         usage_ledger_path = Keyword.get(opts, :usage_ledger_path, usage_ledger_path(config))
@@ -84,7 +84,7 @@ defmodule SymphonyElixir.Orchestrator do
             usage_ledger: usage_ledger
           }
 
-          run_terminal_workspace_cleanup()
+          start_terminal_workspace_cleanup(state, startup_cleanup_config(config, workflow_path))
           state = schedule_tick(state, 0)
           send(self(), :refresh_account_rate_limits)
 
@@ -1443,22 +1443,99 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp cleanup_issue_workspace(_issue_or_identifier, _worker_host), do: :ok
 
-  defp run_terminal_workspace_cleanup do
-    case Tracker.fetch_issues_by_states(Config.settings!().tracker.terminal_states) do
-      {:ok, issues} ->
-        issues
-        |> Enum.each(fn
-          %Issue{} = issue ->
-            cleanup_issue_workspace(issue)
+  defp start_terminal_workspace_cleanup(
+         %State{task_supervisor: task_supervisor},
+         cleanup_config
+       ) do
+    if terminal_workspace_cleanup_needed?(cleanup_config) do
+      do_start_terminal_workspace_cleanup(task_supervisor, self(), cleanup_config)
+    end
+  end
 
-          _ ->
-            :ok
-        end)
+  defp do_start_terminal_workspace_cleanup(task_supervisor, orchestrator, cleanup_config) do
+    case Task.Supervisor.start_child(task_supervisor, fn ->
+           run_terminal_workspace_cleanup_with_config(orchestrator, cleanup_config)
+         end) do
+      {:ok, _pid} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Skipping startup terminal workspace cleanup; task unavailable: #{inspect(reason)}")
+    end
+  end
+
+  defp run_terminal_workspace_cleanup_with_config(orchestrator, cleanup_config) do
+    Config.with_settings_snapshot(cleanup_config, fn ->
+      run_terminal_workspace_cleanup(orchestrator, cleanup_config.tracker.terminal_states)
+    end)
+  end
+
+  defp startup_cleanup_config(%{worker: %{ssh_hosts: []}} = config, workflow_path) do
+    workspace_root =
+      config.workspace.root
+      |> Path.expand(workflow_path |> Path.expand() |> Path.dirname())
+
+    put_in(config.workspace.root, workspace_root)
+  end
+
+  defp startup_cleanup_config(config, _workflow_path), do: config
+
+  defp terminal_workspace_cleanup_needed?(%{worker: %{ssh_hosts: []}, workspace: %{root: root}}) do
+    case File.ls(root) do
+      {:ok, entries} -> entries != []
+      {:error, :enoent} -> false
+      {:error, _reason} -> true
+    end
+  end
+
+  defp terminal_workspace_cleanup_needed?(_config), do: true
+
+  defp run_terminal_workspace_cleanup(orchestrator, terminal_state_names) do
+    case Tracker.fetch_issues_by_states(terminal_state_names) do
+      {:ok, issues} ->
+        Enum.each(issues, &cleanup_terminal_issue_candidate(orchestrator, &1))
 
       {:error, reason} ->
         Logger.warning("Skipping startup terminal workspace cleanup; failed to fetch terminal issues: #{inspect(reason)}")
     end
   end
+
+  defp cleanup_terminal_issue_candidate(orchestrator, %Issue{} = issue) do
+    if terminal_issue_workspace_may_exist?(issue) do
+      cleanup_terminal_issue_workspace(orchestrator, issue)
+    end
+  end
+
+  defp cleanup_terminal_issue_candidate(_orchestrator, _issue), do: :ok
+
+  defp terminal_issue_workspace_may_exist?(%Issue{} = issue) do
+    case Config.settings!().worker.ssh_hosts do
+      [] ->
+        Config.local_workspace_root()
+        |> Path.join(Workspace.workspace_key(issue))
+        |> File.exists?()
+
+      _worker_hosts ->
+        true
+    end
+  end
+
+  defp cleanup_terminal_issue_workspace(orchestrator, %Issue{id: issue_id} = issue)
+       when is_binary(issue_id) do
+    case GenServer.call(orchestrator, {:reserve_startup_workspace_cleanup, issue_id}, :infinity) do
+      :reserved ->
+        try do
+          cleanup_issue_workspace(issue)
+        after
+          GenServer.call(orchestrator, {:release_startup_workspace_cleanup, issue_id}, :infinity)
+        end
+
+      :busy ->
+        :ok
+    end
+  end
+
+  defp cleanup_terminal_issue_workspace(_orchestrator, _issue), do: :ok
 
   defp notify_dashboard do
     StatusDashboard.notify_update()
@@ -1886,6 +1963,18 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @impl true
+  def handle_call({:reserve_startup_workspace_cleanup, issue_id}, _from, state) do
+    if Map.has_key?(state.running, issue_id) or MapSet.member?(state.claimed, issue_id) do
+      {:reply, :busy, state}
+    else
+      {:reply, :reserved, %{state | claimed: MapSet.put(state.claimed, issue_id)}}
+    end
+  end
+
+  def handle_call({:release_startup_workspace_cleanup, issue_id}, _from, state) do
+    {:reply, :ok, %{state | claimed: MapSet.delete(state.claimed, issue_id)}}
+  end
+
   def handle_call(:snapshot, _from, state) do
     state = refresh_runtime_config(state)
     now = DateTime.utc_now()

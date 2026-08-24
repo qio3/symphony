@@ -6,6 +6,8 @@ defmodule SymphonyElixir.Config do
   alias SymphonyElixir.{Config.Schema, Tracker}
   alias SymphonyElixir.{Workflow, WorkflowStore}
 
+  @settings_snapshot_key {__MODULE__, :settings_snapshot}
+
   @default_prompt_template """
   You are working on an issue from the configured tracker.
 
@@ -28,7 +30,30 @@ defmodule SymphonyElixir.Config do
 
   @spec settings() :: {:ok, Schema.t()} | {:error, term()}
   def settings do
-    WorkflowStore.settings()
+    case Process.get(@settings_snapshot_key, :unset) do
+      :unset -> WorkflowStore.settings()
+      settings -> {:ok, settings}
+    end
+  end
+
+  @doc false
+  @spec loaded_settings_snapshot() ::
+          {:ok, %{settings: Schema.t(), workflow_path: Path.t()}} | {:error, term()}
+  def loaded_settings_snapshot do
+    WorkflowStore.settings_snapshot()
+  end
+
+  @doc false
+  @spec with_settings_snapshot(Schema.t(), (-> result)) :: result when result: term()
+  def with_settings_snapshot(settings, fun) when is_function(fun, 0) do
+    previous = Process.get(@settings_snapshot_key, :unset)
+    Process.put(@settings_snapshot_key, settings)
+
+    try do
+      fun.()
+    after
+      restore_settings_snapshot(previous)
+    end
   end
 
   @spec settings!() :: Schema.t()
@@ -160,6 +185,9 @@ defmodule SymphonyElixir.Config do
         "Invalid WORKFLOW.md config: #{inspect(other)}"
     end
   end
+
+  defp restore_settings_snapshot(:unset), do: Process.delete(@settings_snapshot_key)
+  defp restore_settings_snapshot(settings), do: Process.put(@settings_snapshot_key, settings)
 
   defp owner_control_settings_from_env(nil, nil), do: :disabled
 

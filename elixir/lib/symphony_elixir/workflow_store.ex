@@ -48,6 +48,22 @@ defmodule SymphonyElixir.WorkflowStore do
     end
   end
 
+  @doc false
+  @spec settings_snapshot() ::
+          {:ok, %{settings: Schema.t(), workflow_path: Path.t()}} | {:error, term()}
+  def settings_snapshot do
+    case Process.whereis(__MODULE__) do
+      pid when is_pid(pid) ->
+        GenServer.call(__MODULE__, :settings_snapshot)
+
+      _ ->
+        case load_state(Workflow.workflow_file_path()) do
+          {:ok, state} -> {:ok, settings_snapshot_from_state(state)}
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
   @spec force_reload() :: :ok | {:error, term()}
   def force_reload do
     case Process.whereis(__MODULE__) do
@@ -102,6 +118,16 @@ defmodule SymphonyElixir.WorkflowStore do
 
       {:error, _reason, new_state} ->
         {:reply, {:ok, new_state.settings}, new_state}
+    end
+  end
+
+  def handle_call(:settings_snapshot, _from, %State{} = state) do
+    case reload_state(state) do
+      {:ok, new_state} ->
+        {:reply, {:ok, settings_snapshot_from_state(new_state)}, new_state}
+
+      {:error, _reason, new_state} ->
+        {:reply, {:ok, settings_snapshot_from_state(new_state)}, new_state}
     end
   end
 
@@ -173,6 +199,10 @@ defmodule SymphonyElixir.WorkflowStore do
     else
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp settings_snapshot_from_state(%State{path: path, settings: settings}) do
+    %{settings: settings, workflow_path: path}
   end
 
   defp log_reload_error(path, reason) do
