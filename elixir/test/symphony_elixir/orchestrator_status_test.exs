@@ -80,6 +80,136 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert GenServer.call(pid, :snapshot).running == []
   end
 
+  test "startup terminal workspace cleanup does not block orchestrator availability" do
+    issue_suffix = System.unique_integer([:positive])
+    test_root = Path.join(System.tmp_dir!(), "symphony-startup-cleanup-#{issue_suffix}")
+    workspace_root = Path.join(test_root, "workspaces")
+    cleanup_started = Path.join(test_root, "cleanup-started")
+    orchestrator_name = Module.concat(__MODULE__, "NonBlockingCleanupOrchestrator#{issue_suffix}")
+
+    issue = %Issue{
+      id: "terminal-#{issue_suffix}",
+      identifier: "DONE-#{issue_suffix}",
+      title: "Terminal cleanup test",
+      state: "Done"
+    }
+
+    workspace = Path.join(workspace_root, Workspace.workspace_key(issue))
+    File.mkdir_p!(workspace)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      tracker_terminal_states: ["Done"],
+      hook_before_remove: "printf started > \"#{cleanup_started}\"; sleep 2",
+      hook_timeout_ms: 5_000,
+      poll_interval_ms: 5_000
+    )
+
+    {:ok, task_supervisor} = Task.Supervisor.start_link()
+    Process.unlink(task_supervisor)
+    started_at_ms = System.monotonic_time(:millisecond)
+
+    {:ok, pid} =
+      Orchestrator.start_link(
+        name: orchestrator_name,
+        task_supervisor: task_supervisor,
+        account_rate_limits_reader: fn -> {:error, :test_disabled} end
+      )
+
+    startup_elapsed_ms = System.monotonic_time(:millisecond) - started_at_ms
+    Process.unlink(pid)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: GenServer.stop(pid)
+      if Process.alive?(task_supervisor), do: Supervisor.stop(task_supervisor)
+      File.rm_rf(test_root)
+    end)
+
+    assert startup_elapsed_ms < 1_000
+    assert is_map(GenServer.call(pid, :snapshot, 100))
+    assert wait_until(fn -> File.exists?(cleanup_started) end, 1_000)
+    assert File.exists?(workspace)
+    assert wait_until(fn -> not File.exists?(workspace) end, 5_000)
+  end
+
+  test "startup cleanup claim prevents dispatch from racing workspace removal" do
+    issue_suffix = System.unique_integer([:positive])
+    test_root = Path.join(System.tmp_dir!(), "symphony-startup-cleanup-race-#{issue_suffix}")
+    workspace_root = Path.join(test_root, "workspaces")
+    cleanup_started = Path.join(test_root, "cleanup-started")
+    orchestrator_name = Module.concat(__MODULE__, "CleanupClaimOrchestrator#{issue_suffix}")
+
+    terminal_issue = %Issue{
+      id: "terminal-race-#{issue_suffix}",
+      identifier: "DONE-RACE-#{issue_suffix}",
+      title: "Terminal cleanup race test",
+      state: "Done",
+      labels: ["symphony"],
+      dispatchable: true
+    }
+
+    workspace = Path.join(workspace_root, Workspace.workspace_key(terminal_issue))
+    File.mkdir_p!(workspace)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [terminal_issue])
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      tracker_active_states: ["Ready for AI"],
+      tracker_terminal_states: ["Done"],
+      hook_before_run: "sleep 30",
+      hook_before_remove: "printf started > \"#{cleanup_started}\"; sleep 2",
+      hook_timeout_ms: 35_000,
+      poll_interval_ms: 5_000
+    )
+
+    {:ok, task_supervisor} = Task.Supervisor.start_link()
+    Process.unlink(task_supervisor)
+
+    {:ok, pid} =
+      Orchestrator.start_link(
+        name: orchestrator_name,
+        task_supervisor: task_supervisor,
+        account_rate_limits_reader: fn -> {:error, :test_disabled} end
+      )
+
+    Process.unlink(pid)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: GenServer.stop(pid)
+      if Process.alive?(task_supervisor), do: Supervisor.stop(task_supervisor)
+      File.rm_rf(test_root)
+    end)
+
+    assert wait_until(fn -> File.exists?(cleanup_started) end, 1_000)
+
+    ready_issue = %{terminal_issue | state: "Ready for AI"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [ready_issue])
+    assert %{queued: true} = Orchestrator.request_refresh(orchestrator_name)
+
+    Process.sleep(500)
+    assert GenServer.call(pid, :snapshot).running == []
+
+    assert wait_until(fn -> not File.exists?(workspace) end, 5_000)
+    assert %{queued: true} = Orchestrator.request_refresh(orchestrator_name)
+
+    assert wait_until(
+             fn ->
+               pid
+               |> GenServer.call(:snapshot)
+               |> Map.get(:running, [])
+               |> Enum.any?(&(&1.issue_id == ready_issue.id))
+             end,
+             1_000
+           )
+
+    assert wait_until(fn -> File.exists?(workspace) end, 1_000)
+    Process.sleep(100)
+    assert File.exists?(workspace)
+  end
+
   test "orchestrator snapshot reflects last codex update and session id" do
     issue_id = "issue-snapshot"
 
@@ -2137,6 +2267,25 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   defp wait_for_snapshot(pid, predicate, timeout_ms \\ 200) when is_function(predicate, 1) do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_for_snapshot(pid, predicate, deadline_ms)
+  end
+
+  defp wait_until(predicate, timeout_ms) when is_function(predicate, 0) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_until(predicate, deadline_ms)
+  end
+
+  defp do_wait_until(predicate, deadline_ms) do
+    cond do
+      predicate.() ->
+        true
+
+      System.monotonic_time(:millisecond) >= deadline_ms ->
+        false
+
+      true ->
+        Process.sleep(10)
+        do_wait_until(predicate, deadline_ms)
+    end
   end
 
   defp do_wait_for_snapshot(pid, predicate, deadline_ms) do
