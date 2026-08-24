@@ -278,6 +278,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp local_launch_command(dynamic_tool_binding, command) do
     [
+      "unset OPENAI_API_KEY",
       tracker_secret_unset_command(dynamic_tool_binding),
       "exec #{command}"
     ]

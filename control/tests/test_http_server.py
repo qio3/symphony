@@ -92,6 +92,13 @@ class ControlHttpServerTest(unittest.TestCase):
             r"\.service-panel \.service-facts\s*\{[^}]*z-index:\s*1",
         )
 
+    def test_runtime_source_errors_wrap_on_narrow_viewports(self):
+        with self.request("/assets/owner-control.css", authorized=False) as response:
+            css = response.read().decode("utf-8")
+
+        self.assertRegex(css, r"\.source-row\s*\{[^}]*flex-wrap:\s*wrap")
+        self.assertRegex(css, r"\.source-error\s*\{[^}]*overflow-wrap:\s*anywhere")
+
     def test_ready_queue_has_a_bounded_expandable_preview(self):
         with self.request("/assets/owner-control.js", authorized=False) as response:
             javascript = response.read().decode("utf-8")

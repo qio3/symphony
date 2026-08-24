@@ -74,8 +74,7 @@ defmodule SymphonyElixir.Orchestrator do
             poll_check_in_progress: false,
             tick_timer_ref: nil,
             tick_token: nil,
-            account_rate_limits_reader:
-              Keyword.get(opts, :account_rate_limits_reader, &AppServer.read_rate_limits/0),
+            account_rate_limits_reader: Keyword.get(opts, :account_rate_limits_reader, &AppServer.read_rate_limits/0),
             account_rate_limit_refresh_in_flight: false,
             task_supervisor: Keyword.get(opts, :task_supervisor, SymphonyElixir.TaskSupervisor),
             codex_totals: @empty_codex_totals,
@@ -2078,7 +2077,9 @@ defmodule SymphonyElixir.Orchestrator do
     end
 
     case Task.Supervisor.start_child(state.task_supervisor, task) do
-      {:ok, _pid} -> %{state | account_rate_limit_refresh_in_flight: true}
+      {:ok, _pid} ->
+        %{state | account_rate_limit_refresh_in_flight: true}
+
       {:error, reason} ->
         Logger.warning("Failed to start Codex account rate-limit refresh: #{inspect(reason)}")
         state

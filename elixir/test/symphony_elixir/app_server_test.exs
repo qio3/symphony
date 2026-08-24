@@ -123,12 +123,31 @@ defmodule SymphonyElixir.AppServerTest do
     workspace_root = Path.join(test_root, "workspaces")
     codex_binary = Path.join(test_root, "fake-codex")
     trace_file = Path.join(test_root, "trace.jsonl")
+    environment_trace_file = Path.join(test_root, "environment.trace")
+    bash_home = Path.join(test_root, "bash-home")
+    profile_marker_env = "SYMPHONY_RATE_LIMIT_PROFILE_#{System.unique_integer([:positive])}"
+    previous_api_key = System.get_env("OPENAI_API_KEY")
+    previous_home = System.get_env("HOME")
+    previous_trace = System.get_env("SYMPHONY_RATE_LIMIT_TRACE")
+    previous_environment_trace = System.get_env("SYMPHONY_RATE_LIMIT_ENV_TRACE")
 
     try do
       File.mkdir_p!(workspace_root)
+      File.mkdir_p!(bash_home)
+
+      File.write!(Path.join(bash_home, ".bash_profile"), """
+      export OPENAI_API_KEY='profile-key-that-must-not-reach-codex'
+      export #{profile_marker_env}=1
+      """)
 
       File.write!(codex_binary, """
       #!/bin/sh
+      printf 'PROFILE_LOADED:%s\n' "$#{profile_marker_env}" >> "$SYMPHONY_RATE_LIMIT_ENV_TRACE"
+      if [ "${OPENAI_API_KEY+x}" = "x" ]; then
+        printf '%s\n' 'OPENAI_API_KEY=INHERITED' >> "$SYMPHONY_RATE_LIMIT_ENV_TRACE"
+      else
+        printf '%s\n' 'OPENAI_API_KEY=UNSET' >> "$SYMPHONY_RATE_LIMIT_ENV_TRACE"
+      fi
       count=0
       while IFS= read -r line; do
         printf '%s\\n' "$line" >> "$SYMPHONY_RATE_LIMIT_TRACE"
@@ -142,7 +161,10 @@ defmodule SymphonyElixir.AppServerTest do
       """)
 
       File.chmod!(codex_binary, 0o755)
+      System.put_env("HOME", bash_home)
+      System.put_env("OPENAI_API_KEY", "parent-key-that-must-not-reach-codex")
       System.put_env("SYMPHONY_RATE_LIMIT_TRACE", trace_file)
+      System.put_env("SYMPHONY_RATE_LIMIT_ENV_TRACE", environment_trace_file)
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root, codex_command: "#{codex_binary} app-server")
 
       assert {:ok,
@@ -155,8 +177,12 @@ defmodule SymphonyElixir.AppServerTest do
 
       methods = trace_file |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!(&1)["method"])
       assert methods == ["initialize", "initialized", "account/rateLimits/read"]
+      assert File.read!(environment_trace_file) == "PROFILE_LOADED:1\nOPENAI_API_KEY=UNSET\n"
     after
-      System.delete_env("SYMPHONY_RATE_LIMIT_TRACE")
+      restore_env("OPENAI_API_KEY", previous_api_key)
+      restore_env("HOME", previous_home)
+      restore_env("SYMPHONY_RATE_LIMIT_TRACE", previous_trace)
+      restore_env("SYMPHONY_RATE_LIMIT_ENV_TRACE", previous_environment_trace)
       File.rm_rf(test_root)
     end
   end

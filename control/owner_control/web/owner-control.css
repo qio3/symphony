@@ -129,8 +129,8 @@ h3 { font-size: 15px; line-height: 1.35; letter-spacing: -.01em; }
 .empty-state span { font-size: 12px; }
 .diagnostics summary { cursor: pointer; font-weight: 760; }
 .source-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 16px; }
-.source-row { display: flex; align-items: center; justify-content: space-between; gap: 9px; padding: 9px 10px; border: 1px solid #e0e6e1; border-radius: 10px; }
-.source-error { width: 100%; color: #8f3636; font-size: 11px; }
+.source-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 9px; min-width: 0; padding: 9px 10px; border: 1px solid #e0e6e1; border-radius: 10px; }
+.source-error { width: 100%; color: #8f3636; font-size: 11px; overflow-wrap: anywhere; }
 .diagnostics pre { overflow: auto; max-height: 340px; padding: 14px; background: #17211b; color: #d7e3da; border-radius: 12px; font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
 .action-error { margin-top: 10px; padding: 10px 12px; border: 1px solid #e7bebe; border-radius: 10px; background: #fff0f0; color: #922e2e; font-size: 12px; }
 .action-hint { margin-top: 9px; color: #765818; font-size: 12px; line-height: 1.4; }
