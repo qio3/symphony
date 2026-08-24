@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, ModelRouter, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, ModelRouter, StatusDashboard, Tracker, UsageLedger, Workspace}
   alias SymphonyElixir.OwnerControl.Client, as: OwnerControlClient
   alias SymphonyElixir.Tracker.Issue
 
@@ -42,7 +42,8 @@ defmodule SymphonyElixir.Orchestrator do
       retry_attempts: %{},
       model_completed_counts: %{luna: 0, terra: 0, sol: 0},
       codex_totals: nil,
-      codex_rate_limits: nil
+      codex_rate_limits: nil,
+      usage_ledger: nil
     ]
   end
 
@@ -59,22 +60,27 @@ defmodule SymphonyElixir.Orchestrator do
       {:ok, config} ->
         now_ms = System.monotonic_time(:millisecond)
 
-        state = %State{
-          poll_interval_ms: config.polling.interval_ms,
-          max_concurrent_agents: config.agent.max_concurrent_agents,
-          next_poll_due_at_ms: now_ms,
-          poll_check_in_progress: false,
-          tick_timer_ref: nil,
-          tick_token: nil,
-          task_supervisor: Keyword.get(opts, :task_supervisor, SymphonyElixir.TaskSupervisor),
-          codex_totals: @empty_codex_totals,
-          codex_rate_limits: nil
-        }
+        usage_ledger_path = Keyword.get(opts, :usage_ledger_path, usage_ledger_path(config))
 
-        run_terminal_workspace_cleanup()
-        state = schedule_tick(state, 0)
+        with {:ok, usage_ledger} <- UsageLedger.load(usage_ledger_path) do
+          state = %State{
+            poll_interval_ms: config.polling.interval_ms,
+            max_concurrent_agents: config.agent.max_concurrent_agents,
+            next_poll_due_at_ms: now_ms,
+            poll_check_in_progress: false,
+            tick_timer_ref: nil,
+            tick_token: nil,
+            task_supervisor: Keyword.get(opts, :task_supervisor, SymphonyElixir.TaskSupervisor),
+            codex_totals: @empty_codex_totals,
+            codex_rate_limits: nil,
+            usage_ledger: usage_ledger
+          }
 
-        {:ok, state}
+          run_terminal_workspace_cleanup()
+          state = schedule_tick(state, 0)
+
+          {:ok, state}
+        end
 
       {:error, reason} ->
         {:stop, reason}
@@ -137,6 +143,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       issue_id ->
         {running_entry, state} = pop_running_entry(state, issue_id)
+        state = record_usage_completion(state, issue_id, running_entry)
         state = record_session_completion_totals(state, running_entry)
         session_id = running_entry_session_id(running_entry)
 
@@ -200,6 +207,7 @@ defmodule SymphonyElixir.Orchestrator do
           state
           |> apply_codex_token_delta(token_delta)
           |> apply_codex_rate_limits(update)
+          |> record_usage_sample(issue_id, updated_running_entry, update)
 
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
@@ -1632,8 +1640,11 @@ defmodule SymphonyElixir.Orchestrator do
        retrying: retrying,
        blocked: blocked,
        codex_totals: state.codex_totals,
+       max_concurrent_agents: state.max_concurrent_agents,
        model_counts: model_counts(state),
        rate_limits: Map.get(state, :codex_rate_limits),
+       issue_usage: issue_usage_snapshot(Map.get(state, :usage_ledger)),
+       usage_aggregate: usage_aggregate_snapshot(Map.get(state, :usage_ledger)),
        polling: %{
          checking?: state.poll_check_in_progress == true,
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
@@ -1675,10 +1686,12 @@ defmodule SymphonyElixir.Orchestrator do
     turn_count = Map.get(running_entry, :turn_count, 0)
 
     {
-      Map.merge(running_entry, %{
+      running_entry
+      |> Map.merge(%{
         last_codex_timestamp: timestamp,
         last_codex_message: summarize_codex_update(update),
         session_id: session_id_for_update(running_entry.session_id, update),
+        thread_id: thread_id_for_update(Map.get(running_entry, :thread_id), update),
         last_codex_event: event,
         codex_app_server_pid: codex_app_server_pid_for_update(codex_app_server_pid, update),
         codex_input_tokens: codex_input_tokens + token_delta.input_tokens,
@@ -1688,7 +1701,8 @@ defmodule SymphonyElixir.Orchestrator do
         codex_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
         codex_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
         turn_count: turn_count_for_update(turn_count, running_entry.session_id, update)
-      }),
+      })
+      |> Map.merge(account_usage_for_update(update)),
       token_delta
     }
   end
@@ -1710,6 +1724,173 @@ defmodule SymphonyElixir.Orchestrator do
     do: session_id
 
   defp session_id_for_update(existing, _update), do: existing
+
+  defp thread_id_for_update(_existing, %{thread_id: thread_id}) when is_binary(thread_id), do: thread_id
+
+  defp thread_id_for_update(existing, _update), do: existing
+
+  defp account_usage_for_update(update) do
+    payload = update[:payload] || Map.get(update, "payload") || %{}
+    thread_usage = Map.get(payload, "threadUsage") || Map.get(payload, :thread_usage) || payload
+
+    %{
+      estimated_usage_credits_micros:
+        map_integer_value(thread_usage, "estimatedUsageCreditsMicros") ||
+          map_integer_value(thread_usage, :estimated_usage_credits_micros),
+      estimated_usage_groups: Map.get(thread_usage, "groups") || Map.get(thread_usage, :groups)
+    }
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  defp record_usage_completion(%State{usage_ledger: nil} = state, _issue_id, _running_entry), do: state
+
+  defp record_usage_completion(%State{} = state, issue_id, running_entry) when is_map(running_entry) do
+    case Map.get(running_entry, :thread_id) do
+      thread_id when is_binary(thread_id) ->
+        case UsageLedger.complete(state.usage_ledger, issue_id, thread_id, DateTime.utc_now()) do
+          {:ok, ledger} ->
+            %{state | usage_ledger: ledger}
+
+          {:error, reason} ->
+            Logger.warning("Failed to complete Codex usage issue_id=#{issue_id}: #{inspect(reason)}")
+            state
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp record_usage_completion(state, _issue_id, _running_entry), do: state
+
+  defp record_usage_sample(%State{usage_ledger: nil} = state, _issue_id, _running_entry, _update), do: state
+
+  defp record_usage_sample(%State{} = state, issue_id, running_entry, update) do
+    usage = extract_full_token_usage(update, running_entry)
+    thread_id = Map.get(running_entry, :thread_id)
+
+    if is_binary(thread_id) and usage.total_tokens > 0 do
+      entry = %{
+        issue_id: issue_id,
+        issue_identifier: Map.get(running_entry, :identifier),
+        thread_id: thread_id,
+        session_id: Map.get(running_entry, :session_id),
+        model: Map.get(running_entry, :actual_model),
+        tier: Map.get(running_entry, :selected_model_tier),
+        started_at: Map.get(running_entry, :started_at),
+        completed_at: nil,
+        token_usage: usage,
+        estimated_usage_credits_micros: Map.get(running_entry, :estimated_usage_credits_micros),
+        estimated_usage_groups: Map.get(running_entry, :estimated_usage_groups)
+      }
+
+      case UsageLedger.record(state.usage_ledger, entry) do
+        {:ok, ledger} ->
+          %{state | usage_ledger: ledger}
+
+        {:error, reason} ->
+          Logger.warning("Failed to persist Codex usage issue_id=#{issue_id}: #{inspect(reason)}")
+          state
+      end
+    else
+      state
+    end
+  end
+
+  defp extract_full_token_usage(update, running_entry) do
+    usage = extract_token_usage(update)
+
+    %{
+      input_tokens: get_token_usage(usage, :input),
+      cached_input_tokens: get_token_usage(usage, :cached_input),
+      cache_write_input_tokens: get_token_usage(usage, :cache_write_input),
+      output_tokens: get_token_usage(usage, :output),
+      reasoning_output_tokens: get_token_usage(usage, :reasoning_output),
+      total_tokens: get_token_usage(usage, :total)
+    }
+    |> Map.new(fn
+      {:input_tokens, nil} -> {:input_tokens, Map.get(running_entry, :codex_input_tokens, 0)}
+      {:output_tokens, nil} -> {:output_tokens, Map.get(running_entry, :codex_output_tokens, 0)}
+      {:total_tokens, nil} -> {:total_tokens, Map.get(running_entry, :codex_total_tokens, 0)}
+      {key, nil} -> {key, 0}
+      {key, value} -> {key, value}
+    end)
+  end
+
+  defp issue_usage_snapshot(nil), do: %{}
+
+  defp issue_usage_snapshot(ledger) do
+    ledger
+    |> UsageLedger.snapshot()
+    |> Map.fetch!(:current)
+    |> Enum.group_by(& &1.issue_id)
+    |> Map.new(&issue_usage_entry/1)
+  end
+
+  defp issue_usage_entry({issue_id, entries}) do
+    current = Enum.max_by(entries, &usage_entry_recency/1)
+    key = issue_usage_key(current.issue_identifier, issue_id)
+
+    {key,
+     %{
+       issue_id: issue_id,
+       issue_identifier: current.issue_identifier,
+       current: current,
+       aggregate: %{
+         token_usage: aggregate_token_usage(entries),
+         estimated_usage_credits_micros: aggregate_usage_credits(entries)
+       }
+     }}
+  end
+
+  defp aggregate_token_usage(entries) do
+    Enum.reduce(entries, empty_usage_tokens(), fn entry, totals ->
+      Map.merge(totals, entry.token_usage, fn _key, left, right -> left + right end)
+    end)
+  end
+
+  defp aggregate_usage_credits(entries), do: Enum.reduce(entries, 0, &(&1.estimated_usage_credits_micros + &2))
+
+  defp usage_aggregate_snapshot(nil), do: %{token_usage: empty_usage_tokens(), estimated_usage_credits_micros: 0}
+
+  defp usage_aggregate_snapshot(ledger), do: UsageLedger.snapshot(ledger).aggregate
+
+  defp empty_usage_tokens do
+    %{
+      input_tokens: 0,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: 0,
+      reasoning_output_tokens: 0,
+      total_tokens: 0
+    }
+  end
+
+  defp issue_usage_key(identifier, _issue_id) when is_binary(identifier) do
+    case Regex.run(~r/(\d+)$/, identifier) do
+      [_, number] -> number
+      _ -> identifier
+    end
+  end
+
+  defp issue_usage_key(_identifier, issue_id), do: issue_id
+
+  defp usage_entry_recency(entry) do
+    timestamp = Map.get(entry, :started_at) || Map.get(entry, :completed_at)
+
+    unix_micros =
+      case timestamp do
+        %DateTime{} = datetime -> DateTime.to_unix(datetime, :microsecond)
+        _ -> 0
+      end
+
+    {unix_micros, Map.get(entry, :thread_id, "")}
+  end
+
+  defp usage_ledger_path(_config) do
+    System.get_env("SYMPHONY_USAGE_LEDGER_PATH") || Path.join(Config.local_workspace_root(), "symphony-usage.jsonl")
+  end
 
   defp turn_count_for_update(existing_count, existing_session_id, %{
          event: :session_started,
@@ -1842,7 +2023,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp apply_codex_rate_limits(%State{} = state, update) when is_map(update) do
     case extract_rate_limits(update) do
       %{} = rate_limits ->
-        %{state | codex_rate_limits: rate_limits}
+        %{state | codex_rate_limits: merge_rate_limits(state.codex_rate_limits, rate_limits)}
 
       _ ->
         state
@@ -1850,6 +2031,14 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp apply_codex_rate_limits(state, _update), do: state
+
+  defp merge_rate_limits(nil, rate_limits), do: rate_limits
+
+  defp merge_rate_limits(existing, incoming) when is_map(existing) and is_map(incoming) do
+    Map.merge(existing, incoming, fn _key, left, right ->
+      if is_map(left) and is_map(right), do: merge_rate_limits(left, right), else: right
+    end)
+  end
 
   defp apply_token_delta(codex_totals, token_delta) do
     input_tokens = Map.get(codex_totals, :input_tokens, 0) + token_delta.input_tokens
@@ -1979,7 +2168,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp turn_completed_usage_from_payload(_payload), do: nil
 
   defp rate_limits_from_payload(payload) when is_map(payload) do
-    direct = Map.get(payload, "rate_limits") || Map.get(payload, :rate_limits)
+    direct =
+      Map.get(payload, "rate_limits") || Map.get(payload, :rate_limits) ||
+        Map.get(payload, "rateLimits") || Map.get(payload, :rateLimits)
 
     cond do
       rate_limits_map?(direct) ->
@@ -2028,22 +2219,35 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp rate_limits_map?(payload) when is_map(payload) do
-    limit_id =
-      Map.get(payload, "limit_id") ||
-        Map.get(payload, :limit_id) ||
-        Map.get(payload, "limit_name") ||
-        Map.get(payload, :limit_name)
-
-    has_buckets =
-      Enum.any?(
-        ["primary", :primary, "secondary", :secondary, "credits", :credits],
-        &Map.has_key?(payload, &1)
-      )
-
-    !is_nil(limit_id) and has_buckets
+    Enum.any?(["primary", :primary, "secondary", :secondary], fn key ->
+      case Map.get(payload, key) do
+        bucket when is_map(bucket) -> rate_limit_bucket?(bucket)
+        _ -> false
+      end
+    end)
   end
 
   defp rate_limits_map?(_payload), do: false
+
+  defp rate_limit_bucket?(bucket) do
+    Enum.any?(
+      [
+        "usedPercent",
+        :usedPercent,
+        "used_percent",
+        :used_percent,
+        "windowDurationMins",
+        :windowDurationMins,
+        "window_duration_mins",
+        :window_duration_mins,
+        "remaining",
+        :remaining,
+        "limit",
+        :limit
+      ],
+      &Map.has_key?(bucket, &1)
+    )
+  end
 
   defp explicit_map_at_paths(payload, paths) when is_map(payload) and is_list(paths) do
     Enum.find_value(paths, fn path ->
@@ -2125,6 +2329,33 @@ defmodule SymphonyElixir.Orchestrator do
         :outputTokens,
         "completionTokens",
         :completionTokens
+      ])
+
+  defp get_token_usage(usage, :cached_input),
+    do:
+      payload_get(usage, [
+        "cached_input_tokens",
+        :cached_input_tokens,
+        "cachedInputTokens",
+        :cachedInputTokens
+      ])
+
+  defp get_token_usage(usage, :cache_write_input),
+    do:
+      payload_get(usage, [
+        "cache_write_input_tokens",
+        :cache_write_input_tokens,
+        "cacheWriteInputTokens",
+        :cacheWriteInputTokens
+      ])
+
+  defp get_token_usage(usage, :reasoning_output),
+    do:
+      payload_get(usage, [
+        "reasoning_output_tokens",
+        :reasoning_output_tokens,
+        "reasoningOutputTokens",
+        :reasoningOutputTokens
       ])
 
   defp get_token_usage(usage, :total),

@@ -98,8 +98,11 @@ class NotificationPublisher:
         comparison_snapshot = self._preserve_attention_baseline(previous, snapshot)
         events = self._detector.detect(previous, comparison_snapshot)
         expected_restart = float(state.get("expected_service_restart_until") or 0)
+        expected_stop = bool(state.get("expected_service_stop"))
+        service_live = bool((snapshot.get("service") or {}).get("live"))
         suppress_service_stop = (
-            expected_restart > time.time() and not bool((snapshot.get("service") or {}).get("live"))
+            (expected_restart > time.time() or expected_stop)
+            and not service_live
         )
         for event in events:
             if event["kind"] == "service_stopped" and suppress_service_stop:
@@ -114,6 +117,13 @@ class NotificationPublisher:
         if suppress_service_stop and previous:
             projection["service"] = previous.get("service") or {"live": True}
         state_update = {"notification_fingerprints": sorted(known)[-500:]}
+        if service_live:
+            state_update.update(
+                {
+                    "expected_service_stop": False,
+                    "expected_service_restart_until": 0,
+                }
+            )
         if previous is not None or not self._attention_source_unavailable(snapshot):
             state_update["last_notification_snapshot"] = projection
         self._state_store.update(state_update)

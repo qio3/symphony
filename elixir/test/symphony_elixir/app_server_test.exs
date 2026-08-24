@@ -69,6 +69,125 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "runtime account reads preserve interleaved notifications and response ordering" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-elixir-account-#{System.unique_integer([:positive])}")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-300")
+    codex_binary = Path.join(test_root, "fake-codex")
+    trace_file = Path.join(test_root, "trace.jsonl")
+    File.mkdir_p!(workspace)
+
+    try do
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r line; do
+        printf '%s\\n' "$line" >> "$SYMPHONY_ACCOUNT_TRACE"
+        count=$((count + 1))
+        case "$count" in
+          1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+          3)
+            printf '%s\\n' '{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"total":{"inputTokens":2,"totalTokens":2}}}}'
+            printf '%s\\n' '{"id":4,"result":{"account":{"plan":"pro"}}}'
+            ;;
+          4) printf '%s\\n' '{"id":5,"result":{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300},"secondary":{"usedPercent":20,"windowDurationMins":10080}},"rateLimitsByLimitId":{"codex":{}}}}' ;;
+          5) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-account"}}}' ;;
+          6) printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-account"}}}'; printf '%s\\n' '{"method":"turn/completed"}' ;;
+          7) printf '%s\\n' '{"id":6,"result":{"summary":{},"threadUsage":{"estimatedUsageCreditsMicros":123,"estimatedUsageUsdMicros":4,"groups":["pro"]}}}' ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMPHONY_ACCOUNT_TRACE", trace_file)
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root, codex_command: "#{codex_binary} app-server")
+      issue = %Issue{id: "300", identifier: "MT-300", title: "Account reads", state: "In Progress"}
+      parent = self()
+
+      assert {:ok, _} = AppServer.run(workspace, "work", issue, runtime_account_reads: true, on_message: &send(parent, {:codex, &1}))
+
+      methods = File.read!(trace_file) |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!(&1)["method"])
+      assert methods == ["initialize", "initialized", "account/read", "account/rateLimits/read", "thread/start", "turn/start", "account/usage/read"]
+      assert_receive {:codex, %{event: :notification, payload: %{"method" => "thread/tokenUsage/updated"}}}
+      assert_receive {:codex, %{event: :account_snapshot, payload: %{"account" => %{"plan" => "pro"}}}}
+      assert_receive {:codex, %{event: :rate_limits_snapshot, payload: %{"rateLimits" => %{}}}}
+      assert_receive {:codex, %{event: :account_usage, thread_id: "thread-account", payload: %{"threadUsage" => %{"estimatedUsageCreditsMicros" => 123}}}}
+    after
+      System.delete_env("SYMPHONY_ACCOUNT_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "runtime account observability failures do not prevent a worker session" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-account-fallback-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-301")
+    codex_binary = Path.join(test_root, "fake-codex")
+    trace_file = Path.join(test_root, "trace.jsonl")
+    File.mkdir_p!(workspace)
+
+    try do
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r line; do
+        printf '%s\\n' "$line" >> "$SYMPHONY_ACCOUNT_TRACE"
+        count=$((count + 1))
+        case "$count" in
+          1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+          3) printf '%s\\n' '{"id":4,"error":{"message":"unsupported"}}' ;;
+          4) printf '%s\\n' '{"id":5,"error":{"message":"unsupported"}}' ;;
+          5) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-fallback"}}}' ;;
+          6) printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-fallback"}}}'; printf '%s\\n' '{"method":"turn/completed"}' ;;
+          7) printf '%s\\n' '{"id":6,"error":{"message":"unsupported"}}' ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMPHONY_ACCOUNT_TRACE", trace_file)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "301",
+        identifier: "MT-301",
+        title: "Account fallback",
+        state: "In Progress"
+      }
+
+      assert {:ok, _} =
+               AppServer.run(workspace, "work", issue, runtime_account_reads: true)
+
+      methods =
+        trace_file
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&Jason.decode!(&1)["method"])
+
+      assert methods == [
+               "initialize",
+               "initialized",
+               "account/read",
+               "account/rateLimits/read",
+               "thread/start",
+               "turn/start",
+               "account/usage/read"
+             ]
+    after
+      System.delete_env("SYMPHONY_ACCOUNT_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
   test "classifier app-server command disables repository tools and constrains output" do
     test_root =
       Path.join(System.tmp_dir!(), "symphony-elixir-classifier-tools-#{System.unique_integer([:positive])}")

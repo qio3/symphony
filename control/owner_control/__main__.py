@@ -73,6 +73,7 @@ def main() -> None:
         intake_provider=store.intake_active,
         action_service=actions,
         logs_provider=supervisor.logs,
+        runtime_diagnostics_url=config.symphony_url.rstrip("/") + "/",
     )
     server_thread = threading.Thread(target=server.serve_forever, name="owner-control-http", daemon=True)
     server_thread.start()

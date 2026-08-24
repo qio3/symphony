@@ -9,7 +9,8 @@ The implementation uses only the Python standard library.
 
 ## Endpoints
 
-Every endpoint requires `Authorization: Bearer <SYMPHONY_CONTROL_TOKEN>`.
+Machine endpoints require `Authorization: Bearer <SYMPHONY_CONTROL_TOKEN>`. The localhost-only web
+UI uses a per-process same-origin CSRF token and never exposes the bearer token to the browser.
 
 - `GET /v1/snapshot`
 - `GET /v1/intake`
@@ -19,9 +20,12 @@ Every endpoint requires `Authorization: Bearer <SYMPHONY_CONTROL_TOKEN>`.
 - `POST /v1/actions/rework` with `{"issue": 401, "reason": "short reason"}`
 - `POST /v1/actions/pause`
 - `POST /v1/actions/resume`
+- `POST /v1/actions/start_service`
+- `POST /v1/actions/stop_service` with `{"confirm_running_workers": 2}` when workers are active
 - `POST /v1/actions/restart`
 
-There is no generic command, shell, Docker, or GitHub proxy endpoint.
+There is no generic command, shell, Docker, or GitHub proxy endpoint. Service actions address only
+the fixed Compose file and fixed Symphony service from local configuration.
 
 ## Local configuration
 
@@ -54,7 +58,7 @@ Optional environment variables:
 
 ```text
 SYMPHONY_CONTROL_BIND=127.0.0.1
-SYMPHONY_CONTROL_PORT=4081
+SYMPHONY_CONTROL_PORT=4080
 CODEX_EXECUTABLE=codex
 ```
 
@@ -69,9 +73,9 @@ $env:PYTHONPATH = "control"
 python -m owner_control
 ```
 
-The Symphony dashboard client uses `SYMPHONY_OWNER_CONTROL_URL` and
-`SYMPHONY_OWNER_CONTROL_TOKEN`. When they are absent, upstream Symphony behavior is unchanged. When
-configured control is unavailable, dispatch fails closed while already-running workers continue.
+The Symphony runtime uses `SYMPHONY_OWNER_CONTROL_URL` and `SYMPHONY_OWNER_CONTROL_TOKEN` only for
+the lightweight intake gate. When configured control is unavailable, dispatch fails closed while
+already-running workers continue. The native Phoenix page remains a runtime diagnostics surface.
 
 ## Telegram and AI boundary
 

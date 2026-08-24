@@ -24,6 +24,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.owner_user_id, 20)
         self.assertTrue(config.state_path.is_absolute())
         self.assertEqual(config.bind_host, "127.0.0.1")
+        self.assertEqual(config.bind_port, 4080)
 
 
 def valid_env():

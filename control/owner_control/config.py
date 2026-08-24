@@ -54,7 +54,7 @@ class Config:
         worker_limit = _positive_int(env, "SYMPHONY_WORKER_LIMIT")
         return cls(
             bind_host=bind_host,
-            bind_port=_port(env.get("SYMPHONY_CONTROL_PORT", "4081")),
+            bind_port=_port(env.get("SYMPHONY_CONTROL_PORT", "4080")),
             control_token=token,
             state_path=state_path,
             symphony_url=_required(env, "SYMPHONY_URL"),

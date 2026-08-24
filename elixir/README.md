@@ -318,13 +318,16 @@ The observability UI now runs on a minimal Phoenix stack:
 - Phoenix dependency static assets for the LiveView client bootstrap
 - Tracker issue identifiers link to the tracker-provided URL when it uses `http` or `https`
 
-An optional external owner-control process can supply the dashboard's deterministic project and
-deployment snapshot plus typed owner actions. Configure both `SYMPHONY_OWNER_CONTROL_URL` and a
-32-character-or-longer `SYMPHONY_OWNER_CONTROL_TOKEN`; leaving both unset preserves the read-only
-upstream dashboard. When configured control is unavailable, new dispatch and retries fail closed,
-while already-running workers and reconciliation continue. The orchestrator reads the lightweight
-`/v1/intake` control state rather than the full snapshot, avoiding a dependency cycle through its own
-observability API.
+An optional external owner-control process supplies the separate owner UI, deterministic project and
+deployment snapshot, Telegram adapter, and typed owner actions. Configure both
+`SYMPHONY_OWNER_CONTROL_URL` and a 32-character-or-longer `SYMPHONY_OWNER_CONTROL_TOKEN`; the runtime
+uses only the lightweight `/v1/intake` gate. When configured control is unavailable, new dispatch and
+retries fail closed, while already-running workers and reconciliation continue. The native Phoenix
+page remains a read-only runtime diagnostics surface.
+
+Per-Issue Codex token and estimated-credit samples are appended to
+`SYMPHONY_USAGE_LEDGER_PATH`. Point it at a persistent host-mounted path to retain completed attempts
+across runtime restarts; the ledger contains no credentials.
 
 ## Project Layout
 

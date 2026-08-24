@@ -1,4 +1,5 @@
 import json
+import re
 import threading
 import unittest
 import urllib.error
@@ -36,15 +37,22 @@ class ControlHttpServerTest(unittest.TestCase):
         self.addCleanup(self.server.shutdown)
         self.base_url = f"http://127.0.0.1:{self.server.server_port}"
 
-    def request(self, path, *, method="GET", body=None, authorized=True):
-        headers = {"Content-Type": "application/json"}
+    def request(self, path, *, method="GET", body=None, authorized=True, headers=None):
+        request_headers = {"Content-Type": "application/json", **(headers or {})}
         if authorized:
-            headers["Authorization"] = f"Bearer {'a' * 32}"
+            request_headers["Authorization"] = f"Bearer {'a' * 32}"
         data = json.dumps(body).encode("utf-8") if body is not None else None
         return urllib.request.urlopen(
-            urllib.request.Request(self.base_url + path, data=data, headers=headers, method=method),
+            urllib.request.Request(self.base_url + path, data=data, headers=request_headers, method=method),
             timeout=3,
         )
+
+    def browser_session(self):
+        with self.request("/", authorized=False) as response:
+            html = response.read().decode("utf-8")
+            csrf = re.search(r'<meta name="owner-control-csrf" content="([^"]+)"', html)
+            self.assertIsNotNone(csrf)
+            return html, csrf.group(1), response.headers
 
     def test_requires_bearer_auth_even_for_snapshot(self):
         with self.assertRaises(urllib.error.HTTPError) as raised:
@@ -57,6 +65,54 @@ class ControlHttpServerTest(unittest.TestCase):
         with self.request("/v1/intake") as response:
             self.assertEqual(json.load(response), {"active": True})
 
+    def test_serves_the_owner_ui_without_exposing_the_control_token(self):
+        html, _csrf, headers = self.browser_session()
+
+        self.assertIn("Owner Control", html)
+        self.assertIn("Service", html)
+        self.assertIn("Codex quota", html)
+        self.assertNotIn("a" * 32, html)
+        self.assertIn("default-src 'self'", headers["Content-Security-Policy"])
+
+        with self.request("/assets/owner-control.css", authorized=False) as response:
+            self.assertEqual(response.headers.get_content_type(), "text/css")
+        with self.request("/assets/owner-control.js", authorized=False) as response:
+            self.assertEqual(response.headers.get_content_type(), "text/javascript")
+
+    def test_browser_snapshot_and_actions_require_same_origin_csrf(self):
+        _html, csrf, _headers = self.browser_session()
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.request("/ui/snapshot", authorized=False)
+        self.assertEqual(raised.exception.code, 401)
+
+        browser_headers = {
+            "Origin": self.base_url,
+            "X-Owner-Control-CSRF": csrf,
+        }
+        with self.request(
+            "/ui/snapshot", authorized=False, headers=browser_headers
+        ) as response:
+            self.assertEqual(json.load(response)["counts"]["running"], 1)
+
+        fetch_metadata_headers = {
+            "Sec-Fetch-Site": "same-origin",
+            "X-Owner-Control-CSRF": csrf,
+        }
+        with self.request(
+            "/ui/snapshot", authorized=False, headers=fetch_metadata_headers
+        ) as response:
+            self.assertEqual(json.load(response)["counts"]["running"], 1)
+
+        with self.request(
+            "/ui/actions/pause",
+            method="POST",
+            body={},
+            authorized=False,
+            headers=browser_headers,
+        ) as response:
+            self.assertEqual(json.load(response)["action"], "pause")
+        self.assertEqual(self.actions.calls, [("pause", {})])
+
     def test_exposes_only_typed_action_routes(self):
         with self.request("/v1/actions/pause", method="POST", body={}) as response:
             self.assertEqual(json.load(response)["action"], "pause")
@@ -65,6 +121,23 @@ class ControlHttpServerTest(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as raised:
             self.request("/v1/actions/shell", method="POST", body={"command": "whoami"})
         self.assertEqual(raised.exception.code, 404)
+
+    def test_exposes_service_actions_and_action_rejections(self):
+        with self.request("/v1/actions/start_service", method="POST", body={}) as response:
+            self.assertEqual(json.load(response)["action"], "start_service")
+        self.assertEqual(self.actions.calls, [("start_service", {})])
+
+        from owner_control.actions import ActionError
+
+        self.actions.error = ActionError("confirm_running_workers must match 2")
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.request("/v1/actions/stop_service", method="POST", body={})
+
+        self.assertEqual(raised.exception.code, 409)
+        self.assertEqual(
+            json.load(raised.exception)["error"]["code"],
+            "action_rejected",
+        )
 
     def test_logs_tail_is_numeric_and_bounded(self):
         with self.request("/v1/logs?tail=99999") as response:

@@ -59,6 +59,14 @@ class TelegramCommandHandler:
                 return "Logs\n" + "\n".join(self._logs_provider(30)[-30:])
             if command in {"/pause", "/resume", "/restart"}:
                 return self._action(command[1:], {})
+            if command == "/start_service":
+                return self._action("start_service", {})
+            if command == "/stop_service":
+                confirmation = self._optional_worker_confirmation(arguments)
+                if confirmation is None and arguments:
+                    return "Usage: /stop_service [running workers count]"
+                params = {} if confirmation is None else {"confirm_running_workers": confirmation}
+                return self._action("stop_service", params)
             if command in {"/run", "/accept"}:
                 return self._action(command[1:], {"issue": self._issue_argument(arguments)})
             if command == "/rework":
@@ -86,13 +94,27 @@ class TelegramCommandHandler:
         models = snapshot.get("models") or {}
         canonical = _short_sha((snapshot.get("canonical") or {}).get("sha"))
         test = snapshot.get("test") or {}
+        weekly = (snapshot.get("quota") or {}).get("weekly") or {}
+        weekly_text = (
+            f"{weekly['used_percent']}% used"
+            if isinstance(weekly.get("used_percent"), (int, float))
+            else "unavailable"
+        )
+        service_state = str(service.get("status") or "").casefold()
+        if service_state == "unknown":
+            service_text = "◌ Unknown"
+        elif service.get("live"):
+            service_text = "● Live"
+        else:
+            service_text = "○ Down"
         test_suffix = " ✓" if test.get("synced") else " ⚠ drift"
         return "\n".join(
             [
-                f"Symphony {'● Live' if service.get('live') else '○ Down'}",
+                f"Symphony {service_text}",
                 f"Intake: {'Active' if intake.get('active') else 'Paused'}",
                 f"Workers: {workers.get('running', 0)}/{workers.get('limit', 0)}",
                 f"Models: {_model_count(models, 'luna')} · {_model_count(models, 'terra')} · {_model_count(models, 'sol')}",
+                f"Weekly: {weekly_text}",
                 "",
                 f"Backlog: {counts.get('backlog', 0)}",
                 f"Ready for AI: {counts.get('ready_for_ai', 0)}",
@@ -131,8 +153,20 @@ class TelegramCommandHandler:
         return int(normalized)
 
     @staticmethod
+    def _optional_worker_confirmation(value: str) -> int | None:
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if not normalized.isdigit():
+            return None
+        return int(normalized)
+
+    @staticmethod
     def _help() -> str:
-        return "Commands: /status /work /ready /blocked /backlog /run /accept /rework /pause /resume /restart /logs /help"
+        return (
+            "Commands: /status /work /ready /blocked /backlog /run /accept /rework "
+            "/start_service /stop_service /pause /resume /restart /logs /help"
+        )
 
 
 class NotificationDetector:
@@ -189,9 +223,11 @@ class NotificationDetector:
                 )
 
         was_live = bool((previous.get("service") or {}).get("live"))
-        is_live = bool((current.get("service") or {}).get("live"))
-        if was_live and not is_live:
-            reason = (current.get("service") or {}).get("reason") or "service unavailable"
+        current_service = current.get("service") or {}
+        is_live = bool(current_service.get("live"))
+        service_status = str(current_service.get("status") or "").casefold()
+        if was_live and not is_live and service_status != "unknown":
+            reason = current_service.get("reason") or "service unavailable"
             events.append(
                 {
                     "kind": "service_stopped",

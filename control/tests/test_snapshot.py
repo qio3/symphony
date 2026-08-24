@@ -200,6 +200,112 @@ class SnapshotBuilderTest(unittest.TestCase):
         self.assertEqual(snapshot["models"], runtime["models"])
         self.assertEqual(snapshot["owner_view"]["work_items"][0]["model"], model)
 
+    def test_selects_quota_windows_by_duration_not_primary_secondary_position(self):
+        runtime = {
+            "generated_at": "2026-08-23T10:00:00Z",
+            "running": [],
+            "retrying": [],
+            "blocked": [],
+            "codex_totals": {},
+            "rate_limits": {
+                "primary": {
+                    "usedPercent": 42,
+                    "windowDurationMins": 10080,
+                    "resetsAt": 1787558400,
+                },
+                "secondary": {
+                    "usedPercent": 17,
+                    "windowDurationMins": 300,
+                    "resetsAt": 1787500000,
+                },
+            },
+        }
+
+        snapshot = SnapshotBuilder().build(
+            service={"live": True},
+            intake_active=True,
+            worker_limit=5,
+            runtime=runtime,
+            project={"items": []},
+            canonical={"sha": "aaaaaaaa11111111"},
+            test={"sha": "aaaaaaaa11111111", "url": "https://test.example"},
+        )
+
+        self.assertEqual(snapshot["quota"]["five_hour"]["used_percent"], 17)
+        self.assertEqual(snapshot["quota"]["five_hour"]["window_duration_mins"], 300)
+        self.assertEqual(snapshot["quota"]["weekly"]["used_percent"], 42)
+        self.assertEqual(snapshot["quota"]["weekly"]["window_duration_mins"], 10080)
+
+    def test_joins_persisted_issue_usage_into_owner_lanes(self):
+        runtime = {
+            "generated_at": "2026-08-23T10:00:00Z",
+            "running": [
+                {
+                    "issue_id": "407",
+                    "issue_identifier": "GH-407",
+                    "started_at": "2026-08-23T09:50:00Z",
+                    "turn_count": 6,
+                }
+            ],
+            "retrying": [],
+            "blocked": [],
+            "codex_totals": {},
+            "rate_limits": None,
+            "max_concurrent_agents": 5,
+            "issue_usage": {
+                "407": {
+                    "issue_id": "internal-407",
+                    "issue_identifier": "GH-407",
+                    "current": {
+                        "thread_id": "thread-407",
+                        "model": "gpt-5.6-terra",
+                        "tier": "terra",
+                        "started_at": "2026-08-23T09:50:00Z",
+                        "completed_at": None,
+                    },
+                    "aggregate": {
+                        "token_usage": {
+                            "input_tokens": 1200,
+                            "cached_input_tokens": 800,
+                            "cache_write_input_tokens": 100,
+                            "output_tokens": 300,
+                            "reasoning_output_tokens": 120,
+                            "total_tokens": 1500,
+                        },
+                        "estimated_usage_credits_micros": 44000,
+                    },
+                }
+            },
+        }
+
+        snapshot = SnapshotBuilder().build(
+            service={"live": True},
+            intake_active=True,
+            worker_limit=2,
+            runtime=runtime,
+            project={
+                "items": [
+                    {
+                        "number": 407,
+                        "title": "Usage survives completion",
+                        "url": "https://github.test/issues/407",
+                        "status": "In Progress",
+                        "state": "OPEN",
+                    }
+                ]
+            },
+            canonical={"sha": "aaaaaaaa11111111"},
+            test={"sha": "aaaaaaaa11111111", "url": "https://test.example"},
+        )
+
+        item = snapshot["owner_view"]["work_items"][0]
+        self.assertEqual(item["turn_count"], 6)
+        self.assertEqual(item["usage"]["total_tokens"], 1500)
+        self.assertEqual(item["usage"]["estimated_credits_micros"], 44000)
+        self.assertEqual(item["usage"]["tier"], "terra")
+        self.assertEqual(snapshot["issue_usage"]["407"]["cached_input_tokens"], 800)
+        self.assertEqual(snapshot["workers"], {"running": 1, "limit": 5})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -262,15 +262,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert state_payload == %{
              "generated_at" => state_payload["generated_at"],
-             "counts" => %{
-               "backlog" => 74,
-               "running" => 1,
-               "queued" => 1,
-               "retrying" => 1,
-               "blocked" => 1,
-               "ready_for_acceptance" => 1,
-               "done" => 70
-             },
+             "counts" => %{"running" => 1, "retrying" => 1, "blocked" => 1},
              "running" => [
                %{
                  "issue_id" => "issue-http",
@@ -339,81 +331,6 @@ defmodule SymphonyElixir.ExtensionsTest do
                  }
                }
              ],
-             "owner_view" => %{
-               "available" => true,
-               "updated_at" => "2026-08-22T10:00:00Z",
-               "counts" => %{
-                 "backlog" => 74,
-                 "blocked" => 1,
-                 "ready_for_acceptance" => 1,
-                 "done" => 70
-               },
-               "blocked" => [
-                 %{
-                   "issue_id" => "issue-blocked",
-                   "issue_identifier" => "MT-BLOCKED",
-                   "issue_url" => "https://example.org/issues/MT-BLOCKED",
-                   "title" => "Choose the canonical behavior",
-                   "stage" => "Blocked",
-                   "question" => "Should the owner keep the existing mapping?",
-                   "reason" => "Owner decision required",
-                   "blocked_at" => "2026-08-22T09:30:00Z"
-                 }
-               ],
-               "backlog" => [
-                 %{
-                   "issue_id" => "issue-backlog",
-                   "issue_identifier" => "GH-401",
-                   "issue_url" => "https://example.org/issues/401",
-                   "title" => "First backlog issue",
-                   "stage" => "Ready for AI",
-                   "status" => nil,
-                   "started_at" => nil,
-                   "pr" => nil,
-                   "ci" => nil,
-                   "test" => nil
-                 }
-               ],
-               "work_items" => [
-                 %{
-                   "issue_id" => "issue-http",
-                   "issue_identifier" => "MT-HTTP",
-                   "issue_url" => "https://example.org/issues/MT-HTTP",
-                   "title" => "Render owner dashboard",
-                   "stage" => "Agent working",
-                   "status" => "running",
-                   "started_at" => state_payload["running"] |> List.first() |> Map.fetch!("started_at"),
-                   "pr" => nil,
-                   "ci" => nil,
-                   "test" => nil
-                 }
-               ],
-               "ready_for_acceptance" => [
-                 %{
-                   "issue_id" => "issue-ready",
-                   "issue_identifier" => "GH-83",
-                   "issue_url" => "https://example.org/issues/83",
-                   "title" => "Ready owner check",
-                   "stage" => "Ready for Acceptance",
-                   "status" => nil,
-                   "started_at" => nil,
-                   "pr" => %{
-                     "number" => 381,
-                     "url" => "https://example.org/pulls/381",
-                     "state" => "merged"
-                   },
-                   "ci" => %{
-                     "status" => "success",
-                     "url" => "https://example.org/actions/runs/381"
-                   },
-                   "test" => %{
-                     "status" => "deployed",
-                     "sha" => "1d40505bbb8294319f8d31703661b0f0948293ef",
-                     "url" => "https://test.example.org"
-                   }
-                 }
-               ]
-             },
              "codex_totals" => %{
                "input_tokens" => 4,
                "output_tokens" => 8,
@@ -425,7 +342,19 @@ defmodule SymphonyElixir.ExtensionsTest do
                "terra" => %{"active" => 1, "completed" => 2},
                "sol" => %{"active" => 0, "completed" => 1}
              },
-             "rate_limits" => %{"primary" => %{"remaining" => 11}}
+             "rate_limits" => %{"primary" => %{"remaining" => 11}},
+             "issue_usage" => %{
+               "HTTP" => %{
+                 "aggregate" => %{
+                   "token_usage" => %{"total_tokens" => 12},
+                   "estimated_usage_credits_micros" => 44_000
+                 }
+               }
+             },
+             "usage_aggregate" => %{
+               "token_usage" => %{"total_tokens" => 12},
+               "estimated_usage_credits_micros" => 44_000
+             }
            }
 
     conn = get(build_conn(), "/api/v1/MT-HTTP")
@@ -617,21 +546,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
     {:ok, view, html} = live(build_conn(), "/")
-    assert html =~ "Owner control"
-    assert html =~ "Backlog"
-    assert html =~ "Ready for Acceptance"
-    assert html =~ "Needs owner"
-    assert html =~ "Should the owner keep the existing mapping?"
-    assert html =~ "Render owner dashboard"
-    assert html =~ "First backlog issue"
-    assert html =~ "Ready owner check"
-    assert html =~ "PR #381"
-    assert html =~ "CI passed"
-    assert html =~ "1d40505b"
-    assert html =~ "Open TEST"
-    assert html =~ "Runtime diagnostics"
-    assert html =~ "Total tokens"
-    assert html =~ "Rate limits"
+    assert html =~ "Operations Dashboard"
     assert html =~ "MT-HTTP"
     assert html =~ "MT-RETRY"
     assert html =~ "MT-BLOCKED"
@@ -708,59 +623,6 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "snapshot_unavailable"
   end
 
-  test "owner view falls back to runtime work without inventing project counts" do
-    orchestrator_name = Module.concat(__MODULE__, :RuntimeOnlyDashboardOrchestrator)
-    snapshot = static_snapshot() |> Map.delete(:owner_view)
-
-    {:ok, _pid} =
-      StaticOrchestrator.start_link(
-        name: orchestrator_name,
-        snapshot: snapshot,
-        refresh: :unavailable
-      )
-
-    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
-
-    state_payload = json_response(get(build_conn(), "/api/v1/state"), 200)
-
-    assert state_payload["counts"]["backlog"] == nil
-    assert state_payload["counts"]["ready_for_acceptance"] == nil
-    assert state_payload["counts"]["done"] == nil
-    assert state_payload["owner_view"]["available"] == false
-
-    {:ok, _view, html} = live(build_conn(), "/")
-    assert html =~ "Project inventory is not reported by the current runtime snapshot."
-    assert html =~ "Agent working"
-    assert html =~ "Retry queued"
-    assert html =~ "Needs owner"
-  end
-
-  test "owner view derives and deduplicates project blocker counts without a runtime lease" do
-    orchestrator_name = Module.concat(__MODULE__, :ProjectBlockedDashboardOrchestrator)
-
-    snapshot =
-      static_snapshot()
-      |> Map.put(:blocked, [])
-      |> update_in([:owner_view, :counts], &Map.delete(&1, :blocked))
-      |> update_in([:owner_view, :blocked], fn [blocked] -> [blocked, blocked] end)
-
-    {:ok, _pid} =
-      StaticOrchestrator.start_link(
-        name: orchestrator_name,
-        snapshot: snapshot,
-        refresh: :unavailable
-      )
-
-    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
-
-    state_payload = json_response(get(build_conn(), "/api/v1/state"), 200)
-    assert state_payload["counts"]["blocked"] == 1
-    assert length(state_payload["owner_view"]["blocked"]) == 1
-
-    {:ok, _view, html} = live(build_conn(), "/")
-    assert html =~ "Should the owner keep the existing mapping?"
-  end
-
   test "http server serves embedded assets, accepts form posts, and rejects invalid hosts" do
     spec = HttpServer.child_spec(port: 0)
     assert spec.id == HttpServer
@@ -795,16 +657,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     response = Req.get!("http://127.0.0.1:#{port}/api/v1/state")
     assert response.status == 200
-
-    assert response.body["counts"] == %{
-             "backlog" => 74,
-             "running" => 1,
-             "queued" => 1,
-             "retrying" => 1,
-             "blocked" => 1,
-             "ready_for_acceptance" => 1,
-             "done" => 70
-           }
+    assert response.body["counts"] == %{"running" => 1, "retrying" => 1, "blocked" => 1}
 
     dashboard_css = Req.get!("http://127.0.0.1:#{port}/dashboard.css")
     assert dashboard_css.status == 200
@@ -918,57 +771,17 @@ defmodule SymphonyElixir.ExtensionsTest do
         sol: %{active: 0, completed: 1}
       },
       rate_limits: %{"primary" => %{"remaining" => 11}},
-      owner_view: %{
-        counts: %{backlog: 74, blocked: 1, ready_for_acceptance: 1, done: 70},
-        updated_at: ~U[2026-08-22 10:00:00Z],
-        blocked: [
-          %{
-            issue_id: "issue-blocked",
-            identifier: "MT-BLOCKED",
-            issue_url: "https://example.org/issues/MT-BLOCKED",
-            title: "Choose the canonical behavior",
-            stage: "Blocked",
-            question: "Should the owner keep the existing mapping?",
-            reason: "Owner decision required",
-            blocked_at: ~U[2026-08-22 09:30:00Z]
+      issue_usage: %{
+        "HTTP" => %{
+          aggregate: %{
+            token_usage: %{total_tokens: 12},
+            estimated_usage_credits_micros: 44_000
           }
-        ],
-        backlog: [
-          %{
-            issue_id: "issue-backlog",
-            identifier: "GH-401",
-            issue_url: "https://example.org/issues/401",
-            title: "First backlog issue",
-            stage: "Ready for AI"
-          }
-        ],
-        work_items: [
-          %{
-            issue_id: "issue-http",
-            identifier: "MT-HTTP",
-            issue_url: "https://example.org/issues/MT-HTTP",
-            title: "Render owner dashboard",
-            stage: "Agent working",
-            status: "running",
-            started_at: DateTime.utc_now()
-          }
-        ],
-        ready_for_acceptance: [
-          %{
-            issue_id: "issue-ready",
-            identifier: "GH-83",
-            issue_url: "https://example.org/issues/83",
-            title: "Ready owner check",
-            stage: "Ready for Acceptance",
-            pr: %{number: 381, url: "https://example.org/pulls/381", state: "merged"},
-            ci: %{status: "success", url: "https://example.org/actions/runs/381"},
-            test: %{
-              status: "deployed",
-              sha: "1d40505bbb8294319f8d31703661b0f0948293ef",
-              url: "https://test.example.org"
-            }
-          }
-        ]
+        }
+      },
+      usage_aggregate: %{
+        token_usage: %{total_tokens: 12},
+        estimated_usage_credits_micros: 44_000
       }
     }
   end

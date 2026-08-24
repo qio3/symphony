@@ -21,6 +21,17 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     send(pid, :stop)
   end
 
+  test "snapshot exposes the current authoritative agent concurrency limit" do
+    orchestrator_name = Module.concat(__MODULE__, :ConcurrencyLimitOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    assert GenServer.call(pid, :snapshot).max_concurrent_agents == Config.settings!().agent.max_concurrent_agents
+  end
+
   test "orchestrator snapshot reflects last codex update and session id" do
     issue_id = "issue-snapshot"
 
@@ -438,9 +449,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     rate_limits = %{
-      "limit_id" => "codex",
-      "primary" => %{"remaining" => 90, "limit" => 100},
-      "secondary" => nil,
+      "primary" => %{"usedPercent" => 10, "windowDurationMins" => 300},
+      "secondary" => %{"usedPercent" => 20, "windowDurationMins" => 10_080},
       "credits" => %{"has_credits" => false, "unlimited" => false, "balance" => nil}
     }
 
@@ -467,6 +477,153 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     snapshot = GenServer.call(pid, :snapshot)
     assert snapshot.rate_limits == rate_limits
+  end
+
+  test "snapshot exposes host-persisted issue usage by issue id" do
+    path = Path.join(System.tmp_dir!(), "symphony-orchestrator-usage-#{System.unique_integer([:positive])}.jsonl")
+    issue_id = "issue-persisted-usage"
+    orchestrator_name = Module.concat(__MODULE__, :PersistedUsageOrchestrator)
+
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name, usage_ledger_path: path)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm(path)
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: "MT-250",
+      issue: %Issue{id: issue_id, identifier: "MT-250", title: "Persist usage", state: "In Progress"},
+      session_id: "thread-persisted-turn-1",
+      thread_id: "thread-persisted",
+      selected_model_tier: :terra,
+      actual_model: "gpt-5.6-terra",
+      started_at: ~U[2026-08-24 10:00:00Z],
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0
+    }
+
+    :sys.replace_state(pid, fn state ->
+      %{state | running: %{issue_id => running_entry}, claimed: MapSet.put(initial_state.claimed, issue_id)}
+    end)
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :notification,
+         payload: %{
+           "method" => "thread/tokenUsage/updated",
+           "params" => %{
+             "tokenUsage" => %{
+               "total" => %{
+                 "inputTokens" => 10,
+                 "cachedInputTokens" => 2,
+                 "cacheWriteInputTokens" => 1,
+                 "outputTokens" => 5,
+                 "reasoningOutputTokens" => 3,
+                 "totalTokens" => 15
+               }
+             }
+           }
+         },
+         timestamp: ~U[2026-08-24 10:01:00Z]
+       }}
+    )
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :account_usage,
+         thread_id: "thread-persisted",
+         payload: %{
+           "threadUsage" => %{
+             "estimatedUsageCreditsMicros" => 123,
+             "groups" => ["subscription"]
+           }
+         },
+         timestamp: ~U[2026-08-24 10:01:01Z]
+       }}
+    )
+
+    assert %{issue_usage: %{"250" => usage}} = GenServer.call(pid, :snapshot)
+    assert usage.current.issue_id == issue_id
+    assert usage.current.issue_identifier == "MT-250"
+
+    assert usage.current.token_usage == %{
+             input_tokens: 10,
+             cached_input_tokens: 2,
+             cache_write_input_tokens: 1,
+             output_tokens: 5,
+             reasoning_output_tokens: 3,
+             total_tokens: 15
+           }
+
+    assert usage.current.estimated_usage_credits_micros == 123
+    assert usage.current.estimated_usage_groups == ["subscription"]
+    assert usage.aggregate.token_usage.total_tokens == 15
+    assert usage.aggregate.estimated_usage_credits_micros == 123
+    assert File.read!(path) |> String.split("\n", trim: true) |> length() == 2
+  end
+
+  test "issue usage selects the latest attempt by timestamp rather than thread id" do
+    path = Path.join(System.tmp_dir!(), "symphony-orchestrator-attempts-#{System.unique_integer([:positive])}.jsonl")
+    issue_id = "issue-attempt-order"
+
+    usage = %{
+      input_tokens: 1,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: 1,
+      reasoning_output_tokens: 0,
+      total_tokens: 2
+    }
+
+    {:ok, ledger} = SymphonyElixir.UsageLedger.load(path)
+
+    {:ok, ledger} =
+      SymphonyElixir.UsageLedger.record(ledger, %{
+        issue_id: issue_id,
+        issue_identifier: "MT-251",
+        thread_id: "thread-z-earlier",
+        started_at: ~U[2026-08-24 10:00:00Z],
+        completed_at: ~U[2026-08-24 10:10:00Z],
+        token_usage: usage,
+        estimated_usage_credits_micros: 10
+      })
+
+    {:ok, _ledger} =
+      SymphonyElixir.UsageLedger.record(ledger, %{
+        issue_id: issue_id,
+        issue_identifier: "MT-251",
+        thread_id: "thread-a-later",
+        started_at: ~U[2026-08-24 11:00:00Z],
+        completed_at: nil,
+        token_usage: usage,
+        estimated_usage_credits_micros: 20
+      })
+
+    orchestrator_name = Module.concat(__MODULE__, :AttemptOrderOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name, usage_ledger_path: path)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm(path)
+    end)
+
+    assert %{issue_usage: %{"251" => issue_usage}} = GenServer.call(pid, :snapshot)
+    assert issue_usage.current.thread_id == "thread-a-later"
+    assert issue_usage.aggregate.token_usage.total_tokens == 4
+    assert issue_usage.aggregate.estimated_usage_credits_micros == 30
   end
 
   test "orchestrator token accounting prefers total_token_usage over last_token_usage in token_count payloads" do

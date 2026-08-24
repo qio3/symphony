@@ -19,6 +19,8 @@ class Lifecycle(Protocol):
 
 
 class Supervisor(Protocol):
+    def start(self) -> dict[str, Any]: ...
+    def stop(self) -> dict[str, Any]: ...
     def restart(self) -> dict[str, Any]: ...
 
 
@@ -42,24 +44,59 @@ class ActionService:
         self._lock = threading.Lock()
 
     def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
-        with self._lock:
+        if not self._lock.acquire(blocking=False):
+            raise ActionError("another action is already in progress")
+        try:
             result = self._execute_locked(action, params)
             self._after_action()
             return result
+        finally:
+            self._lock.release()
 
     def _execute_locked(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
         if action == "pause":
             self._state_store.set_intake_active(False)
             return {"status": "accepted", "intake": {"active": False}}
         if action == "resume":
+            snapshot = self._snapshot_provider()
+            self._require_fresh_sources(snapshot, "runtime", "github")
             self._state_store.set_intake_active(True)
             return {"status": "accepted", "intake": {"active": True}}
-        if action == "restart":
-            self._state_store.update({"expected_service_restart_until": time.time() + 120})
+        if action in {"start_service", "restart"}:
+            snapshot = self._snapshot_provider()
+            self._require_fresh_sources(snapshot, "supervisor")
+            self._state_store.update(
+                {
+                    "expected_service_restart_until": time.time() + 120,
+                    "expected_service_stop": False,
+                }
+            )
             try:
-                service = self._supervisor.restart()
+                service = (
+                    self._supervisor.start()
+                    if action == "start_service"
+                    else self._supervisor.restart()
+                )
             except Exception:
                 self._state_store.update({"expected_service_restart_until": 0})
+                raise
+            return {"status": "accepted", "service": service}
+        if action == "stop_service":
+            snapshot = self._snapshot_provider()
+            self._require_fresh_sources(snapshot, "supervisor", "runtime")
+            running_workers = self._running_workers(snapshot)
+            confirmation = params.get("confirm_running_workers")
+            if running_workers > 0 and (
+                type(confirmation) is not int or confirmation != running_workers
+            ):
+                raise ActionError(
+                    f"stop_service requires confirm_running_workers to match {running_workers}"
+                )
+            self._state_store.update({"expected_service_stop": True})
+            try:
+                service = self._supervisor.stop()
+            except Exception:
+                self._state_store.update({"expected_service_stop": False})
                 raise
             return {"status": "accepted", "service": service}
         if action not in {"run", "accept", "rework"}:
@@ -67,6 +104,9 @@ class ActionService:
 
         issue_number = self._issue_number(params.get("issue"))
         snapshot = self._snapshot_provider()
+        self._require_fresh_sources(snapshot, "github")
+        if action == "accept":
+            self._require_fresh_sources(snapshot, "test")
         issue = snapshot.get("issues", {}).get(str(issue_number))
         if not isinstance(issue, dict):
             raise ActionError(f"issue #{issue_number} is not in the control snapshot")
@@ -95,6 +135,13 @@ class ActionService:
             raise ActionError("accept requires Ready for Acceptance")
         if status == "ready for acceptance" and not snapshot.get("test", {}).get("synced"):
             raise ActionError("accept refused because TEST is not synced to canonical")
+        issue_test = issue.get("test")
+        if (
+            status == "ready for acceptance"
+            and isinstance(issue_test, dict)
+            and issue_test.get("synced") is not True
+        ):
+            raise ActionError("accept refused because Issue TEST is not synced")
         if status == "ready for acceptance":
             self._lifecycle.set_status(issue_number, "Done")
         if str(issue.get("state", "OPEN")).upper() != "CLOSED":
@@ -119,3 +166,19 @@ class ActionService:
         if not normalized.isdigit() or int(normalized) <= 0:
             raise ActionError("a positive issue number is required")
         return int(normalized)
+
+    @staticmethod
+    def _running_workers(snapshot: dict[str, Any]) -> int:
+        workers = snapshot.get("workers", {})
+        if not isinstance(workers, dict):
+            return 0
+        value = workers.get("running", 0)
+        return value if isinstance(value, int) and value > 0 else 0
+
+    @staticmethod
+    def _require_fresh_sources(snapshot: dict[str, Any], *names: str) -> None:
+        sources = snapshot.get("sources")
+        for name in names:
+            source = sources.get(name) if isinstance(sources, dict) else None
+            if not isinstance(source, dict) or source.get("status") != "fresh":
+                raise ActionError(f"action requires fresh {name} state")

@@ -62,6 +62,45 @@ class AuthFailingGitHub(FakeGitHub):
         raise RuntimeError("HTTP 401 from api.github.com")
 
 
+class ToggleGitHub(FakeGitHub):
+    def __init__(self):
+        self.fail = False
+
+    def project_snapshot(self):
+        if self.fail:
+            raise OSError("temporary GitHub outage")
+        return {
+            "items": [
+                {
+                    "number": 401,
+                    "title": "Keep the owner view stable",
+                    "url": "https://github.test/issues/401",
+                    "status": "Ready for Acceptance",
+                    "state": "OPEN",
+                }
+            ]
+        }
+
+
+class ToggleSymphony(FakeSymphony):
+    def __init__(self):
+        self.fail = False
+
+    def state(self):
+        if self.fail:
+            raise OSError("runtime API is restarting")
+        return {
+            **super().state(),
+            "running": [
+                {
+                    "issue_id": "402",
+                    "issue_identifier": "GH-402",
+                    "started_at": "2026-08-23T09:45:00Z",
+                }
+            ],
+        }
+
+
 class FakeTest:
     def deployment(self):
         return {"sha": "abc12345", "url": "https://test.example"}
@@ -101,7 +140,7 @@ class SnapshotServiceTest(unittest.TestCase):
         self.assertEqual(snapshot["test"]["sha"], "abc12345")
         self.assertEqual(snapshot["workers"], {"running": 0, "limit": 2})
 
-    def test_symphony_failure_reports_down_and_fail_closed_snapshot(self):
+    def test_symphony_failure_reports_runtime_unavailable_without_overriding_container_state(self):
         service = SnapshotService(
             symphony=FailingSymphony(),
             github=FakeGitHub(),
@@ -114,8 +153,9 @@ class SnapshotServiceTest(unittest.TestCase):
 
         snapshot = service.snapshot()
 
-        self.assertFalse(snapshot["service"]["live"])
-        self.assertIn("connection refused", snapshot["service"]["reason"])
+        self.assertTrue(snapshot["service"]["live"])
+        self.assertEqual(snapshot["sources"]["runtime"]["status"], "unavailable")
+        self.assertIn("connection refused", snapshot["sources"]["runtime"]["error"])
         self.assertEqual(snapshot["running"], [])
 
     def test_supervisor_failure_still_returns_a_down_snapshot(self):
@@ -203,8 +243,94 @@ class SnapshotServiceTest(unittest.TestCase):
         self.assertTrue(failure["unrecoverable"])
         self.assertIn("github snapshot unavailable", failure["message"])
 
+    def test_temporary_github_failure_keeps_last_confirmed_owner_data_as_stale(self):
+        github = ToggleGitHub()
+        service = SnapshotService(
+            symphony=FakeSymphony(),
+            github=github,
+            test_environment=FakeTest(),
+            supervisor=FakeSupervisor(),
+            state_store=self.store,
+            worker_limit=5,
+            canonical_ref="rebrand/stanina",
+        )
+        healthy = service.snapshot(fresh=True)
+        self.assertEqual(healthy["counts"]["ready_for_acceptance"], 1)
+
+        github.fail = True
+        stale = service.snapshot(fresh=True)
+
+        self.assertEqual(stale["counts"]["ready_for_acceptance"], 1)
+        self.assertEqual(stale["canonical"]["sha"], "abc12345")
+        self.assertTrue(stale["stale"])
+        self.assertEqual(stale["sources"]["github"]["status"], "stale")
+        self.assertIn("temporary GitHub outage", stale["sources"]["github"]["error"])
+
+    def test_runtime_restart_does_not_turn_a_running_container_or_counters_into_down_zeroes(self):
+        symphony = ToggleSymphony()
+        service = SnapshotService(
+            symphony=symphony,
+            github=FakeGitHub(),
+            test_environment=FakeTest(),
+            supervisor=FakeSupervisor(),
+            state_store=self.store,
+            worker_limit=5,
+            canonical_ref="rebrand/stanina",
+        )
+        healthy = service.snapshot(fresh=True)
+        self.assertEqual(healthy["workers"], {"running": 1, "limit": 5})
+
+        symphony.fail = True
+        stale = service.snapshot(fresh=True)
+
+        self.assertTrue(stale["service"]["live"])
+        self.assertEqual(stale["workers"], {"running": 1, "limit": 5})
+        self.assertEqual(stale["sources"]["runtime"]["status"], "stale")
+        self.assertTrue(stale["stale"])
+
 
 class DockerComposeSupervisorTest(unittest.TestCase):
+    def test_start_stop_and_status_use_fixed_targets_without_shell(self):
+        calls = []
+
+        def runner(command, **kwargs):
+            calls.append((command, kwargs))
+            if command[1] == "inspect":
+                return subprocess.CompletedProcess(
+                    command, 0, stdout='{"Running": true, "Status": "running"}', stderr=""
+                )
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        supervisor = DockerComposeSupervisor(
+            compose_file=Path("C:/control/docker-compose.yml"),
+            container_name="zavod-symphony",
+            service_name="symphony",
+            runner=runner,
+        )
+
+        self.assertEqual(supervisor.start(), {"accepted": True, "container": "zavod-symphony"})
+        self.assertEqual(supervisor.stop(), {"accepted": True, "container": "zavod-symphony"})
+        self.assertEqual(supervisor.status()["status"], "running")
+
+        self.assertEqual(
+            [call[0] for call in calls],
+            [
+                [
+                    "docker",
+                    "compose",
+                    "-f",
+                    "C:\\control\\docker-compose.yml",
+                    "up",
+                    "-d",
+                    "--no-deps",
+                    "symphony",
+                ],
+                ["docker", "compose", "-f", "C:\\control\\docker-compose.yml", "stop", "symphony"],
+                ["docker", "inspect", "zavod-symphony", "--format", "{{json .State}}"],
+            ],
+        )
+        self.assertTrue(all(call[1].get("shell") is False for call in calls))
+
     def test_restart_and_logs_use_fixed_compose_target_without_shell(self):
         calls = []
 

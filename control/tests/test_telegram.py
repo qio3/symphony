@@ -42,6 +42,10 @@ def snapshot():
         },
         "canonical": {"sha": "be44cf15aaaaaaaa"},
         "test": {"sha": "be44cf15aaaaaaaa", "synced": True, "url": "https://test.example"},
+        "quota": {
+            "five_hour": {"used_percent": 18, "window_duration_mins": 300, "resets_at": 1787500000},
+            "weekly": {"used_percent": 42, "window_duration_mins": 10080, "resets_at": 1787558400},
+        },
         "owner_view": {
             "work_items": [
                 {
@@ -87,7 +91,23 @@ class TelegramCommandHandlerTest(unittest.TestCase):
         self.assertIn("Ready for AI: 2", text)
         self.assertIn("TEST: be44cf15 ✓", text)
         self.assertIn("Models: Luna 0 · Terra 1 · Sol 0", text)
+        self.assertIn("Weekly: 42% used", text)
         self.assertNotIn("tokens", text.casefold())
+
+    def test_status_does_not_report_down_when_supervisor_state_is_unknown(self):
+        unknown = snapshot()
+        unknown["service"] = {"live": False, "status": "unknown"}
+        handler = TelegramCommandHandler(
+            snapshot_provider=lambda: unknown,
+            action_service=self.actions,
+            logs_provider=lambda _tail: [],
+            ai=self.ai,
+        )
+
+        text = handler.handle("/status")
+
+        self.assertIn("Symphony ◌ Unknown", text)
+        self.assertNotIn("Symphony ○ Down", text)
 
     def test_leading_bot_mention_still_routes_slash_command(self):
         text = self.handler.handle("@Contentzavod_PM_bot /status")
@@ -116,6 +136,24 @@ class TelegramCommandHandlerTest(unittest.TestCase):
                 ("restart", {}),
             ],
         )
+
+    def test_service_commands_use_the_same_typed_actions(self):
+        self.assertIn("accepted", self.handler.handle("/start_service"))
+        self.assertIn("accepted", self.handler.handle("/stop_service 1"))
+
+        self.assertEqual(
+            self.actions.calls,
+            [
+                ("start_service", {}),
+                ("stop_service", {"confirm_running_workers": 1}),
+            ],
+        )
+
+    def test_stop_service_rejects_invalid_confirmation_syntax(self):
+        text = self.handler.handle("/stop_service yes")
+
+        self.assertEqual(text, "Usage: /stop_service [running workers count]")
+        self.assertEqual(self.actions.calls, [])
 
     def test_plain_text_is_read_only_ai_question(self):
         answer = self.handler.handle("что сейчас происходит?")
@@ -201,6 +239,19 @@ class NotificationDetectorTest(unittest.TestCase):
 
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["kind"], "service_stopped")
+
+    def test_supervisor_unknown_does_not_claim_the_service_stopped(self):
+        previous = snapshot()
+        current = snapshot()
+        current["service"] = {
+            "live": False,
+            "status": "unknown",
+            "reason": "docker socket temporarily unavailable",
+        }
+
+        events = NotificationDetector().detect(previous, current)
+
+        self.assertEqual(events, [])
 
 
 if __name__ == "__main__":

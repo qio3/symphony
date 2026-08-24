@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -26,9 +27,23 @@ class FakeLifecycle:
 class FakeSupervisor:
     def __init__(self):
         self.restart_count = 0
+        self.start_count = 0
+        self.stop_count = 0
+        self.stop_started = threading.Event()
+        self.release_stop = threading.Event()
 
     def restart(self):
         self.restart_count += 1
+        return {"accepted": True}
+
+    def start(self):
+        self.start_count += 1
+        return {"accepted": True}
+
+    def stop(self):
+        self.stop_count += 1
+        self.stop_started.set()
+        self.release_stop.wait(timeout=2)
         return {"accepted": True}
 
 
@@ -41,6 +56,12 @@ class ActionServiceTest(unittest.TestCase):
         self.supervisor = FakeSupervisor()
         self.snapshot = {
             "test": {"synced": True},
+            "sources": {
+                "supervisor": {"status": "fresh"},
+                "runtime": {"status": "fresh"},
+                "github": {"status": "fresh"},
+                "test": {"status": "fresh"},
+            },
             "issues": {
                 "401": {"number": 401, "status": "Backlog", "state": "OPEN", "labels": []},
                 "402": {"number": 402, "status": "Ready for Acceptance", "state": "OPEN", "labels": []},
@@ -91,6 +112,17 @@ class ActionServiceTest(unittest.TestCase):
         with self.assertRaisesRegex(ActionError, "Ready for Acceptance"):
             self.actions.execute("accept", {"issue": 401})
 
+    def test_accept_rejects_issue_specific_test_drift(self):
+        self.snapshot["issues"]["402"]["test"] = {
+            "sha": "outdated",
+            "synced": False,
+        }
+
+        with self.assertRaisesRegex(ActionError, "Issue TEST is not synced"):
+            self.actions.execute("accept", {"issue": 402})
+
+        self.assertEqual(self.lifecycle.calls, [])
+
     def test_accept_can_finish_closing_an_issue_after_a_partial_previous_accept(self):
         self.snapshot["issues"]["402"].update({"status": "Done", "state": "OPEN"})
 
@@ -107,6 +139,93 @@ class ActionServiceTest(unittest.TestCase):
         self.actions.execute("restart", {})
         self.assertEqual(self.supervisor.restart_count, 1)
         self.assertGreater(self.store.read()["expected_service_restart_until"], 0)
+
+    def test_pause_remains_available_but_resume_requires_fresh_runtime_and_github(self):
+        self.snapshot["sources"]["runtime"] = {"status": "stale"}
+        self.actions.execute("pause", {})
+
+        with self.assertRaisesRegex(ActionError, "fresh runtime"):
+            self.actions.execute("resume", {})
+
+        self.snapshot["sources"]["runtime"] = {"status": "fresh"}
+        self.snapshot["sources"]["github"] = {"status": "stale"}
+        with self.assertRaisesRegex(ActionError, "fresh github"):
+            self.actions.execute("resume", {})
+
+        self.assertFalse(self.store.intake_active())
+
+    def test_start_service_uses_the_fixed_supervisor(self):
+        result = self.actions.execute("start_service", {})
+
+        self.assertEqual(result, {"status": "accepted", "service": {"accepted": True}})
+        self.assertEqual(self.supervisor.start_count, 1)
+
+    def test_expected_stop_is_persisted_and_cleared_by_start(self):
+        self.supervisor.release_stop.set()
+        self.actions.execute("stop_service", {})
+        self.assertTrue(self.store.read()["expected_service_stop"])
+
+        self.actions.execute("start_service", {})
+        self.assertFalse(self.store.read()["expected_service_stop"])
+
+    def test_stop_service_requires_matching_running_worker_confirmation(self):
+        self.snapshot["workers"] = {"running": 2}
+
+        with self.assertRaisesRegex(ActionError, "confirm_running_workers"):
+            self.actions.execute("stop_service", {})
+        with self.assertRaisesRegex(ActionError, "confirm_running_workers"):
+            self.actions.execute("stop_service", {"confirm_running_workers": 1})
+        self.actions.execute("stop_service", {"confirm_running_workers": 2})
+
+        self.assertEqual(self.supervisor.stop_count, 1)
+
+    def test_stop_service_rejects_boolean_confirmation_for_one_worker(self):
+        self.snapshot["workers"] = {"running": 1}
+
+        with self.assertRaisesRegex(ActionError, "confirm_running_workers"):
+            self.actions.execute("stop_service", {"confirm_running_workers": True})
+
+    def test_mutating_actions_fail_closed_when_required_sources_are_stale(self):
+        self.snapshot["sources"]["github"] = {"status": "stale"}
+        with self.assertRaisesRegex(ActionError, "fresh github"):
+            self.actions.execute("run", {"issue": 401})
+        with self.assertRaisesRegex(ActionError, "fresh github"):
+            self.actions.execute("rework", {"issue": 402, "reason": "retry"})
+
+        self.snapshot["sources"]["github"] = {"status": "fresh"}
+        self.snapshot["sources"]["test"] = {"status": "stale"}
+        with self.assertRaisesRegex(ActionError, "fresh test"):
+            self.actions.execute("accept", {"issue": 402})
+
+        self.snapshot["sources"]["runtime"] = {"status": "stale"}
+        with self.assertRaisesRegex(ActionError, "fresh runtime"):
+            self.actions.execute("stop_service", {})
+
+        self.snapshot["sources"]["supervisor"] = {"status": "unavailable"}
+        with self.assertRaisesRegex(ActionError, "fresh supervisor"):
+            self.actions.execute("start_service", {})
+
+        self.assertEqual(self.lifecycle.calls, [])
+        self.assertEqual(self.supervisor.start_count, 0)
+        self.assertEqual(self.supervisor.stop_count, 0)
+
+    def test_action_in_progress_is_rejected_instead_of_queued(self):
+        completed = []
+        thread = threading.Thread(
+            target=lambda: completed.append(
+                self.actions.execute("stop_service", {"confirm_running_workers": 0})
+            )
+        )
+        thread.start()
+        self.assertTrue(self.supervisor.stop_started.wait(timeout=1))
+
+        with self.assertRaisesRegex(ActionError, "already in progress"):
+            self.actions.execute("pause", {})
+
+        self.supervisor.release_stop.set()
+        thread.join(timeout=1)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(completed[0]["status"], "accepted")
 
     def test_rejects_unknown_action(self):
         with self.assertRaisesRegex(ActionError, "unsupported action"):

@@ -46,6 +46,17 @@ class DockerComposeSupervisor:
         self._run(self._compose_command("restart", self._service_name), timeout=60)
         return {"accepted": True, "container": self._container_name}
 
+    def start(self) -> dict[str, Any]:
+        self._run(
+            self._compose_command("up", "-d", "--no-deps", self._service_name),
+            timeout=60,
+        )
+        return {"accepted": True, "container": self._container_name}
+
+    def stop(self) -> dict[str, Any]:
+        self._run(self._compose_command("stop", self._service_name), timeout=60)
+        return {"accepted": True, "container": self._container_name}
+
     def logs(self, tail: int) -> list[str]:
         safe_tail = min(max(int(tail), 1), 500)
         completed = self._run(

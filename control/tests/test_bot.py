@@ -152,6 +152,31 @@ class NotificationPublisherTest(unittest.TestCase):
         self.assertEqual(len(self.api.sent), 1)
         self.assertIn("unexpectedly stopped", self.api.sent[0])
 
+    def test_owner_requested_stop_never_emits_unexpected_stop_notification(self):
+        self.publisher.publish(base_snapshot())
+        self.store.update({"expected_service_stop": True})
+        down = base_snapshot()
+        down["service"] = {"live": False, "status": "exited", "reason": "owner stopped"}
+
+        self.publisher.publish(down)
+        self.publisher.publish(down)
+
+        self.assertEqual(self.api.sent, [])
+
+    def test_expected_stop_clears_after_service_is_observed_live_again(self):
+        self.publisher.publish(base_snapshot())
+        self.store.update({"expected_service_stop": True})
+
+        self.publisher.publish(base_snapshot())
+        self.assertFalse(self.store.read()["expected_service_stop"])
+
+        down = base_snapshot()
+        down["service"] = {"live": False, "status": "exited", "reason": "crash"}
+        self.publisher.publish(down)
+
+        self.assertEqual(len(self.api.sent), 1)
+        self.assertIn("unexpectedly stopped", self.api.sent[0])
+
     def test_transient_source_failure_does_not_turn_recovery_into_new_attention_events(self):
         healthy = base_snapshot()
         healthy["owner_view"]["ready_for_acceptance"] = [

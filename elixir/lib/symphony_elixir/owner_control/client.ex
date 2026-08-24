@@ -5,13 +5,17 @@ defmodule SymphonyElixir.OwnerControl.Client do
 
   alias SymphonyElixir.Config
 
-  @actions ~w(run accept rework pause resume restart)a
+  @actions ~w(run accept rework pause resume start_service stop_service restart)a
   @known_keys ~w(
     version generated_at service live reason container status started_at restart_count
     intake active workers running limit counts backlog ready_for_ai queued retrying blocked
     ready_for_acceptance done canonical test sha url ref synced drift issues owner_view available
     updated_at work_items codex_totals input_tokens output_tokens total_tokens seconds_running
-    rate_limits failures unrecoverable fingerprint message number identifier issue_identifier
+    rate_limits quota five_hour weekly used_percent window_duration_mins resets_at failures
+    unrecoverable fingerprint message number identifier issue_identifier issue_usage usage
+    aggregate estimated_credits_micros estimated_usage_credits_micros cached_input_tokens
+    cache_write_input_tokens reasoning_output_tokens completed_at thread_id sources stale
+    refreshed_at supervisor runtime github fresh unknown confirmed_at max_concurrent_agents
     issue_id issue_url title stage state labels owner_question question project_item_id pr ci
     merged due_at last_message last_event last_event_at error attempt worker_host workspace_path
     session_id turn_count tokens health_url models model selected_tier actual_model routing_reason
