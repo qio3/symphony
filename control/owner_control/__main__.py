@@ -42,7 +42,8 @@ def main() -> None:
         canonical_ref=config.canonical_ref,
     )
     actions = ActionService(
-        snapshot_provider=lambda: snapshots.snapshot(fresh=True),
+        snapshot_provider=snapshots.cached_snapshot,
+        fresh_snapshot_provider=lambda: snapshots.snapshot(fresh=True),
         lifecycle=github,
         supervisor=supervisor,
         state_store=store,

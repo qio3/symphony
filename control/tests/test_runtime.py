@@ -235,6 +235,24 @@ class SnapshotServiceTest(unittest.TestCase):
         self.assertEqual(snapshot["test"]["sha"], "abc12345")
         self.assertEqual(snapshot["workers"], {"running": 0, "limit": 2})
 
+    def test_cached_snapshot_fails_closed_until_initial_collection_completes(self):
+        service = SnapshotService(
+            symphony=FakeSymphony(),
+            github=FakeGitHub(),
+            test_environment=FakeTest(),
+            supervisor=FakeSupervisor(),
+            state_store=self.store,
+            worker_limit=2,
+            canonical_ref="rebrand/stanina",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "snapshot is not ready"):
+            service.cached_snapshot()
+
+        collected = service.snapshot()
+
+        self.assertIs(service.cached_snapshot(), collected)
+
     def test_symphony_failure_reports_runtime_unavailable_without_overriding_container_state(self):
         service = SnapshotService(
             symphony=FailingSymphony(),

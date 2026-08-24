@@ -126,6 +126,27 @@ class ActionServiceTest(unittest.TestCase):
             self.actions.execute("lease", {"issue": 403})
         self.assertEqual(self.lifecycle.calls, [])
 
+    def test_lease_uses_cached_snapshot_while_owner_actions_require_fresh_state(self):
+        snapshot_calls = []
+
+        def fresh_snapshot():
+            snapshot_calls.append("fresh")
+            return self.snapshot
+
+        actions = ActionService(
+            snapshot_provider=lambda: snapshot_calls.append("cached") or self.snapshot,
+            fresh_snapshot_provider=fresh_snapshot,
+            lifecycle=self.lifecycle,
+            supervisor=self.supervisor,
+            state_store=self.store,
+        )
+
+        actions.execute("lease", {"issue": 403})
+        self.assertEqual(snapshot_calls, ["cached"])
+
+        actions.execute("resume", {})
+        self.assertEqual(snapshot_calls, ["cached", "fresh"])
+
     def test_rework_requires_reason_and_comments_before_requeue(self):
         with self.assertRaisesRegex(ActionError, "reason is required"):
             self.actions.execute("rework", {"issue": 402, "reason": "  "})
