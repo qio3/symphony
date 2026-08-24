@@ -95,6 +95,8 @@ class ControlHttpServerTest(unittest.TestCase):
     def test_ready_queue_has_a_bounded_expandable_preview(self):
         with self.request("/assets/owner-control.js", authorized=False) as response:
             javascript = response.read().decode("utf-8")
+        with self.request("/assets/owner-control.css", authorized=False) as response:
+            css = response.read().decode("utf-8")
 
         ready_renderer = javascript.split("function renderReady", 1)[1].split(
             "function renderBacklog", 1
@@ -103,6 +105,14 @@ class ControlHttpServerTest(unittest.TestCase):
         self.assertIn("items.slice(0, previewCount)", ready_renderer)
         self.assertIn("Show ${items.length - previewCount} more", ready_renderer)
         self.assertIn("readyMoreOpen", javascript)
+        self.assertIn(
+            "details.ready-more:not([open]) > .ready-more-list",
+            css,
+        )
+        self.assertIn(
+            "details.backlog-more:not([open]) > .backlog-more-list",
+            css,
+        )
 
     def test_browser_snapshot_and_actions_require_same_origin_csrf(self):
         _html, csrf, _headers = self.browser_session()

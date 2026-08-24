@@ -136,6 +136,8 @@ h3 { font-size: 15px; line-height: 1.35; letter-spacing: -.01em; }
 .action-hint { margin-top: 9px; color: #765818; font-size: 12px; line-height: 1.4; }
 .backlog-more, .ready-more { border-top: 1px solid #e4e8e4; }
 .backlog-more > summary, .ready-more > summary { padding: 13px 2px; color: #466050; cursor: pointer; font-size: 13px; font-weight: 740; }
+details.backlog-more:not([open]) > .backlog-more-list,
+details.ready-more:not([open]) > .ready-more-list { display: none; }
 .backlog-more-list { padding-left: 12px; border-left: 2px solid #e3e9e4; }
 .ready-more-list { margin-top: 4px; }
 .toast-region { position: fixed; right: 18px; bottom: 18px; display: grid; gap: 8px; z-index: 20; }
