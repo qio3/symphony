@@ -64,6 +64,13 @@ class SnapshotService:
             self._start_refresh()
         return cached
 
+    def cached_snapshot(self) -> dict[str, Any]:
+        """Return only an already-collected snapshot without touching any source."""
+        with self._cache_lock:
+            if self._cached is None:
+                raise RuntimeError("owner-control snapshot is not ready")
+            return self._cached
+
     def invalidate(self) -> None:
         refreshed_at = datetime.now(timezone.utc).isoformat()
         control_state = self._state_store.read()

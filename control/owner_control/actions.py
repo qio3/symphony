@@ -34,12 +34,14 @@ class ActionService:
         self,
         *,
         snapshot_provider: Callable[[], dict[str, Any]],
+        fresh_snapshot_provider: Callable[[], dict[str, Any]] | None = None,
         lifecycle: Lifecycle,
         supervisor: Supervisor,
         state_store: StateStore,
         after_action: Callable[[], None] = lambda: None,
     ):
         self._snapshot_provider = snapshot_provider
+        self._fresh_snapshot_provider = fresh_snapshot_provider or snapshot_provider
         self._lifecycle = lifecycle
         self._supervisor = supervisor
         self._state_store = state_store
@@ -70,12 +72,12 @@ class ActionService:
             self._state_store.set_intake_active(False)
             return {"status": "accepted", "intake": {"active": False}}
         if action == "resume":
-            snapshot = self._snapshot_provider()
+            snapshot = self._fresh_snapshot_provider()
             self._require_fresh_sources(snapshot, "runtime", "github")
             self._state_store.set_intake_active(True)
             return {"status": "accepted", "intake": {"active": True}}
         if action in {"start_service", "restart"}:
-            snapshot = self._snapshot_provider()
+            snapshot = self._fresh_snapshot_provider()
             self._require_fresh_sources(snapshot, "supervisor")
             action_deadline = time.time() + _SERVICE_ACTION_TIMEOUT_SECONDS
             self._state_store.update(
@@ -103,7 +105,7 @@ class ActionService:
                 raise
             return {"status": "accepted", "service": service}
         if action == "stop_service":
-            snapshot = self._snapshot_provider()
+            snapshot = self._fresh_snapshot_provider()
             self._require_fresh_sources(snapshot, "supervisor", "runtime")
             running_workers = self._running_workers(snapshot)
             confirmation = params.get("confirm_running_workers")
@@ -138,7 +140,11 @@ class ActionService:
             raise ActionError(f"unsupported action: {action}")
 
         issue_number = self._issue_number(params.get("issue"))
-        snapshot = self._snapshot_provider()
+        snapshot = (
+            self._snapshot_provider()
+            if action == "lease"
+            else self._fresh_snapshot_provider()
+        )
         self._require_fresh_sources(snapshot, "github")
         if action == "accept":
             self._require_fresh_sources(snapshot, "test")
