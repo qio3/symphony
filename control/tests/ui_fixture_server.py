@@ -28,7 +28,7 @@ SNAPSHOT = {
     "counts": {
         "ready_for_ai": 2,
         "running": 2,
-        "queued": 0,
+        "queued": 2,
         "blocked": 1,
         "ready_for_acceptance": 1,
         "backlog": 7,
@@ -88,6 +88,35 @@ SNAPSHOT = {
                 "usage": {"total_tokens": 4300, "estimated_credits_micros": 110000, "week_impact_percent": None},
             },
         ],
+        "follow_ups": [
+            {
+                "number": 407,
+                "title": "Resume delivery after the current CI gate",
+                "issue_url": "https://github.test/issues/407",
+                "stage": "In Progress",
+                "attempt": 2,
+                "error": "agent exited: :boom",
+                "deferred_reason": "no available orchestrator slots",
+            },
+            {
+                "number": 408,
+                "title": "Continue after canonical merge",
+                "issue_url": "https://github.test/issues/408",
+                "stage": "In Progress",
+                "attempt": 1,
+                "error": "continuation scheduled",
+            },
+        ],
+        "diagnostics": {
+            "project_only_in_progress": [
+                {
+                    "number": 409,
+                    "title": "Delivery lifecycle waiting outside Symphony",
+                    "issue_url": "https://github.test/issues/409",
+                    "stage": "In Progress",
+                }
+            ]
+        },
         "ready_for_acceptance": [
             {
                 "number": 399,

@@ -34,6 +34,7 @@ const targets = {
   ready: document.getElementById("ready-content"),
   backlog: document.getElementById("backlog-content"),
   sourceHealth: document.getElementById("source-health"),
+  diagnosticWork: document.getElementById("diagnostic-work"),
   logs: document.getElementById("diagnostic-logs"),
 };
 
@@ -79,6 +80,7 @@ function render(snapshot, options = {}) {
   renderReady(snapshot);
   renderBacklog(snapshot);
   renderSources(snapshot);
+  renderWorkDiagnostics(snapshot);
   renderActionErrors();
   app.classList.toggle("action-busy", actionInFlight);
   restoreViewState(viewState);
@@ -223,7 +225,17 @@ function renderBlocked(snapshot) {
 function renderRunning(snapshot) {
   clear(targets.running);
   const items = snapshot.owner_view?.work_items || [];
-  if (!items.length) return targets.running.append(emptyState("No active work", snapshot.intake?.active ? "Ready tasks will start when capacity is available." : "Intake is paused."));
+  const followUps = snapshot.owner_view?.follow_ups || [];
+  document.getElementById("running-title").textContent = items.length ? `Active workers · ${items.length}` : "Active workers";
+  if (followUps.length) {
+    const note = el("div", "worker-scope-note");
+    note.append(
+      el("strong", "", `${followUps.length} delivery follow-up${followUps.length === 1 ? "" : "s"}`),
+      el("span", "", "Not running now; Symphony reserves their WIP places for continuation, so ready work may wait."),
+    );
+    targets.running.append(note);
+  }
+  if (!items.length) return targets.running.append(emptyState("No active workers", snapshot.intake?.active ? "Ready tasks will start when capacity is available." : "Intake is paused."));
   const list = el("div", "issue-list running-list");
   for (const item of items) {
     const card = issueCard(item, "running");
@@ -330,6 +342,45 @@ function renderSources(snapshot) {
     list.append(row);
   }
   targets.sourceHealth.append(list);
+}
+
+function renderWorkDiagnostics(snapshot) {
+  clear(targets.diagnosticWork);
+  const owner = snapshot.owner_view || {};
+  const followUps = owner.follow_ups || [];
+  const projectOnly = owner.diagnostics?.project_only_in_progress || [];
+  const groups = [
+    ["Retrying / delivery follow-ups", followUps, "Claimed Symphony work waiting for its next turn or delivery event. It does not occupy a worker while listed here."],
+    ["Project-only In Progress", projectOnly, "GitHub lifecycle state without a live worker or queued Symphony continuation. Review here without inflating the worker count."],
+  ];
+
+  for (const [title, items, description] of groups) {
+    const section = el("section", "diagnostic-group");
+    const heading = el("div", "diagnostic-heading");
+    heading.append(el("h3", "", title), badge(String(items.length), items.length ? "warning" : "neutral"));
+    section.append(heading, el("p", "diagnostic-description", description));
+    if (!items.length) {
+      section.append(el("p", "muted diagnostic-empty", "None"));
+    } else {
+      const list = el("div", "diagnostic-list");
+      for (const item of items.slice(0, 10)) list.append(diagnosticWorkRow(item));
+      if (items.length > 10) list.append(el("p", "muted diagnostic-more", `+${items.length - 10} more in the machine snapshot`));
+      section.append(list);
+    }
+    targets.diagnosticWork.append(section);
+  }
+}
+
+function diagnosticWorkRow(item) {
+  const row = el("div", "diagnostic-row");
+  const copy = el("div", "diagnostic-copy");
+  copy.append(externalLink(item.issue_url, `#${item.number} ${item.title || "Untitled Issue"}`, "issue-link"));
+  const retryDetails = [item.error, item.deferred_reason].filter((value, index, values) => value && values.indexOf(value) === index);
+  const detail = retryDetails.length ? retryDetails.join(" · ") : item.reason || item.stage || item.status;
+  if (detail) copy.append(el("span", "diagnostic-reason", detail));
+  const attempt = Number(item.attempt);
+  row.append(copy, Number.isFinite(attempt) && attempt > 0 ? badge(`Attempt ${attempt}`, "warning") : badge(item.stage || item.status || "In Progress", "neutral"));
+  return row;
 }
 
 function issueCard(item, tone) {
@@ -625,6 +676,7 @@ function renderUnavailable(message) {
   }
   clear(targets.sourceHealth);
   targets.sourceHealth.append(emptyState("No source health", "The snapshot endpoint did not respond."));
+  clear(targets.diagnosticWork);
 }
 
 function snapshotSignature(snapshot) {

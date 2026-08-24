@@ -370,6 +370,243 @@ defmodule SymphonyElixir.OwnerControlTest do
     assert Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
+  test "a pending retry reserves the only free slot from a fresh Ready for AI issue" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 1,
+      running: %{},
+      claimed: MapSet.new(["retrying-410"]),
+      blocked: %{},
+      codex_totals: %{},
+      retry_attempts: %{"retrying-410" => %{attempt: 1}}
+    }
+
+    fresh_issue = %Issue{
+      id: "fresh-411",
+      identifier: "GH-411",
+      title: "Fresh ready work",
+      state: "Todo",
+      labels: [],
+      dispatchable: true
+    }
+
+    Application.put_env(:symphony_elixir, :owner_control_client_module, ActiveControl)
+
+    refute Orchestrator.should_dispatch_issue_for_test(fresh_issue, state)
+  end
+
+  test "a pending retry remains eligible for its reserved slot" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 1,
+      running: %{},
+      claimed: MapSet.new(["410"]),
+      blocked: %{},
+      codex_totals: %{},
+      retry_attempts: %{"410" => %{attempt: 1}}
+    }
+
+    retrying_issue = %Issue{
+      id: "410",
+      identifier: "GH-410",
+      title: "Retrying work",
+      state: "Todo",
+      labels: [],
+      dispatchable: true
+    }
+
+    assert Orchestrator.retry_dispatch_allowed_for_test(retrying_issue, state)
+  end
+
+  test "pausing intake defers a retry without inflating its failure attempt" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["open"]
+    )
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 1,
+      running: %{},
+      claimed: MapSet.new(["410"]),
+      blocked: %{},
+      codex_totals: %{},
+      retry_attempts: %{}
+    }
+
+    retrying_issue = %Issue{
+      id: "410",
+      identifier: "GH-410",
+      title: "Retrying work",
+      state: "open",
+      labels: ["symphony"],
+      dispatchable: true
+    }
+
+    Application.put_env(:symphony_elixir, :owner_control_client_module, PausedControl)
+
+    updated_state =
+      Orchestrator.handle_retry_issue_lookup_for_test(
+        retrying_issue,
+        state,
+        retrying_issue.id,
+        7,
+        %{error: "agent exited: :boom", delay_type: :failure}
+      )
+
+    assert %{
+             attempt: 7,
+             error: "agent exited: :boom",
+             delay_type: :paused,
+             deferred_reason: "intake paused"
+           } = updated_state.retry_attempts[retrying_issue.id]
+  end
+
+  test "resuming intake wakes a paused retry before its old timer" do
+    issue =
+      412
+      |> dispatch_issue()
+      |> Map.put(:labels, ["symphony"])
+
+    snapshot = dispatch_snapshot([], intake_active: false)
+
+    {pid, task_supervisor, _cycle_ref, test_root} =
+      start_dispatch_cycle([issue], snapshot, {:ok, %{status: "accepted"}}, intake_active: false)
+
+    on_exit(fn -> stop_dispatch_cycle(pid, task_supervisor, test_root) end)
+    Process.sleep(100)
+
+    retry_token = make_ref()
+    timer_ref = Process.send_after(pid, {:retry_issue, issue.id, retry_token}, 60_000)
+    due_at_ms = System.monotonic_time(:millisecond) + 60_000
+
+    :sys.replace_state(pid, fn state ->
+      %{
+        state
+        | max_concurrent_agents: 1,
+          claimed: MapSet.new([issue.id]),
+          retry_attempts: %{
+            issue.id => %{
+              attempt: 7,
+              timer_ref: timer_ref,
+              retry_token: retry_token,
+              due_at_ms: due_at_ms,
+              identifier: issue.identifier,
+              issue_url: issue.url,
+              error: "agent exited: :boom",
+              delay_type: :paused,
+              deferred_reason: "intake paused"
+            }
+          }
+      }
+    end)
+
+    Application.put_env(:symphony_elixir, :owner_control_test_intake_active, true)
+    send(pid, :run_poll_cycle)
+
+    assert eventually(fn -> Map.has_key?(:sys.get_state(pid).running, issue.id) end)
+    assert :sys.get_state(pid).running[issue.id].retry_attempt == 7
+  end
+
+  test "normal completion reserves its slot across the continuation timer" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-owner-continuation-#{System.unique_integer([:positive])}"
+      )
+
+    orchestrator_name =
+      Module.concat(__MODULE__, "ContinuationReservation#{System.unique_integer([:positive])}")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_required_labels: ["symphony"],
+      tracker_active_states: ["open"],
+      max_concurrent_agents: 1,
+      poll_interval_ms: 60_000,
+      workspace_root: test_root,
+      hook_before_run: "sleep 30"
+    )
+
+    Application.put_env(:symphony_elixir, :owner_control_client_module, PausedControl)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+    {:ok, task_supervisor} = Task.Supervisor.start_link()
+    Process.unlink(task_supervisor)
+
+    {:ok, pid} =
+      Orchestrator.start_link(
+        name: orchestrator_name,
+        task_supervisor: task_supervisor,
+        account_rate_limits_reader: fn -> {:error, :test_disabled} end,
+        usage_ledger_path: Path.join(test_root, "usage-ledger.json")
+      )
+
+    Process.unlink(pid)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: GenServer.stop(pid)
+      if Process.alive?(task_supervisor), do: Supervisor.stop(task_supervisor)
+      File.rm_rf(test_root)
+    end)
+
+    Process.sleep(100)
+
+    continuing_issue =
+      410
+      |> dispatch_issue()
+      |> Map.put(:labels, ["symphony"])
+
+    fresh_issue =
+      411
+      |> dispatch_issue()
+      |> Map.put(:labels, ["symphony"])
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_issues,
+      [continuing_issue, fresh_issue]
+    )
+
+    Application.put_env(:symphony_elixir, :owner_control_client_module, ActiveControl)
+
+    worker_pid = spawn(fn -> Process.sleep(:infinity) end)
+    ref = make_ref()
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: ref,
+      identifier: continuing_issue.identifier,
+      issue: continuing_issue,
+      model_route: nil,
+      selected_model_tier: nil,
+      retry_attempt: 0,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      %{
+        initial_state
+        | max_concurrent_agents: 1,
+          running: %{continuing_issue.id => running_entry},
+          claimed: MapSet.new([continuing_issue.id]),
+          retry_attempts: %{}
+      }
+    end)
+
+    send(pid, {:DOWN, ref, :process, worker_pid, :normal})
+
+    assert eventually(fn -> Map.has_key?(:sys.get_state(pid).retry_attempts, continuing_issue.id) end)
+
+    send(pid, :run_poll_cycle)
+    Process.sleep(50)
+
+    state_before_continuation = :sys.get_state(pid)
+    assert state_before_continuation.running == %{}
+    refute Map.has_key?(state_before_continuation.running, fresh_issue.id)
+
+    assert eventually(fn -> Map.has_key?(:sys.get_state(pid).running, continuing_issue.id) end, 200)
+    refute Map.has_key?(:sys.get_state(pid).running, fresh_issue.id)
+    Process.exit(worker_pid, :kill)
+  end
+
   test "fresh Ready for AI issues acquire their durable leases from one snapshot before dispatch" do
     issues = [dispatch_issue(401), dispatch_issue(402)]
 
@@ -392,9 +629,9 @@ defmodule SymphonyElixir.OwnerControlTest do
     refute_receive {:owner_control_snapshot, ^cycle_ref}, 100
   end
 
-  test "labeled issues keep the existing dispatch path without reacquiring the lease" do
+  test "labeled Ready for AI issues revalidate their lease immediately before dispatch" do
     issue = %{dispatch_issue(403) | labels: ["symphony"]}
-    snapshot = dispatch_snapshot([], stale: true, github_status: "unavailable")
+    snapshot = dispatch_snapshot([%{number: 403, status: "Ready for AI", state: "OPEN"}])
 
     {pid, task_supervisor, cycle_ref, test_root} =
       start_dispatch_cycle([issue], snapshot, {:ok, %{status: "accepted"}})
@@ -402,11 +639,11 @@ defmodule SymphonyElixir.OwnerControlTest do
     on_exit(fn -> stop_dispatch_cycle(pid, task_supervisor, test_root) end)
 
     assert_receive {:owner_control_snapshot, ^cycle_ref}, 1_000
+    assert_receive {:owner_control_action, ^cycle_ref, :lease, %{issue: 403}}, 1_000
     assert eventually(fn -> Map.has_key?(:sys.get_state(pid).running, "403") end)
-    refute_receive {:owner_control_action, ^cycle_ref, :lease, _params}, 100
   end
 
-  test "labeled issues keep dispatching when readiness snapshot is unavailable but intake is active" do
+  test "configured Owner Control fails closed when readiness is unavailable even for labeled issues" do
     issue = %{dispatch_issue(409) | labels: ["symphony"]}
 
     {pid, task_supervisor, cycle_ref, test_root} =
@@ -415,7 +652,21 @@ defmodule SymphonyElixir.OwnerControlTest do
     on_exit(fn -> stop_dispatch_cycle(pid, task_supervisor, test_root) end)
 
     assert_receive {:owner_control_snapshot, ^cycle_ref}, 1_000
-    assert eventually(fn -> Map.has_key?(:sys.get_state(pid).running, "409") end)
+    assert :sys.get_state(pid).running == %{}
+    refute_receive {:owner_control_action, ^cycle_ref, :lease, _params}, 100
+  end
+
+  test "labeled Project In Progress issues are not inferred to be runtime work" do
+    issue = %{dispatch_issue(410) | labels: ["symphony"]}
+    snapshot = dispatch_snapshot([%{number: 410, status: "In Progress", state: "OPEN"}])
+
+    {pid, task_supervisor, cycle_ref, test_root} =
+      start_dispatch_cycle([issue], snapshot, {:ok, %{status: "accepted"}})
+
+    on_exit(fn -> stop_dispatch_cycle(pid, task_supervisor, test_root) end)
+
+    assert_receive {:owner_control_snapshot, ^cycle_ref}, 1_000
+    assert :sys.get_state(pid).running == %{}
     refute_receive {:owner_control_action, ^cycle_ref, :lease, _params}, 100
   end
 
@@ -564,6 +815,7 @@ defmodule SymphonyElixir.OwnerControlTest do
       tracker_kind: "memory",
       tracker_required_labels: ["symphony"],
       tracker_active_states: ["open"],
+      max_concurrent_agents: Keyword.get(opts, :max_concurrent_agents, 10),
       poll_interval_ms: 60_000,
       workspace_root: test_root,
       hook_before_run: "sleep 30"

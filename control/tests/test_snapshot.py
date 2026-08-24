@@ -35,6 +35,60 @@ class SnapshotBuilderTest(unittest.TestCase):
         self.assertIn("503", snapshot["issues"])
         self.assertEqual([item["issue_id"] for item in snapshot["retrying"]], ["503"])
 
+    def test_separates_live_workers_from_retry_followups_and_project_only_progress(self):
+        """The main work lane must never turn a Project column into worker count."""
+        snapshot = SnapshotBuilder().build(
+            service={"live": True},
+            intake_active=True,
+            worker_limit=5,
+            runtime={
+                "generated_at": "2026-08-25T10:00:00Z",
+                "running": [{"issue_id": "501", "issue_identifier": "GH-501"}],
+                "retrying": [
+                    {
+                        "issue_id": "503",
+                        "issue_identifier": "GH-503",
+                        "due_at": "2026-08-25T10:01:00Z",
+                        "error": "agent exited: :boom",
+                        "delay_type": "capacity",
+                        "deferred_reason": "no available orchestrator slots",
+                    }
+                ],
+                "blocked": [],
+                "codex_totals": {},
+                "rate_limits": None,
+            },
+            project={
+                "items": [
+                    {"number": 501, "title": "Live worker", "status": "In Progress", "state": "OPEN"},
+                    {"number": 502, "title": "Project-only delivery", "status": "In Progress", "state": "OPEN"},
+                    {"number": 503, "title": "Retrying delivery", "status": "In Progress", "state": "OPEN"},
+                ]
+            },
+            canonical={"sha": "aaaaaaaa11111111"},
+            test={"sha": "aaaaaaaa11111111", "url": "https://test.example"},
+        )
+
+        self.assertEqual(snapshot["workers"], {"running": 1, "limit": 5})
+        self.assertEqual([item["number"] for item in snapshot["owner_view"]["work_items"]], [501])
+        self.assertEqual([item["number"] for item in snapshot["owner_view"]["follow_ups"]], [503])
+        self.assertEqual(
+            snapshot["owner_view"]["follow_ups"][0]["deferred_reason"],
+            "no available orchestrator slots",
+        )
+        self.assertEqual(
+            [item["number"] for item in snapshot["owner_view"]["diagnostics"]["project_only_in_progress"]],
+            [502],
+        )
+
+        main_owner_numbers = [
+            item["number"]
+            for lane in ("work_items", "blocked", "ready_for_acceptance", "backlog")
+            for item in snapshot["owner_view"][lane]
+        ]
+        self.assertNotIn(502, main_owner_numbers)
+        self.assertNotIn(503, main_owner_numbers)
+
     def test_places_each_issue_in_one_owner_lane_and_reports_sha_sync(self):
         project = {
             "items": [
