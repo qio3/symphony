@@ -156,11 +156,30 @@ if __name__ == "__main__":
             "container": "zavod-symphony",
         }
         SNAPSHOT["workers"]["running"] = 0
+        SNAPSHOT["counts"]["running"] = 0
+        SNAPSHOT["running"] = []
+        SNAPSHOT["owner_view"]["work_items"] = []
         SNAPSHOT["stale"] = True
         SNAPSHOT["sources"]["runtime"] = {
             "status": "stale",
             "confirmed_at": "2026-08-24T09:25:00Z",
             "error": "runtime stopped",
+        }
+    elif mode == "starting":
+        SNAPSHOT["service"] = {
+            "live": False,
+            "status": "starting",
+            "container": "zavod-symphony",
+        }
+        SNAPSHOT["workers"]["running"] = 0
+        SNAPSHOT["counts"]["running"] = 0
+        SNAPSHOT["running"] = []
+        SNAPSHOT["owner_view"]["work_items"] = []
+        SNAPSHOT["stale"] = True
+        SNAPSHOT["sources"]["runtime"] = {
+            "status": "stale",
+            "confirmed_at": "2026-08-24T09:25:00Z",
+            "error": "Symphony service is starting",
         }
     elif mode == "source_failure":
         SNAPSHOT["stale"] = True

@@ -7,6 +7,9 @@ from typing import Any, Callable, Protocol
 from .state_store import StateStore
 
 
+_SERVICE_ACTION_TIMEOUT_SECONDS = 120
+
+
 class ActionError(ValueError):
     pass
 
@@ -48,7 +51,16 @@ class ActionService:
             raise ActionError("another action is already in progress")
         try:
             result = self._execute_locked(action, params)
-            self._after_action()
+            try:
+                self._after_action()
+            finally:
+                if action in {"start_service", "restart", "stop_service"}:
+                    self._state_store.update(
+                        {
+                            "service_action_in_progress": None,
+                            "service_action_in_progress_until": 0,
+                        }
+                    )
             return result
         finally:
             self._lock.release()
@@ -65,10 +77,13 @@ class ActionService:
         if action in {"start_service", "restart"}:
             snapshot = self._snapshot_provider()
             self._require_fresh_sources(snapshot, "supervisor")
+            action_deadline = time.time() + _SERVICE_ACTION_TIMEOUT_SECONDS
             self._state_store.update(
                 {
-                    "expected_service_restart_until": time.time() + 120,
+                    "expected_service_restart_until": action_deadline,
                     "expected_service_stop": False,
+                    "service_action_in_progress": action,
+                    "service_action_in_progress_until": action_deadline,
                 }
             )
             try:
@@ -78,7 +93,13 @@ class ActionService:
                     else self._supervisor.restart()
                 )
             except Exception:
-                self._state_store.update({"expected_service_restart_until": 0})
+                self._state_store.update(
+                    {
+                        "expected_service_restart_until": 0,
+                        "service_action_in_progress": None,
+                        "service_action_in_progress_until": 0,
+                    }
+                )
                 raise
             return {"status": "accepted", "service": service}
         if action == "stop_service":
@@ -92,11 +113,25 @@ class ActionService:
                 raise ActionError(
                     f"stop_service requires confirm_running_workers to match {running_workers}"
                 )
-            self._state_store.update({"expected_service_stop": True})
+            self._state_store.update(
+                {
+                    "expected_service_stop": True,
+                    "service_action_in_progress": action,
+                    "service_action_in_progress_until": (
+                        time.time() + _SERVICE_ACTION_TIMEOUT_SECONDS
+                    ),
+                }
+            )
             try:
                 service = self._supervisor.stop()
             except Exception:
-                self._state_store.update({"expected_service_stop": False})
+                self._state_store.update(
+                    {
+                        "expected_service_stop": False,
+                        "service_action_in_progress": None,
+                        "service_action_in_progress_until": 0,
+                    }
+                )
                 raise
             return {"status": "accepted", "service": service}
         if action not in {"run", "lease", "accept", "rework"}:

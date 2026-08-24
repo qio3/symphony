@@ -29,11 +29,16 @@ class FakeSupervisor:
         self.restart_count = 0
         self.start_count = 0
         self.stop_count = 0
+        self.restart_started = threading.Event()
+        self.release_restart = threading.Event()
+        self.release_restart.set()
         self.stop_started = threading.Event()
         self.release_stop = threading.Event()
 
     def restart(self):
         self.restart_count += 1
+        self.restart_started.set()
+        self.release_restart.wait(timeout=2)
         return {"accepted": True}
 
     def start(self):
@@ -177,6 +182,36 @@ class ActionServiceTest(unittest.TestCase):
         self.actions.execute("restart", {})
         self.assertEqual(self.supervisor.restart_count, 1)
         self.assertGreater(self.store.read()["expected_service_restart_until"], 0)
+
+    def test_restart_marks_the_fixed_action_in_progress_until_cache_invalidation(self):
+        self.supervisor.release_restart.clear()
+        invalidation_states = []
+        actions = ActionService(
+            snapshot_provider=lambda: self.snapshot,
+            lifecycle=self.lifecycle,
+            supervisor=self.supervisor,
+            state_store=self.store,
+            after_action=lambda: invalidation_states.append(
+                self.store.read().get("service_action_in_progress")
+            ),
+        )
+        completed = []
+        thread = threading.Thread(
+            target=lambda: completed.append(actions.execute("restart", {}))
+        )
+        thread.start()
+        self.assertTrue(self.supervisor.restart_started.wait(timeout=1))
+        self.assertEqual(self.store.read()["service_action_in_progress"], "restart")
+        self.assertGreater(self.store.read()["service_action_in_progress_until"], 0)
+
+        self.supervisor.release_restart.set()
+        thread.join(timeout=1)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(completed[0]["status"], "accepted")
+        self.assertEqual(invalidation_states, ["restart"])
+        self.assertIsNone(self.store.read()["service_action_in_progress"])
+        self.assertEqual(self.store.read()["service_action_in_progress_until"], 0)
 
     def test_pause_remains_available_but_resume_requires_fresh_runtime_and_github(self):
         self.snapshot["sources"]["runtime"] = {"status": "stale"}

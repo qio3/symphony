@@ -51,6 +51,7 @@ class FakeHandler:
 def base_snapshot():
     return {
         "service": {"live": True},
+        "sources": {"runtime": {"status": "fresh"}},
         "owner_view": {"blocked": [], "ready_for_acceptance": []},
         "failures": [],
     }
@@ -151,6 +152,19 @@ class NotificationPublisherTest(unittest.TestCase):
 
         self.assertEqual(len(self.api.sent), 1)
         self.assertIn("unexpectedly stopped", self.api.sent[0])
+
+    def test_expected_restart_clears_only_after_runtime_is_fresh(self):
+        self.publisher.publish(base_snapshot())
+        self.store.update({"expected_service_restart_until": time.time() + 60})
+        starting = base_snapshot()
+        starting["service"] = {"live": True, "status": "starting"}
+        starting["sources"]["runtime"] = {"status": "stale"}
+
+        self.publisher.publish(starting)
+        self.assertGreater(self.store.read()["expected_service_restart_until"], 0)
+
+        self.publisher.publish(base_snapshot())
+        self.assertEqual(self.store.read()["expected_service_restart_until"], 0)
 
     def test_owner_requested_stop_never_emits_unexpected_stop_notification(self):
         self.publisher.publish(base_snapshot())

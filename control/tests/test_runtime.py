@@ -101,6 +101,39 @@ class ToggleSymphony(FakeSymphony):
         }
 
 
+class RichSymphony(ToggleSymphony):
+    def state(self):
+        value = super().state()
+        value.update(
+            {
+                "retrying": [
+                    {
+                        "issue_id": "403",
+                        "issue_identifier": "GH-403",
+                        "due_at": "2026-08-23T10:05:00Z",
+                    }
+                ],
+                "codex_totals": {"total_tokens": 4321},
+                "rate_limits": {
+                    "weekly": {
+                        "windowDurationMins": 10080,
+                        "usedPercent": 21,
+                    }
+                },
+                "issue_usage": {
+                    "402": {
+                        "aggregate": {
+                            "token_usage": {"total_tokens": 1234},
+                            "estimated_usage_credits_micros": 99,
+                            "week_impact_percent": None,
+                        }
+                    }
+                },
+            }
+        )
+        return value
+
+
 class FakeTest:
     def deployment(self):
         return {"sha": "abc12345", "url": "https://test.example"}
@@ -114,6 +147,29 @@ class FakeSupervisor:
 class FailingSupervisor:
     def status(self):
         raise OSError("docker socket unavailable")
+
+
+class ToggleSupervisor(FakeSupervisor):
+    def __init__(self):
+        self.live = True
+
+    def status(self):
+        return {
+            "live": self.live,
+            "container": "zavod-symphony",
+            "status": "running" if self.live else "exited",
+        }
+
+
+class FlakySupervisor(ToggleSupervisor):
+    def __init__(self):
+        super().__init__()
+        self.fail = False
+
+    def status(self):
+        if self.fail:
+            raise OSError("docker socket unavailable")
+        return super().status()
 
 
 class SnapshotServiceTest(unittest.TestCase):
@@ -174,6 +230,7 @@ class SnapshotServiceTest(unittest.TestCase):
         self.assertFalse(snapshot["service"]["live"])
         self.assertIn("docker socket unavailable", snapshot["service"]["reason"])
         self.assertEqual(snapshot["failures"][0]["fingerprint"], "supervisor:OSError:transient")
+        self.assertEqual(snapshot["sources"]["runtime"]["status"], "fresh")
 
     def test_invalidate_forces_the_next_reader_to_rebuild_snapshot(self):
         github = ChangingGitHub()
@@ -197,6 +254,258 @@ class SnapshotServiceTest(unittest.TestCase):
         while service.snapshot()["canonical"]["sha"] != "secondsha" and time.monotonic() < deadline:
             time.sleep(0.01)
         self.assertEqual(service.snapshot()["canonical"]["sha"], "secondsha")
+
+    def test_invalidate_immediately_patches_owner_truth_after_expected_stop(self):
+        github = BlockingGitHub()
+        supervisor = ToggleSupervisor()
+        service = SnapshotService(
+            symphony=RichSymphony(),
+            github=github,
+            test_environment=FakeTest(),
+            supervisor=supervisor,
+            state_store=self.store,
+            worker_limit=5,
+            canonical_ref="rebrand/stanina",
+            cache_seconds=60,
+        )
+        healthy = service.snapshot(fresh=True)
+        self.assertEqual(healthy["workers"], {"running": 1, "limit": 5})
+        self.assertEqual(healthy["counts"]["queued"], 1)
+        self.assertEqual(healthy["quota"]["weekly"]["used_percent"], 21)
+
+        github.block = True
+        supervisor.live = False
+        self.store.set_intake_active(False)
+        self.store.update({"expected_service_stop": True})
+
+        started_at = time.monotonic()
+        service.invalidate()
+        patched = service.snapshot()
+        elapsed = time.monotonic() - started_at
+
+        self.assertLess(elapsed, 0.2)
+        self.assertFalse(patched["service"]["live"])
+        self.assertEqual(patched["service"]["status"], "exited")
+        self.assertEqual(patched["intake"], {"active": False, "status": "paused"})
+        self.assertEqual(patched["sources"]["runtime"]["status"], "stale")
+        self.assertEqual(patched["workers"]["running"], 0)
+        self.assertEqual(patched["counts"]["running"], 0)
+        self.assertEqual(patched["running"], [])
+        self.assertEqual(patched["owner_view"]["work_items"], [])
+        self.assertEqual(len(patched["retrying"]), 1)
+        self.assertEqual(patched["counts"]["queued"], 1)
+        self.assertEqual(patched["quota"]["weekly"]["used_percent"], 21)
+        self.assertEqual(patched["issue_usage"]["402"]["total_tokens"], 1234)
+        self.assertEqual(patched["canonical"]["sha"], "firstsha")
+        self.assertTrue(github.refresh_started.wait(timeout=1))
+
+        github.release_refresh.set()
+        refreshed = service.snapshot(fresh=True)
+        self.assertFalse(refreshed["service"]["live"])
+        self.assertEqual(refreshed["running"], [])
+        self.assertEqual(len(refreshed["retrying"]), 1)
+        self.assertEqual(refreshed["counts"]["queued"], 1)
+        self.assertEqual(refreshed["quota"]["weekly"]["used_percent"], 21)
+        self.assertEqual(refreshed["issue_usage"]["402"]["total_tokens"], 1234)
+
+    def test_inflight_running_refresh_cannot_overwrite_a_new_stop(self):
+        github = BlockingGitHub()
+        supervisor = ToggleSupervisor()
+        service = SnapshotService(
+            symphony=RichSymphony(),
+            github=github,
+            test_environment=FakeTest(),
+            supervisor=supervisor,
+            state_store=self.store,
+            worker_limit=5,
+            canonical_ref="rebrand/stanina",
+            cache_seconds=60,
+        )
+        service.snapshot(fresh=True)
+        github.block = True
+        refreshed = []
+        refresh_thread = threading.Thread(
+            target=lambda: refreshed.append(service.snapshot(fresh=True))
+        )
+        refresh_thread.start()
+        self.assertTrue(github.refresh_started.wait(timeout=1))
+
+        supervisor.live = False
+        self.store.update({"expected_service_stop": True})
+        service.invalidate()
+        self.assertFalse(service.snapshot()["service"]["live"])
+
+        github.release_refresh.set()
+        refresh_thread.join(timeout=2)
+        self.assertFalse(refresh_thread.is_alive())
+        self.assertFalse(refreshed[0]["service"]["live"])
+        self.assertEqual(refreshed[0]["running"], [])
+        self.assertFalse(service.snapshot()["service"]["live"])
+
+    def test_inflight_stopped_refresh_cannot_overwrite_a_new_start(self):
+        github = BlockingGitHub()
+        supervisor = ToggleSupervisor()
+        service = SnapshotService(
+            symphony=RichSymphony(),
+            github=github,
+            test_environment=FakeTest(),
+            supervisor=supervisor,
+            state_store=self.store,
+            worker_limit=5,
+            canonical_ref="rebrand/stanina",
+            cache_seconds=60,
+        )
+        service.snapshot(fresh=True)
+        supervisor.live = False
+        self.store.update({"expected_service_stop": True})
+        service.snapshot(fresh=True)
+
+        github.block = True
+        refreshed = []
+        refresh_thread = threading.Thread(
+            target=lambda: refreshed.append(service.snapshot(fresh=True))
+        )
+        refresh_thread.start()
+        self.assertTrue(github.refresh_started.wait(timeout=1))
+
+        self.store.update(
+            {
+                "expected_service_stop": False,
+                "expected_service_restart_until": time.time() + 120,
+            }
+        )
+        service.invalidate()
+        starting = service.snapshot()
+        self.assertFalse(starting["service"]["live"])
+        self.assertEqual(starting["service"]["status"], "starting")
+        self.assertEqual(starting["running"], [])
+        self.assertEqual(starting["quota"]["weekly"]["used_percent"], 21)
+
+        supervisor.live = True
+        github.release_refresh.set()
+        refresh_thread.join(timeout=2)
+        self.assertFalse(refresh_thread.is_alive())
+        self.assertTrue(refreshed[0]["service"]["live"])
+        self.assertEqual(refreshed[0]["sources"]["runtime"]["status"], "fresh")
+        self.assertTrue(service.snapshot()["service"]["live"])
+
+    def test_invalidate_with_unknown_supervisor_preserves_active_runtime(self):
+        supervisor = FlakySupervisor()
+        service = SnapshotService(
+            symphony=RichSymphony(),
+            github=FakeGitHub(),
+            test_environment=FakeTest(),
+            supervisor=supervisor,
+            state_store=self.store,
+            worker_limit=5,
+            canonical_ref="rebrand/stanina",
+            cache_seconds=60,
+        )
+        service.snapshot(fresh=True)
+        supervisor.fail = True
+
+        service.invalidate()
+        patched = service.snapshot()
+
+        self.assertEqual(patched["service"]["status"], "unknown")
+        self.assertEqual(patched["sources"]["supervisor"]["status"], "unavailable")
+        self.assertEqual(patched["workers"]["running"], 1)
+        self.assertEqual(len(patched["running"]), 1)
+
+    def test_live_container_stays_starting_until_runtime_is_fresh(self):
+        symphony = RichSymphony()
+        service = SnapshotService(
+            symphony=symphony,
+            github=FakeGitHub(),
+            test_environment=FakeTest(),
+            supervisor=ToggleSupervisor(),
+            state_store=self.store,
+            worker_limit=5,
+            canonical_ref="rebrand/stanina",
+            cache_seconds=60,
+        )
+        service.snapshot(fresh=True)
+        self.store.update(
+            {
+                "expected_service_stop": False,
+                "expected_service_restart_until": time.time() + 120,
+            }
+        )
+        symphony.fail = True
+
+        service.invalidate()
+        starting = service.snapshot(fresh=True)
+
+        self.assertTrue(starting["service"]["live"])
+        self.assertEqual(starting["service"]["status"], "starting")
+        self.assertEqual(starting["sources"]["runtime"]["status"], "stale")
+        self.assertEqual(starting["workers"]["running"], 0)
+        self.assertEqual(starting["running"], [])
+        self.assertEqual(len(starting["retrying"]), 1)
+        self.assertEqual(starting["quota"]["weekly"]["used_percent"], 21)
+        self.assertGreater(self.store.read()["expected_service_restart_until"], 0)
+
+        symphony.fail = False
+        running = service.snapshot(fresh=True)
+
+        self.assertTrue(running["service"]["live"])
+        self.assertEqual(running["service"]["status"], "running")
+        self.assertEqual(running["sources"]["runtime"]["status"], "fresh")
+        self.assertEqual(running["workers"]["running"], 1)
+        self.assertEqual(self.store.read()["expected_service_restart_until"], 0)
+
+    def test_restart_in_progress_cannot_confirm_the_previous_live_runtime(self):
+        service = SnapshotService(
+            symphony=RichSymphony(),
+            github=FakeGitHub(),
+            test_environment=FakeTest(),
+            supervisor=ToggleSupervisor(),
+            state_store=self.store,
+            worker_limit=5,
+            canonical_ref="rebrand/stanina",
+        )
+        service.snapshot(fresh=True)
+        self.store.update(
+            {
+                "expected_service_restart_until": time.time() + 120,
+                "service_action_in_progress": "restart",
+                "service_action_in_progress_until": time.time() + 120,
+            }
+        )
+
+        during_restart = service.snapshot(fresh=True)
+
+        self.assertEqual(during_restart["service"]["status"], "starting")
+        self.assertEqual(during_restart["workers"]["running"], 0)
+        self.assertEqual(during_restart["running"], [])
+        self.assertGreater(self.store.read()["expected_service_restart_until"], 0)
+
+    def test_expired_action_marker_cannot_block_fresh_external_recovery(self):
+        service = SnapshotService(
+            symphony=RichSymphony(),
+            github=FakeGitHub(),
+            test_environment=FakeTest(),
+            supervisor=ToggleSupervisor(),
+            state_store=self.store,
+            worker_limit=5,
+            canonical_ref="rebrand/stanina",
+        )
+        self.store.update(
+            {
+                "expected_service_stop": True,
+                "service_action_in_progress": "stop_service",
+                "service_action_in_progress_until": time.time() - 1,
+            }
+        )
+
+        recovered = service.snapshot(fresh=True)
+
+        self.assertTrue(recovered["service"]["live"])
+        self.assertEqual(recovered["service"]["status"], "running")
+        self.assertEqual(recovered["sources"]["runtime"]["status"], "fresh")
+        self.assertFalse(self.store.read()["expected_service_stop"])
+        self.assertIsNone(self.store.read()["service_action_in_progress"])
+        self.assertEqual(self.store.read()["service_action_in_progress_until"], 0)
 
     def test_expired_snapshot_returns_stale_cache_while_refresh_runs(self):
         github = BlockingGitHub()

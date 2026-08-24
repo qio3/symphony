@@ -36,6 +36,7 @@ class SnapshotService:
         self._refresh_lock = threading.Lock()
         self._cached: dict[str, Any] | None = None
         self._cached_at = 0.0
+        self._control_generation = 0
         stored_sources = self._state_store.read().get("last_good_sources")
         self._last_good_sources = deepcopy(stored_sources) if isinstance(stored_sources, dict) else {}
 
@@ -55,7 +56,29 @@ class SnapshotService:
         return cached
 
     def invalidate(self) -> None:
+        refreshed_at = datetime.now(timezone.utc).isoformat()
+        control_state = self._state_store.read()
+        try:
+            service = _service_with_intent(
+                self._supervisor.status(),
+                control_state,
+                now=time.time(),
+            )
+            supervisor_source = _fresh_source(refreshed_at)
+        except Exception as error:
+            service = {"live": False, "status": "unknown", "reason": str(error)}
+            supervisor_source = _unavailable_source(error)
         with self._cache_lock:
+            self._control_generation += 1
+            if self._cached is not None:
+                self._cached = self._patched_cached_snapshot(
+                    self._cached,
+                    intake_active=bool(control_state.get("intake_active", True)),
+                    service=service,
+                    supervisor_source=supervisor_source,
+                    control_transition=_control_transition_active(control_state),
+                    refreshed_at=refreshed_at,
+                )
             self._cached_at = 0.0
         self._start_refresh()
 
@@ -79,33 +102,83 @@ class SnapshotService:
             self._refresh_lock.release()
 
     def _collect_and_cache(self) -> dict[str, Any]:
-        value = self._collect()
-        with self._cache_lock:
-            self._cached = value
-            self._cached_at = time.monotonic()
-        return value
+        while True:
+            with self._cache_lock:
+                generation = self._control_generation
+            value = self._collect()
+            with self._cache_lock:
+                if generation != self._control_generation:
+                    continue
+                self._cached = value
+                self._cached_at = time.monotonic()
+                return value
 
     def _collect(self) -> dict[str, Any]:
         failures: list[dict[str, Any]] = []
         sources: dict[str, dict[str, Any]] = {}
         changed = False
         refreshed_at = datetime.now(timezone.utc).isoformat()
+        control_state = self._state_store.read()
 
         try:
-            service = self._supervisor.status()
+            service = _service_with_intent(
+                self._supervisor.status(), control_state, now=time.time()
+            )
             sources["supervisor"] = _fresh_source(refreshed_at)
         except Exception as error:
             service = {"live": False, "status": "unknown", "reason": str(error)}
             failures.append(_source_failure("supervisor", error))
             sources["supervisor"] = _unavailable_source(error)
 
-        try:
-            runtime = self._symphony.state()
-            changed = self._remember_source("runtime", runtime, refreshed_at) or changed
-            sources["runtime"] = _fresh_source(refreshed_at)
-        except Exception as error:
-            runtime, sources["runtime"] = self._stale_or_unavailable("runtime", _empty_runtime(), error)
-            failures.append(_source_failure("runtime", error))
+        if _service_is_transitioning(service) or _service_is_confirmed_stopped(service):
+            runtime = self._inactive_runtime_projection()
+            last_runtime = self._last_good_sources.get("runtime")
+            sources["runtime"] = {
+                "status": "stale",
+                "confirmed_at": last_runtime.get("confirmed_at") if isinstance(last_runtime, dict) else None,
+                "error": _inactive_runtime_reason(service),
+            }
+        else:
+            try:
+                runtime = self._symphony.state()
+                changed = self._remember_source("runtime", runtime, refreshed_at) or changed
+                sources["runtime"] = _fresh_source(refreshed_at)
+                recovered_intent: dict[str, Any] = {}
+                if _restart_expected(control_state) and service.get("live") is True:
+                    recovered_intent["expected_service_restart_until"] = 0
+                if (
+                    bool(control_state.get("expected_service_stop"))
+                    and service.get("live") is True
+                ):
+                    recovered_intent["expected_service_stop"] = False
+                if control_state.get("service_action_in_progress"):
+                    recovered_intent.update(
+                        {
+                            "service_action_in_progress": None,
+                            "service_action_in_progress_until": 0,
+                        }
+                    )
+                if recovered_intent:
+                    self._state_store.update(recovered_intent)
+            except Exception as error:
+                if _restart_expected(control_state) and service.get("live") is True:
+                    service = {**service, "status": "starting"}
+                    runtime = self._inactive_runtime_projection()
+                    stored_runtime = self._last_good_sources.get("runtime")
+                    sources["runtime"] = {
+                        "status": "stale" if isinstance(stored_runtime, dict) else "unavailable",
+                        "confirmed_at": (
+                            stored_runtime.get("confirmed_at")
+                            if isinstance(stored_runtime, dict)
+                            else None
+                        ),
+                        "error": str(error),
+                    }
+                else:
+                    runtime, sources["runtime"] = self._stale_or_unavailable(
+                        "runtime", _empty_runtime(), error
+                    )
+                failures.append(_source_failure("runtime", error))
 
         try:
             project = self._github.project_snapshot()
@@ -154,6 +227,60 @@ class SnapshotService:
         snapshot["refreshed_at"] = refreshed_at
         return snapshot
 
+    @staticmethod
+    def _patched_cached_snapshot(
+        cached: dict[str, Any],
+        *,
+        intake_active: bool,
+        service: dict[str, Any],
+        supervisor_source: dict[str, Any],
+        control_transition: bool,
+        refreshed_at: str,
+    ) -> dict[str, Any]:
+        snapshot = deepcopy(cached)
+        snapshot["intake"] = {
+            "active": intake_active,
+            "status": "active" if intake_active else "paused",
+        }
+        snapshot["service"] = deepcopy(service)
+        sources = snapshot.setdefault("sources", {})
+        sources["supervisor"] = deepcopy(supervisor_source)
+        supervisor_known = supervisor_source.get("status") == "fresh"
+        inactive = supervisor_known and (
+            control_transition
+            or _service_is_transitioning(service)
+            or _service_is_confirmed_stopped(service)
+        )
+        if inactive:
+            previous_runtime = sources.get("runtime") or {}
+            sources["runtime"] = {
+                "status": "stale",
+                "confirmed_at": previous_runtime.get("confirmed_at"),
+                "error": _inactive_runtime_reason(
+                    service, control_transition=control_transition
+                ),
+            }
+            snapshot["running"] = []
+            snapshot.setdefault("workers", {})["running"] = 0
+            snapshot.setdefault("counts", {})["running"] = 0
+            snapshot.setdefault("owner_view", {}).setdefault("work_items", []).clear()
+        snapshot["stale"] = any(
+            source.get("status") != "fresh"
+            for source in sources.values()
+            if isinstance(source, dict)
+        )
+        snapshot["refreshed_at"] = refreshed_at
+        return snapshot
+
+    def _inactive_runtime_projection(self) -> dict[str, Any]:
+        stored = self._last_good_sources.get("runtime")
+        if isinstance(stored, dict) and isinstance(stored.get("value"), dict):
+            runtime = deepcopy(stored["value"])
+        else:
+            runtime = _empty_runtime()
+        runtime["running"] = []
+        return runtime
+
     def _remember_source(self, name: str, value: Any, confirmed_at: str) -> bool:
         stored = {"confirmed_at": confirmed_at, "value": deepcopy(value)}
         changed = self._last_good_sources.get(name, {}).get("value") != stored["value"]
@@ -196,6 +323,80 @@ def _source_failure(source: str, error: Exception) -> dict[str, Any]:
         "message": message,
         "unrecoverable": unrecoverable,
     }
+
+
+def _service_with_intent(
+    service: dict[str, Any],
+    control_state: dict[str, Any],
+    *,
+    now: float,
+) -> dict[str, Any]:
+    projected = deepcopy(service)
+    live = projected.get("live") is True
+    expected_stop = bool(control_state.get("expected_service_stop"))
+    expected_restart_until = float(
+        control_state.get("expected_service_restart_until") or 0
+    )
+    action_in_progress = _active_service_action(control_state, now=now)
+    if expected_stop and live and action_in_progress == "stop_service":
+        projected["status"] = "stopping"
+    elif (
+        expected_restart_until > now
+        and not expected_stop
+        and (not live or action_in_progress in {"start_service", "restart"})
+    ):
+        projected["status"] = "starting"
+    elif not live and not projected.get("status"):
+        projected["status"] = "exited"
+    return projected
+
+
+def _control_transition_active(control_state: dict[str, Any]) -> bool:
+    return bool(
+        _active_service_action(control_state, now=time.time())
+    ) or _restart_expected(control_state)
+
+
+def _active_service_action(control_state: dict[str, Any], *, now: float) -> str:
+    action = str(control_state.get("service_action_in_progress") or "").casefold()
+    deadline = float(control_state.get("service_action_in_progress_until") or 0)
+    return action if action and deadline > now else ""
+
+
+def _restart_expected(control_state: dict[str, Any]) -> bool:
+    return float(control_state.get("expected_service_restart_until") or 0) > time.time()
+
+
+def _service_is_transitioning(service: dict[str, Any]) -> bool:
+    return str(service.get("status") or "").casefold() in {
+        "created",
+        "restarting",
+        "starting",
+        "stopping",
+    }
+
+
+def _service_is_confirmed_stopped(service: dict[str, Any]) -> bool:
+    return service.get("live") is False and str(service.get("status") or "").casefold() not in {
+        "unknown",
+        "created",
+        "restarting",
+        "starting",
+        "stopping",
+    }
+
+
+def _inactive_runtime_reason(
+    service: dict[str, Any], *, control_transition: bool = False
+) -> str:
+    status = str(service.get("status") or "").casefold()
+    if status in {"created", "restarting", "starting"}:
+        return "Symphony service is starting"
+    if status == "stopping":
+        return "Symphony service is stopping"
+    if control_transition and service.get("live") is True:
+        return "Symphony runtime is refreshing after a service action"
+    return "Symphony service is stopped"
 
 
 def _fresh_source(confirmed_at: str) -> dict[str, Any]:
