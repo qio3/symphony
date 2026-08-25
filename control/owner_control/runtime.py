@@ -232,6 +232,7 @@ class SnapshotService:
             project=project,
             canonical=canonical,
             test=test,
+            quarantines=self._state_store.quarantines(),
         )
         snapshot["failures"] = failures
         snapshot["sources"] = sources

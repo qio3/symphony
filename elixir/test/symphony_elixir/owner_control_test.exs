@@ -93,6 +93,17 @@ defmodule SymphonyElixir.OwnerControlTest do
     end
   end
 
+  defmodule CompletionControl do
+    def complete_run(issue_number) do
+      test_pid = Application.fetch_env!(:symphony_elixir, :owner_control_completion_test_pid)
+      response = Application.fetch_env!(:symphony_elixir, :owner_control_completion_response)
+      send(test_pid, {:owner_control_complete_run, issue_number})
+      response
+    end
+
+    def intake_active?, do: true
+  end
+
   setup do
     keys = [
       :owner_control_settings,
@@ -103,7 +114,9 @@ defmodule SymphonyElixir.OwnerControlTest do
       :owner_control_test_snapshot,
       :owner_control_test_action_response,
       :owner_control_test_intake_active,
-      :owner_control_test_orchestrator_name
+      :owner_control_test_orchestrator_name,
+      :owner_control_completion_response,
+      :owner_control_completion_test_pid
     ]
 
     previous = Map.new(keys, &{&1, Application.get_env(:symphony_elixir, &1)})
@@ -151,6 +164,17 @@ defmodule SymphonyElixir.OwnerControlTest do
     assert {:ok, %{status: "accepted"}} = Client.action(:lease, %{issue: 401})
     assert_receive {:request, :post, "http://127.0.0.1:4080/v1/actions/lease", _headers, %{issue: 401}}
 
+    assert {:ok, %{status: "accepted"}} = Client.complete_run(401)
+
+    assert_receive {:request, :post, "http://127.0.0.1:4080/v1/internal/actions/complete_run", _headers, %{issue: 401}}
+
+    assert {:ok, %{status: "accepted"}} =
+             Client.quarantine_before_run(401, "workspace before_run hook failed")
+
+    assert_receive {:request, :post, "http://127.0.0.1:4080/v1/internal/actions/quarantine_before_run", _headers, %{issue: 401, reason: "workspace before_run hook failed"}}
+
+    assert {:error, :unsupported_action} = Client.action(:complete_run, %{issue: 401})
+
     assert {:ok, %{status: "accepted"}} = Client.action(:start_service, %{})
     assert_receive {:request, :post, "http://127.0.0.1:4080/v1/actions/start_service", _headers, %{}}
 
@@ -167,6 +191,13 @@ defmodule SymphonyElixir.OwnerControlTest do
 
     assert {:error, {:owner_control_action_rejected, "TEST has drift"}} =
              Client.action(:accept, %{issue: 402})
+
+    Application.put_env(:symphony_elixir, :owner_control_request_fun, fn _, _, _, _ ->
+      {:ok, 503, Jason.encode!(%{error: %{code: "retryable", message: "runtime is still active"}})}
+    end)
+
+    assert {:error, {:owner_control_retryable, "runtime is still active"}} =
+             Client.complete_run(402)
 
     Application.put_env(:symphony_elixir, :owner_control_request_fun, fn method, url, headers, body ->
       send(test_pid, {:request, method, url, headers, body})
@@ -214,6 +245,41 @@ defmodule SymphonyElixir.OwnerControlTest do
 
     assert {:error, {:owner_control_request_failed, "offline"}} = Client.snapshot()
     refute Client.intake_active?()
+  end
+
+  test "internal actions reject malformed request arguments" do
+    assert Client.complete_run("401") == {:error, :invalid_issue_number}
+
+    assert Client.quarantine_before_run(0, "before_run hook failed") ==
+             {:error, :invalid_quarantine_request}
+
+    assert Client.quarantine_before_run(401, :not_a_reason) ==
+             {:error, :invalid_quarantine_request}
+  end
+
+  test "internal actions preserve fail-closed control configuration outcomes" do
+    Application.delete_env(:symphony_elixir, :owner_control_settings)
+    assert Client.complete_run(401) == {:error, :owner_control_disabled}
+
+    Application.put_env(:symphony_elixir, :owner_control_settings, %{
+      url: "file:///not-an-owner-control-endpoint",
+      token: "too-short"
+    })
+
+    assert Client.quarantine_before_run(401, "before_run hook failed") ==
+             {:error, :invalid_owner_control_settings}
+  end
+
+  test "internal completion distinguishes retryable and malformed service errors" do
+    configure_client()
+
+    stub_owner_response({:ok, 503, %{error: %{code: "retryable", message: "runtime is active"}}})
+
+    assert Client.complete_run(401) ==
+             {:error, {:owner_control_retryable, "runtime is active"}}
+
+    stub_owner_response({:ok, 503, "not json"})
+    assert Client.complete_run(401) == {:error, {:owner_control_http_error, 503}}
   end
 
   test "default Req client crosses the loopback HTTP boundary with auth and JSON" do
@@ -656,6 +722,56 @@ defmodule SymphonyElixir.OwnerControlTest do
     refute_receive {:owner_control_action, ^cycle_ref, :lease, _params}, 100
   end
 
+  test "persisted system quarantine suppresses Ready for AI dispatch after runtime restart" do
+    issue = dispatch_issue(409)
+
+    snapshot =
+      dispatch_snapshot(
+        [%{number: 409, status: "Ready for AI", state: "OPEN"}],
+        quarantined: [
+          %{
+            issue: 409,
+            reason: "workspace before_run hook failed",
+            quarantined_at: "2026-08-25T10:00:00Z"
+          }
+        ]
+      )
+
+    {pid, task_supervisor, cycle_ref, test_root} =
+      start_dispatch_cycle([issue], snapshot, {:ok, %{status: "accepted"}})
+
+    on_exit(fn -> stop_dispatch_cycle(pid, task_supervisor, test_root) end)
+
+    assert_receive {:owner_control_snapshot, ^cycle_ref}, 1_000
+    assert :sys.get_state(pid).running == %{}
+    refute_receive {:owner_control_action, ^cycle_ref, :lease, _params}, 100
+  end
+
+  test "persisted system quarantine suppresses leased Project In Progress resume after runtime restart" do
+    issue = %{dispatch_issue(498) | labels: ["symphony"]}
+
+    snapshot =
+      dispatch_snapshot(
+        [%{number: 498, status: "In Progress", state: "OPEN"}],
+        quarantined: [
+          %{
+            issue: 498,
+            reason: "workspace before_run hook failed",
+            quarantined_at: "2026-08-25T10:00:00Z"
+          }
+        ]
+      )
+
+    {pid, task_supervisor, cycle_ref, test_root} =
+      start_dispatch_cycle([issue], snapshot, {:ok, %{status: "accepted"}})
+
+    on_exit(fn -> stop_dispatch_cycle(pid, task_supervisor, test_root) end)
+
+    assert_receive {:owner_control_snapshot, ^cycle_ref}, 1_000
+    assert :sys.get_state(pid).running == %{}
+    refute_receive {:owner_control_action, ^cycle_ref, :lease, _params}, 100
+  end
+
   test "leased Project In Progress work resumes before new Ready for AI work after runtime state loss" do
     ready_issue = dispatch_issue(410)
     resumable_issue = %{dispatch_issue(499) | labels: ["symphony"]}
@@ -706,6 +822,57 @@ defmodule SymphonyElixir.OwnerControlTest do
 
       stop_dispatch_cycle(pid, task_supervisor, test_root)
     end)
+  end
+
+  test "normal continuation completes only an unleased inactive Project In Progress issue" do
+    issue = dispatch_issue(470)
+
+    Application.put_env(:symphony_elixir, :owner_control_client_module, CompletionControl)
+    Application.put_env(:symphony_elixir, :owner_control_completion_test_pid, self())
+    Application.put_env(:symphony_elixir, :owner_control_completion_response, {:ok, %{status: "accepted"}})
+
+    state = %Orchestrator.State{claimed: MapSet.new([issue.id])}
+
+    updated_state =
+      Orchestrator.handle_retry_issue_lookup_for_test(
+        issue,
+        state,
+        issue.id,
+        1,
+        %{identifier: issue.identifier, issue_url: issue.url, delay_type: :continuation}
+      )
+
+    assert_receive {:owner_control_complete_run, 470}, 1_000
+    refute MapSet.member?(updated_state.claimed, issue.id)
+    refute Map.has_key?(updated_state.retry_attempts, issue.id)
+  end
+
+  test "failed normal-completion postcondition retains the claim for a bounded retry" do
+    issue = dispatch_issue(471)
+
+    Application.put_env(:symphony_elixir, :owner_control_client_module, CompletionControl)
+    Application.put_env(:symphony_elixir, :owner_control_completion_test_pid, self())
+
+    Application.put_env(
+      :symphony_elixir,
+      :owner_control_completion_response,
+      {:error, {:owner_control_action_rejected, "still resolving"}}
+    )
+
+    state = %Orchestrator.State{claimed: MapSet.new([issue.id])}
+
+    updated_state =
+      Orchestrator.handle_retry_issue_lookup_for_test(
+        issue,
+        state,
+        issue.id,
+        1,
+        %{identifier: issue.identifier, issue_url: issue.url, delay_type: :continuation}
+      )
+
+    assert_receive {:owner_control_complete_run, 471}, 1_000
+    assert MapSet.member?(updated_state.claimed, issue.id)
+    assert %{attempt: 2, delay_type: :completion_postcondition} = updated_state.retry_attempts[issue.id]
   end
 
   test "unleased issues fail closed outside a fresh active Ready for AI snapshot" do
@@ -836,6 +1003,7 @@ defmodule SymphonyElixir.OwnerControlTest do
       stale: Keyword.get(opts, :stale, false),
       intake: %{active: Keyword.get(opts, :intake_active, true)},
       sources: %{github: %{status: Keyword.get(opts, :github_status, "fresh")}},
+      quarantined: Keyword.get(opts, :quarantined, []),
       issues:
         Map.new(items, fn item ->
           key = if is_integer(item[:number]), do: Integer.to_string(item.number), else: inspect(item[:number])

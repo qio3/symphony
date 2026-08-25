@@ -22,6 +22,7 @@ class SnapshotBuilder:
         project: dict[str, Any],
         canonical: dict[str, Any],
         test: dict[str, Any],
+        quarantines: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         items = {
             str(item["number"]): self._project_item(item)
@@ -31,6 +32,7 @@ class SnapshotBuilder:
         running = self._runtime_by_issue(runtime.get("running", []))
         retrying = self._runtime_by_issue(runtime.get("retrying", []))
         blocked = self._runtime_by_issue(runtime.get("blocked", []))
+        system_quarantines = self._quarantines_by_issue(quarantines)
         issue_usage = {
             str(issue_key): self._normalize_issue_usage(value)
             for issue_key, value in (runtime.get("issue_usage") or {}).items()
@@ -39,11 +41,14 @@ class SnapshotBuilder:
 
         for issue_key, entry in {**running, **retrying, **blocked}.items():
             items.setdefault(issue_key, self._runtime_only_item(issue_key, entry))
+        for issue_key in system_quarantines:
+            items.setdefault(issue_key, self._runtime_only_item(issue_key, {}))
 
         lanes: dict[str, list[dict[str, Any]]] = {
             "backlog": [],
             "work_items": [],
             "blocked": [],
+            "system_quarantines": [],
             "ready_for_acceptance": [],
             "follow_ups": [],
         }
@@ -54,6 +59,7 @@ class SnapshotBuilder:
             "running": 0,
             "queued": 0,
             "blocked": 0,
+            "quarantined": 0,
             "ready_for_acceptance": 0,
             "done": 0,
         }
@@ -88,9 +94,14 @@ class SnapshotBuilder:
             runtime_blocked = blocked.get(issue_key)
             runtime_running = running.get(issue_key)
             runtime_retry = retrying.get(issue_key)
+            system_quarantine = system_quarantines.get(issue_key)
             status = str(item.get("status") or "Backlog")
 
-            if runtime_blocked is not None or status.casefold() == "blocked":
+            if system_quarantine is not None:
+                item = self._with_system_quarantine(item, system_quarantine)
+                lanes["system_quarantines"].append(item)
+                counts["quarantined"] += 1
+            elif runtime_blocked is not None or status.casefold() == "blocked":
                 item = self._with_runtime(item, runtime_blocked or {})
                 item["status"] = "Blocked"
                 item["stage"] = "Blocked"
@@ -139,6 +150,7 @@ class SnapshotBuilder:
             "counts": {
                 "backlog": counts["backlog"] + counts["ready_for_ai"],
                 "blocked": counts["blocked"],
+                "quarantined": counts["quarantined"],
                 "ready_for_acceptance": counts["ready_for_acceptance"],
                 "done": counts["done"],
             },
@@ -159,6 +171,10 @@ class SnapshotBuilder:
             "running": runtime.get("running", []),
             "retrying": runtime.get("retrying", []),
             "blocked": runtime.get("blocked", []),
+            "quarantined": [
+                system_quarantines[issue_key]
+                for issue_key in sorted(system_quarantines, key=self._issue_sort_key)
+            ],
             "codex_totals": codex_totals,
             "issue_usage": issue_usage,
             "rate_limits": runtime.get("rate_limits"),
@@ -211,6 +227,16 @@ class SnapshotBuilder:
         return item
 
     @staticmethod
+    def _with_system_quarantine(item: dict[str, Any], quarantine: dict[str, Any]) -> dict[str, Any]:
+        item = deepcopy(item)
+        item["status"] = "System quarantine"
+        item["stage"] = "System quarantine"
+        item["reason"] = quarantine["reason"]
+        item["quarantined_at"] = quarantine["quarantined_at"]
+        item["system_quarantine"] = True
+        return item
+
+    @staticmethod
     def _runtime_by_issue(entries: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         result = {}
         for entry in entries or []:
@@ -226,6 +252,21 @@ class SnapshotBuilder:
             return str(issue_id)
         match = _ISSUE_NUMBER.search(str(entry.get("issue_identifier") or ""))
         return match.group(1) if match else None
+
+    @staticmethod
+    def _quarantines_by_issue(quarantines: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+        if not isinstance(quarantines, dict):
+            return {}
+        return {
+            str(value["issue"]): value
+            for key, value in quarantines.items()
+            if isinstance(value, dict)
+            and isinstance(value.get("issue"), int)
+            and value["issue"] > 0
+            and str(key) == str(value["issue"])
+            and isinstance(value.get("reason"), str)
+            and isinstance(value.get("quarantined_at"), str)
+        }
 
     @staticmethod
     def _issue_sort_key(issue_key: str) -> tuple[int, str]:

@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from owner_control.clients import SymphonyClient
 from owner_control.runtime import SnapshotService
 from owner_control.state_store import StateStore
 from owner_control.supervisor import DockerComposeSupervisor
@@ -778,6 +779,40 @@ class SnapshotServiceTest(unittest.TestCase):
         self.assertEqual(stale["workers"], {"running": 1, "limit": 5})
         self.assertEqual(stale["sources"]["runtime"]["status"], "stale")
         self.assertTrue(stale["stale"])
+
+    def test_non_object_symphony_response_keeps_last_good_runtime_as_stale(self):
+        responses = [
+            {
+                "generated_at": "2026-08-25T10:00:00Z",
+                "running": [{"issue_id": "402", "issue_identifier": "GH-402"}],
+                "retrying": [],
+                "blocked": [],
+                "codex_totals": {},
+                "rate_limits": None,
+            },
+            [],
+        ]
+        symphony = SymphonyClient(
+            "http://127.0.0.1:4082",
+            transport=lambda *_args, **_kwargs: responses.pop(0),
+        )
+        service = SnapshotService(
+            symphony=symphony,
+            github=FakeGitHub(),
+            test_environment=FakeTest(),
+            supervisor=FakeSupervisor(),
+            state_store=self.store,
+            worker_limit=5,
+            canonical_ref="rebrand/stanina",
+        )
+        healthy = service.snapshot(fresh=True)
+        stale = service.snapshot(fresh=True)
+
+        self.assertEqual(healthy["workers"], {"running": 1, "limit": 5})
+        self.assertEqual(stale["workers"], {"running": 1, "limit": 5})
+        self.assertTrue(stale["stale"])
+        self.assertEqual(stale["sources"]["runtime"]["status"], "stale")
+        self.assertIn("Symphony state response must be a JSON object", stale["sources"]["runtime"]["error"])
 
 
 class DockerComposeSupervisorTest(unittest.TestCase):

@@ -208,7 +208,8 @@ function renderCounters(snapshot) {
 function renderBlocked(snapshot) {
   clear(targets.needsOwner);
   const items = snapshot.owner_view?.blocked || [];
-  if (!items.length) return targets.needsOwner.append(emptyState("No owner decisions", "Blocked questions will appear here."));
+  const quarantines = snapshot.owner_view?.system_quarantines || [];
+  if (!items.length && !quarantines.length) return targets.needsOwner.append(emptyState("No owner decisions", "Blocked questions will appear here."));
   const list = el("div", "issue-list attention-list");
   for (const item of items) {
     const card = issueCard(item, "blocked");
@@ -217,6 +218,20 @@ function renderBlocked(snapshot) {
     const actions = el("div", "row-actions");
     actions.append(externalLink(item.issue_url, "Open Issue", "button secondary"));
     card.append(question, actions);
+    list.append(card);
+  }
+  const githubFresh = snapshot.sources?.github?.status === "fresh";
+  for (const item of quarantines) {
+    const card = issueCard(item, "quarantine");
+    const detail = el("div", "owner-question system-quarantine");
+    detail.append(el("span", "question-label", "System quarantine"), el("p", "", item.reason || "Deterministic before_run failure"));
+    const actions = el("div", "row-actions");
+    actions.append(
+      externalLink(item.issue_url, "Open Issue", "button secondary"),
+      actionButton("Start", "run", "primary", !githubFresh, item.number),
+    );
+    card.append(detail, actions);
+    if (!githubFresh) card.append(actionHint("Start is unavailable until GitHub state is fresh."));
     list.append(card);
   }
   targets.needsOwner.append(list);
@@ -389,7 +404,7 @@ function issueCard(item, tone) {
   const heading = el("div", "issue-heading");
   const copy = el("div", "issue-copy");
   copy.append(externalLink(item.issue_url, `#${item.number}`, "issue-number"), el("h3", "", item.title || "Untitled Issue"));
-  heading.append(copy, badge(item.stage || item.status || titleCase(tone), tone === "blocked" ? "danger" : tone === "ready" ? "good" : "neutral"));
+  heading.append(copy, badge(item.stage || item.status || titleCase(tone), tone === "blocked" ? "danger" : tone === "ready" ? "good" : tone === "quarantine" ? "warning" : "neutral"));
   card.append(heading);
   return card;
 }

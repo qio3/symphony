@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
 
-from .actions import ActionError, ActionService
+from .actions import ActionError, ActionService, RetryableActionError
 
 
 _ACTIONS = {
@@ -24,6 +24,7 @@ _ACTIONS = {
     "stop_service",
     "restart",
 }
+_INTERNAL_ACTIONS = {"complete_run", "quarantine_before_run"}
 _MAX_BODY_BYTES = 16_384
 _ASSET_ROOT = Path(__file__).with_name("web")
 _ASSETS = {
@@ -97,6 +98,31 @@ def create_server(
 
         def do_POST(self) -> None:
             parsed = urlsplit(self.path)
+
+            if parsed.path.startswith("/v1/internal/actions/"):
+                if not self._authorized():
+                    return self._json(HTTPStatus.UNAUTHORIZED, {"error": {"code": "unauthorized"}})
+                action = parsed.path[len("/v1/internal/actions/") :]
+                if action not in _INTERNAL_ACTIONS or "/" in action:
+                    return self._json(HTTPStatus.NOT_FOUND, {"error": {"code": "not_found"}})
+                try:
+                    result = action_service.execute_internal(action, self._request_json())
+                except RetryableActionError as error:
+                    return self._json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": {"code": "retryable", "message": str(error)}},
+                    )
+                except ActionError as error:
+                    return self._json(HTTPStatus.CONFLICT, {"error": {"code": "action_rejected", "message": str(error)}})
+                except (ValueError, json.JSONDecodeError) as error:
+                    return self._json(HTTPStatus.BAD_REQUEST, {"error": {"code": "invalid_request", "message": str(error)}})
+                except Exception as error:
+                    return self._json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": {"code": "action_failed", "message": str(error)}},
+                    )
+                return self._json(HTTPStatus.ACCEPTED, result)
+
             browser_request = parsed.path.startswith("/ui/actions/")
             if browser_request:
                 if not self._browser_authorized(browser_csrf):

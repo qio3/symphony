@@ -3,19 +3,29 @@ import threading
 import unittest
 from pathlib import Path
 
-from owner_control.actions import ActionError, ActionService
+from owner_control.actions import ActionError, ActionService, RetryableActionError
 from owner_control.state_store import StateStore
 
 
 class FakeLifecycle:
     def __init__(self):
         self.calls = []
+        self.fail_on = None
 
     def set_status(self, issue, status):
         self.calls.append(("set_status", issue, status))
+        if self.fail_on == "set_status":
+            raise RuntimeError("status unavailable")
 
     def add_label(self, issue, label):
         self.calls.append(("add_label", issue, label))
+        if self.fail_on == "add_label":
+            raise RuntimeError("label unavailable")
+
+    def remove_label(self, issue, label):
+        self.calls.append(("remove_label", issue, label))
+        if self.fail_on == "remove_label":
+            raise RuntimeError("label rollback unavailable")
 
     def comment(self, issue, body):
         self.calls.append(("comment", issue, body))
@@ -56,7 +66,8 @@ class ActionServiceTest(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
-        self.store = StateStore(Path(self.tempdir.name) / "state.json")
+        self.state_path = Path(self.tempdir.name) / "state.json"
+        self.store = StateStore(self.state_path)
         self.lifecycle = FakeLifecycle()
         self.supervisor = FakeSupervisor()
         self.snapshot = {
@@ -71,7 +82,12 @@ class ActionServiceTest(unittest.TestCase):
                 "401": {"number": 401, "status": "Backlog", "state": "OPEN", "labels": []},
                 "402": {"number": 402, "status": "Ready for Acceptance", "state": "OPEN", "labels": []},
                 "403": {"number": 403, "status": "Ready for AI", "state": "OPEN", "labels": []},
+                "404": {"number": 404, "status": "In Progress", "state": "OPEN", "labels": []},
+                "405": {"number": 405, "status": "In Progress", "state": "OPEN", "labels": ["symphony"]},
             },
+            "running": [],
+            "retrying": [],
+            "blocked": [],
         }
         self.actions = ActionService(
             snapshot_provider=lambda: self.snapshot,
@@ -96,12 +112,19 @@ class ActionServiceTest(unittest.TestCase):
             result,
             {"status": "accepted", "action": "lease", "issue": 403},
         )
-        self.assertEqual(self.lifecycle.calls, [("add_label", 403, "symphony")])
+        self.assertEqual(
+            self.lifecycle.calls,
+            [
+                ("add_label", 403, "symphony"),
+                ("set_status", 403, "In Progress"),
+            ],
+        )
 
         self.lifecycle.calls.clear()
         self.snapshot["issues"]["403"]["labels"] = ["Symphony"]
         self.actions.execute("lease", {"issue": 403})
-        self.assertEqual(self.lifecycle.calls, [])
+        self.assertEqual(self.lifecycle.calls, [("set_status", 403, "In Progress")])
+        self.lifecycle.calls.clear()
 
         for status in ("Backlog", "In Progress"):
             self.snapshot["issues"]["403"].update({"status": status, "state": "OPEN", "labels": []})
@@ -125,6 +148,132 @@ class ActionServiceTest(unittest.TestCase):
         with self.assertRaisesRegex(ActionError, "active intake"):
             self.actions.execute("lease", {"issue": 403})
         self.assertEqual(self.lifecycle.calls, [])
+
+    def test_lease_rolls_back_only_a_new_lease_when_project_status_update_fails(self):
+        self.lifecycle.fail_on = "set_status"
+
+        with self.assertRaisesRegex(RuntimeError, "status unavailable"):
+            self.actions.execute("lease", {"issue": 403})
+        self.assertEqual(
+            self.lifecycle.calls,
+            [
+                ("add_label", 403, "symphony"),
+                ("set_status", 403, "In Progress"),
+                ("remove_label", 403, "symphony"),
+            ],
+        )
+
+        self.lifecycle.calls.clear()
+        self.snapshot["issues"]["403"]["labels"] = ["symphony"]
+        with self.assertRaisesRegex(RuntimeError, "status unavailable"):
+            self.actions.execute("lease", {"issue": 403})
+        self.assertEqual(self.lifecycle.calls, [("set_status", 403, "In Progress")])
+
+    def test_lease_rejects_persisted_or_labeled_system_quarantine(self):
+        self.store.set_quarantine(403, "workspace hook failed", "2026-08-25T10:00:00Z")
+
+        with self.assertRaisesRegex(ActionError, "system quarantine"):
+            self.actions.execute("lease", {"issue": 403})
+        self.assertEqual(self.lifecycle.calls, [])
+
+        self.store.clear_quarantine(403)
+        self.snapshot["issues"]["403"]["labels"] = ["symphony:quarantined"]
+        with self.assertRaisesRegex(ActionError, "system quarantine"):
+            self.actions.execute("lease", {"issue": 403})
+        self.assertEqual(self.lifecycle.calls, [])
+
+    def test_run_clears_system_quarantine_before_restoring_ready_for_ai_lease(self):
+        self.store.set_quarantine(403, "workspace hook failed", "2026-08-25T10:00:00Z")
+        self.snapshot["issues"]["403"]["labels"] = ["symphony:quarantined"]
+
+        result = self.actions.execute("run", {"issue": 403})
+
+        self.assertEqual(result["status"], "accepted")
+        self.assertIsNone(self.store.quarantine_for(403))
+        self.assertEqual(
+            self.lifecycle.calls,
+            [
+                ("remove_label", 403, "symphony:quarantined"),
+                ("set_status", 403, "Ready for AI"),
+                ("add_label", 403, "symphony"),
+            ],
+        )
+
+    def test_run_keeps_persisted_quarantine_if_fixed_label_removal_fails(self):
+        self.store.set_quarantine(403, "workspace hook failed", "2026-08-25T10:00:00Z")
+        self.snapshot["issues"]["403"]["labels"] = ["symphony:quarantined"]
+        self.lifecycle.fail_on = "remove_label"
+
+        with self.assertRaisesRegex(RuntimeError, "label rollback unavailable"):
+            self.actions.execute("run", {"issue": 403})
+
+        self.assertEqual(
+            self.lifecycle.calls,
+            [("remove_label", 403, "symphony:quarantined")],
+        )
+        self.assertEqual(
+            self.store.quarantine_for(403)["reason"],
+            "workspace hook failed",
+        )
+
+    def test_run_recovers_persisted_quarantine_stuck_in_progress_with_existing_lease(self):
+        self.store.set_quarantine(403, "workspace hook failed", "2026-08-25T10:00:00Z")
+        self.snapshot["issues"]["403"].update(
+            {"status": "In Progress", "labels": ["symphony", "symphony:quarantined"]}
+        )
+
+        result = self.actions.execute("run", {"issue": 403})
+
+        self.assertEqual(result["status"], "accepted")
+        self.assertIsNone(self.store.quarantine_for(403))
+        self.assertEqual(
+            self.lifecycle.calls,
+            [
+                ("remove_label", 403, "symphony:quarantined"),
+                ("set_status", 403, "Ready for AI"),
+            ],
+        )
+
+    def test_run_recovers_label_only_quarantine_stuck_in_progress(self):
+        self.snapshot["issues"]["403"].update(
+            {"status": "In Progress", "labels": ["symphony:quarantined"]}
+        )
+
+        result = self.actions.execute("run", {"issue": 403})
+
+        self.assertEqual(result["status"], "accepted")
+        self.assertEqual(
+            self.lifecycle.calls,
+            [
+                ("remove_label", 403, "symphony:quarantined"),
+                ("set_status", 403, "Ready for AI"),
+                ("add_label", 403, "symphony"),
+            ],
+        )
+
+    def test_run_rejects_non_quarantined_in_progress_issue(self):
+        self.snapshot["issues"]["403"].update({"status": "In Progress", "labels": []})
+
+        with self.assertRaisesRegex(ActionError, "Backlog or Ready for AI"):
+            self.actions.execute("run", {"issue": 403})
+        self.assertEqual(self.lifecycle.calls, [])
+
+    def test_owner_run_intentionally_clears_quarantine_after_marker_removal_even_if_lease_setup_fails(self):
+        self.store.set_quarantine(403, "workspace hook failed", "2026-08-25T10:00:00Z")
+        self.snapshot["issues"]["403"]["labels"] = ["symphony:quarantined"]
+        self.lifecycle.fail_on = "set_status"
+
+        with self.assertRaisesRegex(RuntimeError, "status unavailable"):
+            self.actions.execute("run", {"issue": 403})
+
+        self.assertIsNone(self.store.quarantine_for(403))
+        self.assertEqual(
+            self.lifecycle.calls,
+            [
+                ("remove_label", 403, "symphony:quarantined"),
+                ("set_status", 403, "Ready for AI"),
+            ],
+        )
 
     def test_lease_uses_cached_snapshot_while_owner_actions_require_fresh_state(self):
         snapshot_calls = []
@@ -161,6 +310,108 @@ class ActionServiceTest(unittest.TestCase):
                 ("add_label", 402, "symphony"),
             ],
         )
+
+    def test_internal_complete_run_moves_only_an_unleased_in_progress_issue_to_acceptance(self):
+        result = self.actions.execute_internal("complete_run", {"issue": 404})
+
+        self.assertEqual(
+            result,
+            {"status": "accepted", "action": "complete_run", "issue": 404},
+        )
+        self.assertEqual(
+            self.lifecycle.calls,
+            [("set_status", 404, "Ready for Acceptance")],
+        )
+
+    def test_internal_complete_run_is_idempotent_for_already_non_active_issue_states(self):
+        cases = [
+            ("ready", {"status": "Ready for AI"}),
+            ("closed", {"state": "CLOSED"}),
+        ]
+        for name, update in cases:
+            with self.subTest(name=name):
+                self.snapshot["issues"]["404"] = {
+                    "number": 404,
+                    "status": "In Progress",
+                    "state": "OPEN",
+                    "labels": [],
+                    **update,
+                }
+                self.lifecycle.calls.clear()
+                result = self.actions.execute_internal("complete_run", {"issue": 404})
+                self.assertEqual(result["status"], "accepted")
+                self.assertEqual(self.lifecycle.calls, [])
+
+        self.snapshot["issues"]["404"] = {
+            "number": 404,
+            "status": "In Progress",
+            "state": "UNKNOWN",
+            "labels": [],
+        }
+        with self.assertRaisesRegex(RetryableActionError, "issue state"):
+            self.actions.execute_internal("complete_run", {"issue": 404})
+
+        self.snapshot["issues"]["404"] = {
+            "number": 404,
+            "status": "In Progress",
+            "state": "OPEN",
+            "labels": [],
+        }
+        self.snapshot["issues"]["404"]["labels"] = ["Symphony"]
+        with self.assertRaisesRegex(RetryableActionError, "lease"):
+            self.actions.execute_internal("complete_run", {"issue": 404})
+        self.snapshot["issues"]["404"]["labels"] = []
+
+        for lane in ("running", "retrying", "blocked"):
+            with self.subTest(lane=lane):
+                self.snapshot[lane] = [{"issue_id": "404"}]
+                self.lifecycle.calls.clear()
+                with self.assertRaisesRegex(RetryableActionError, "runtime"):
+                    self.actions.execute_internal("complete_run", {"issue": 404})
+                self.assertEqual(self.lifecycle.calls, [])
+                self.snapshot[lane] = []
+
+        self.snapshot["running"] = [{}]
+        with self.assertRaisesRegex(RetryableActionError, "runtime"):
+            self.actions.execute_internal("complete_run", {"issue": 404})
+        self.snapshot["running"] = []
+
+        self.snapshot["running"] = [{"issue_id": "499"}]
+        self.actions.execute_internal("complete_run", {"issue": 404})
+        self.assertEqual(
+            self.lifecycle.calls,
+            [("set_status", 404, "Ready for Acceptance")],
+        )
+
+    def test_internal_complete_run_marks_unfresh_control_state_retryable(self):
+        self.snapshot["sources"]["runtime"] = {"status": "unavailable"}
+
+        with self.assertRaisesRegex(RetryableActionError, "fresh runtime"):
+            self.actions.execute_internal("complete_run", {"issue": 404})
+
+    def test_internal_quarantine_persists_across_owner_control_restart_before_releasing_lease(self):
+        result = self.actions.execute_internal(
+            "quarantine_before_run",
+            {"issue": 405, "reason": "\x1b[31mbranch\n mismatch\x00" + "x" * 1_000},
+        )
+
+        self.assertEqual(
+            result,
+            {"status": "accepted", "action": "quarantine_before_run", "issue": 405},
+        )
+        self.assertEqual(self.lifecycle.calls[0], ("remove_label", 405, "symphony"))
+        self.assertEqual(self.lifecycle.calls[1], ("add_label", 405, "symphony:quarantined"))
+        self.assertEqual(self.lifecycle.calls[2], ("set_status", 405, "Ready for AI"))
+        self.assertEqual(self.lifecycle.calls[3][0:2], ("comment", 405))
+        comment = self.lifecycle.calls[3][2]
+        self.assertNotRegex(comment, r"[\x00-\x1f\x7f-\x9f]")
+        self.assertLessEqual(len(comment), 512)
+        persisted = StateStore(self.state_path).quarantine_for(405)
+        self.assertEqual(persisted["issue"], 405)
+        self.assertTrue(persisted["reason"].startswith("branch mismatch"))
+        self.assertLessEqual(len(persisted["reason"].encode("utf-8")), 512)
+        self.assertNotRegex(persisted["reason"], r"[\x00-\x1f\x7f-\x9f]")
+        self.assertIn("quarantined_at", persisted)
 
     def test_accept_requires_ready_state_and_synced_test(self):
         self.actions.execute("accept", {"issue": 402})

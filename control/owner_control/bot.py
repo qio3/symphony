@@ -159,6 +159,7 @@ class NotificationPublisher:
                 **current_owner,
                 "blocked": previous_owner.get("blocked") or [],
                 "ready_for_acceptance": previous_owner.get("ready_for_acceptance") or [],
+                "system_quarantines": previous_owner.get("system_quarantines") or [],
             },
         }
 
@@ -178,6 +179,7 @@ class NotificationPublisher:
             "owner_view": {
                 "blocked": owner.get("blocked") or [],
                 "ready_for_acceptance": owner.get("ready_for_acceptance") or [],
+                "system_quarantines": owner.get("system_quarantines") or [],
             },
             "failures": snapshot.get("failures") or [],
         }

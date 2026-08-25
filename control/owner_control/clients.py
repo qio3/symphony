@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 
-JsonTransport = Callable[..., dict[str, Any]]
+JsonTransport = Callable[..., Any]
 
 
 def request_json(
@@ -19,7 +19,7 @@ def request_json(
     headers: dict[str, str] | None = None,
     body: dict[str, Any] | None = None,
     timeout: int = 10,
-) -> dict[str, Any]:
+) -> Any:
     request_headers = {"Accept": "application/json", **(headers or {})}
     data = None
     if body is not None:
@@ -40,8 +40,6 @@ def request_json(
         ):
             raise RuntimeError("GitHub API rate limit exhausted") from error
         raise RuntimeError(f"HTTP {error.code} from {host}") from error
-    if not isinstance(value, dict):
-        raise RuntimeError("JSON endpoint returned a non-object response")
     return value
 
 
@@ -51,7 +49,10 @@ class SymphonyClient:
         self._transport = transport
 
     def state(self) -> dict[str, Any]:
-        return self._transport("GET", self._url, timeout=5)
+        value = self._transport("GET", self._url, timeout=5)
+        if not isinstance(value, dict):
+            raise RuntimeError("Symphony state response must be a JSON object")
+        return value
 
 
 class TestEnvironmentClient:
@@ -68,6 +69,8 @@ class TestEnvironmentClient:
 
     def deployment(self) -> dict[str, Any]:
         health = self._transport("GET", self._health_url, timeout=10)
+        if not isinstance(health, dict):
+            raise RuntimeError("TEST health response must be a JSON object")
         sha = health.get("build_sha") or health.get("git_sha") or health.get("sha")
         return {"sha": sha, "url": self._environment_url, "health_url": self._health_url}
 
@@ -154,6 +157,15 @@ class GitHubClient:
     def add_label(self, issue: int, label: str) -> None:
         self._rest("POST", f"/repos/{self._repository}/issues/{issue}/labels", {"labels": [label]})
 
+    def remove_label(self, issue: int, label: str) -> None:
+        encoded_label = urllib.parse.quote(label, safe="")
+        self._transport(
+            "DELETE",
+            self._api_url + f"/repos/{self._repository}/issues/{issue}/labels/{encoded_label}",
+            headers=self._headers,
+            timeout=15,
+        )
+
     def comment(self, issue: int, body: str) -> None:
         self._rest("POST", f"/repos/{self._repository}/issues/{issue}/comments", {"body": body})
 
@@ -168,6 +180,8 @@ class GitHubClient:
             body={"query": query, "variables": variables, "operationName": operation_name},
             timeout=15,
         )
+        if not isinstance(value, dict):
+            raise RuntimeError("GitHub GraphQL response returned a non-object payload")
         errors = value.get("errors") or []
         if any(_is_graphql_rate_limit(error) for error in errors):
             raise RuntimeError("GitHub GraphQL rate limit exhausted")
@@ -175,13 +189,16 @@ class GitHubClient:
             raise RuntimeError("GitHub GraphQL request failed")
         return value
     def _rest(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self._transport(
+        value = self._transport(
             method,
             self._api_url + path,
             headers=self._headers,
             body=body,
             timeout=15,
         )
+        if not isinstance(value, dict):
+            raise RuntimeError("GitHub REST response returned a non-object payload")
+        return value
 
     def _remember_status_metadata(self, fields: dict[str, Any]) -> None:
         for field in fields.get("nodes") or []:

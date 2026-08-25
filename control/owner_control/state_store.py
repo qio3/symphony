@@ -20,6 +20,48 @@ class StateStore:
     def set_intake_active(self, active: bool) -> None:
         self.update({"intake_active": bool(active)})
 
+    def quarantines(self) -> dict[str, dict[str, Any]]:
+        value = self.read().get("system_quarantines")
+        return value if isinstance(value, dict) else {}
+
+    def quarantine_for(self, issue: int) -> dict[str, Any] | None:
+        if type(issue) is not int or issue <= 0:
+            return None
+        return self.quarantines().get(str(issue))
+
+    def set_quarantine(self, issue: int, reason: str, quarantined_at: str) -> None:
+        if type(issue) is not int or issue <= 0 or not isinstance(reason, str) or not reason or not isinstance(quarantined_at, str) or not quarantined_at:
+            raise ValueError("invalid system quarantine")
+
+        with self._lock:
+            state = self._read_unlocked()
+            quarantines = dict(self.quarantines_from(state))
+            quarantines[str(issue)] = {
+                "issue": issue,
+                "reason": reason,
+                "quarantined_at": quarantined_at,
+            }
+            state["system_quarantines"] = quarantines
+            self._write_unlocked(state)
+
+    def clear_quarantine(self, issue: int) -> None:
+        if type(issue) is not int or issue <= 0:
+            raise ValueError("quarantine issue must be a positive integer")
+
+        with self._lock:
+            state = self._read_unlocked()
+            quarantines = dict(self.quarantines_from(state))
+            if str(issue) not in quarantines:
+                return
+            quarantines.pop(str(issue), None)
+            state["system_quarantines"] = quarantines
+            self._write_unlocked(state)
+
+    @staticmethod
+    def quarantines_from(state: dict[str, Any]) -> dict[str, Any]:
+        value = state.get("system_quarantines")
+        return value if isinstance(value, dict) else {}
+
     def read(self) -> dict[str, Any]:
         with self._lock:
             return self._read_unlocked()

@@ -16,6 +16,8 @@ defmodule SymphonyElixir.Orchestrator do
   @capacity_retry_delay_ms 5_000
   @paused_retry_delay_ms 30_000
   @failure_retry_base_ms 10_000
+  @before_run_hook_output_max_bytes 512
+  @before_run_hook_output_truncation "... [truncated]"
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
   @account_rate_limit_refresh_ms 300_000
@@ -308,12 +310,125 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp handle_agent_down(
+         {:workspace_hook_failed, "before_run", status, output},
+         state,
+         issue_id,
+         running_entry,
+         session_id
+       )
+       when is_integer(status) and is_binary(output) do
+    error = "workspace before_run hook failed (exit #{status}): #{sanitize_before_run_hook_output(output)}"
+
+    Logger.warning(
+      "Agent task blocked after deterministic before_run hook failure for issue_id=#{issue_id} " <>
+        "session_id=#{session_id}: #{error}"
+    )
+
+    case quarantine_before_run_hook_failure(running_entry, error) do
+      :ok ->
+        release_issue_claim(state, issue_id)
+
+      {:error, reason} ->
+        Logger.warning("Could not persist deterministic before_run quarantine for issue_id=#{issue_id}: #{inspect(reason)}")
+
+        block_issue_from_entry(state, issue_id, running_entry, error)
+    end
+  end
+
   defp handle_agent_down(reason, state, issue_id, running_entry, session_id) do
     if input_required_blocker?(running_entry) do
       block_input_required_agent_down(state, issue_id, running_entry, session_id, reason)
     else
       retry_agent_down(state, issue_id, running_entry, session_id, reason)
     end
+  end
+
+  defp sanitize_before_run_hook_output(output) when is_binary(output) do
+    output
+    |> String.replace_invalid("�")
+    |> String.replace(~r/[\p{Cc}]/u, " ")
+    |> collapse_hook_output_whitespace()
+    |> trim_ascii_spaces()
+    |> truncate_before_run_hook_output()
+  end
+
+  defp quarantine_before_run_hook_failure(%{issue: %Issue{} = issue}, error) do
+    with true <- owner_control_enabled?(),
+         {:ok, issue_number} <- owner_control_issue_number(issue),
+         client <- Application.get_env(:symphony_elixir, :owner_control_client_module, OwnerControlClient),
+         true <- function_exported?(client, :quarantine_before_run, 2),
+         {:ok, _response} <- client.quarantine_before_run(issue_number, error) do
+      :ok
+    else
+      false -> {:error, :owner_control_quarantine_unavailable}
+      error -> {:error, error}
+    end
+  rescue
+    exception -> {:error, {:owner_control_quarantine_failed, Exception.message(exception)}}
+  catch
+    kind, reason -> {:error, {:owner_control_quarantine_failed, {kind, reason}}}
+  end
+
+  defp quarantine_before_run_hook_failure(_running_entry, _error),
+    do: {:error, :owner_control_issue_unavailable}
+
+  defp collapse_hook_output_whitespace(output) do
+    {chunks, _previous_space?} =
+      for <<byte <- output>>, reduce: {[], true} do
+        {chunks, previous_space?} when byte <= 32 or byte == 127 ->
+          if previous_space?, do: {chunks, true}, else: {[chunks, " "], true}
+
+        {chunks, _previous_space?} ->
+          {[chunks, <<byte>>], false}
+      end
+
+    IO.iodata_to_binary(chunks)
+  end
+
+  defp trim_ascii_spaces(<<" ", rest::binary>>), do: trim_ascii_spaces(rest)
+
+  defp trim_ascii_spaces(output) when byte_size(output) > 0 do
+    last_index = byte_size(output) - 1
+
+    if binary_part(output, last_index, 1) == " " do
+      output
+      |> binary_part(0, last_index)
+      |> trim_ascii_spaces()
+    else
+      output
+    end
+  end
+
+  defp trim_ascii_spaces(output), do: output
+
+  defp truncate_before_run_hook_output(output)
+       when byte_size(output) <= @before_run_hook_output_max_bytes,
+       do: output
+
+  defp truncate_before_run_hook_output(output) do
+    prefix_bytes = @before_run_hook_output_max_bytes - byte_size(@before_run_hook_output_truncation)
+
+    output
+    |> utf8_prefix_within_bytes(prefix_bytes)
+    |> Kernel.<>(@before_run_hook_output_truncation)
+  end
+
+  defp utf8_prefix_within_bytes(output, max_bytes) do
+    {chunks, _used_bytes} =
+      output
+      |> String.graphemes()
+      |> Enum.reduce_while({[], 0}, fn grapheme, {chunks, used_bytes} ->
+        grapheme_bytes = byte_size(grapheme)
+
+        if used_bytes + grapheme_bytes <= max_bytes do
+          {:cont, {[chunks, grapheme], used_bytes + grapheme_bytes}}
+        else
+          {:halt, {chunks, used_bytes}}
+        end
+      end)
+
+    IO.iodata_to_binary(chunks)
   end
 
   defp block_input_required_agent_down(state, issue_id, running_entry, session_id, reason) do
@@ -1238,6 +1353,7 @@ defmodule SymphonyElixir.Orchestrator do
          ) do
       :ok -> :ok
       {:model_exhausted, route, reason} -> exit({:model_exhausted, route, reason})
+      {:workspace_hook_failed, "before_run", _status, _output} = reason -> exit(reason)
     end
   end
 
@@ -1446,6 +1562,9 @@ defmodule SymphonyElixir.Orchestrator do
         cleanup_issue_workspace(issue, metadata)
         {:noreply, release_issue_claim(state, issue_id)}
 
+      normal_completion_postcondition_required?(issue, metadata) ->
+        handle_normal_completion_postcondition(state, issue, attempt, metadata)
+
       retry_candidate_issue?(issue, terminal_states) ->
         handle_active_retry(state, issue, attempt, metadata)
 
@@ -1459,6 +1578,65 @@ defmodule SymphonyElixir.Orchestrator do
   defp handle_retry_issue_lookup(nil, state, issue_id, _attempt, _metadata) do
     Logger.debug("Issue no longer visible, removing claim issue_id=#{issue_id}")
     {:noreply, release_issue_claim(state, issue_id)}
+  end
+
+  defp normal_completion_postcondition_required?(%Issue{} = issue, metadata) when is_map(metadata) do
+    Map.get(metadata, :delay_type) in [:continuation, :completion_postcondition] and
+      owner_control_enabled?() and !symphony_lease_present?(issue)
+  end
+
+  defp symphony_lease_present?(%Issue{labels: labels}) when is_list(labels) do
+    Enum.any?(labels, &(normalize_label(&1) == "symphony"))
+  end
+
+  defp symphony_lease_present?(_issue), do: false
+
+  defp handle_normal_completion_postcondition(state, issue, attempt, metadata) do
+    with {:ok, issue_number} <- owner_control_issue_number(issue),
+         client <- Application.get_env(:symphony_elixir, :owner_control_client_module, OwnerControlClient),
+         {:ok, _response} <- request_owner_control_complete_run(client, issue_number) do
+      Logger.info("Completed normal Symphony run in Owner Control: #{issue_context(issue)}")
+      {:noreply, release_issue_claim(state, issue.id)}
+    else
+      error -> retry_normal_completion_postcondition(state, issue, attempt, metadata, error)
+    end
+  end
+
+  defp owner_control_issue_number(%Issue{id: issue_id}) do
+    case Integer.parse(to_string(issue_id || "")) do
+      {issue_number, ""} when issue_number > 0 -> {:ok, issue_number}
+      _ -> {:error, :owner_control_issue_number_unavailable}
+    end
+  end
+
+  defp request_owner_control_complete_run(client, issue_number)
+       when is_atom(client) and is_integer(issue_number) and issue_number > 0 do
+    if function_exported?(client, :complete_run, 1) do
+      client.complete_run(issue_number)
+    else
+      {:error, :owner_control_complete_run_unavailable}
+    end
+  end
+
+  defp request_owner_control_complete_run(_client, _issue_number),
+    do: {:error, :owner_control_complete_run_unavailable}
+
+  defp retry_normal_completion_postcondition(state, issue, attempt, metadata, reason) do
+    Logger.warning("Normal completion postcondition unresolved for #{issue_context(issue)}: #{inspect(reason)}")
+
+    {:noreply,
+     schedule_issue_retry(
+       state,
+       issue.id,
+       attempt + 1,
+       Map.merge(metadata, %{
+         identifier: issue.identifier,
+         issue_url: issue.url,
+         error: "normal completion postcondition unresolved: #{inspect(reason)}",
+         delay_type: :completion_postcondition,
+         deferred_reason: nil
+       })
+     )}
   end
 
   defp cleanup_issue_workspace(identifier, worker_host \\ nil)
@@ -1698,11 +1876,23 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp fresh_ready_issue_numbers(snapshot) do
-    if fresh_owner_control_snapshot?(snapshot), do: ready_issue_numbers(snapshot), else: %{}
+    if fresh_owner_control_snapshot?(snapshot) do
+      snapshot
+      |> ready_issue_numbers()
+      |> drop_quarantined_issue_numbers(snapshot)
+    else
+      %{}
+    end
   end
 
   defp fresh_resumable_issue_numbers(snapshot) do
-    if fresh_owner_control_snapshot?(snapshot), do: project_issue_numbers(snapshot, "in progress"), else: %{}
+    if fresh_owner_control_snapshot?(snapshot) do
+      snapshot
+      |> project_issue_numbers("in progress")
+      |> drop_quarantined_issue_numbers(snapshot)
+    else
+      %{}
+    end
   end
 
   defp fresh_owner_control_snapshot?(snapshot) when is_map(snapshot) do
@@ -1732,6 +1922,17 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp project_issue_numbers(_snapshot, _expected_status), do: %{}
+
+  defp quarantined_issue_keys(%{quarantined: quarantines}) do
+    for %{issue: issue_number} <- List.wrap(quarantines),
+        is_integer(issue_number) and issue_number > 0,
+        do: Integer.to_string(issue_number)
+  end
+
+  defp quarantined_issue_keys(_snapshot), do: []
+
+  defp drop_quarantined_issue_numbers(issue_numbers, snapshot) when is_map(issue_numbers),
+    do: Map.drop(issue_numbers, quarantined_issue_keys(snapshot))
 
   defp acquire_owner_control_lease(
          %Issue{} = issue,
