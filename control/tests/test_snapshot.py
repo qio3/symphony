@@ -164,6 +164,7 @@ class SnapshotBuilderTest(unittest.TestCase):
                 "running": 1,
                 "queued": 0,
                 "blocked": 1,
+                "quarantined": 0,
                 "ready_for_acceptance": 1,
                 "done": 1,
             },
@@ -230,6 +231,52 @@ class SnapshotBuilderTest(unittest.TestCase):
             snapshot["owner_view"]["blocked"][0]["question"],
             "Should the migration preserve legacy IDs?",
         )
+
+    def test_projects_persisted_system_quarantine_without_inflating_owner_blocked(self):
+        snapshot = SnapshotBuilder().build(
+            service={"live": True},
+            intake_active=True,
+            worker_limit=2,
+            runtime={
+                "generated_at": "2026-08-25T10:00:00Z",
+                "running": [],
+                "retrying": [],
+                "blocked": [],
+                "codex_totals": {},
+                "rate_limits": None,
+            },
+            project={
+                "items": [
+                    {
+                        "number": 405,
+                        "title": "Hook failure",
+                        "url": "https://github.test/issues/405",
+                        "status": "Ready for AI",
+                        "state": "OPEN",
+                        "labels": ["symphony:quarantined"],
+                    }
+                ]
+            },
+            canonical={"sha": "aaaaaaaa11111111"},
+            test={"sha": "aaaaaaaa11111111", "url": "https://test.example"},
+            quarantines={
+                "405": {
+                    "issue": 405,
+                    "reason": "workspace before_run hook failed",
+                    "quarantined_at": "2026-08-25T10:00:00Z",
+                }
+            },
+        )
+
+        self.assertEqual(snapshot["counts"]["blocked"], 0)
+        self.assertEqual(snapshot["counts"]["quarantined"], 1)
+        self.assertEqual(snapshot["owner_view"]["blocked"], [])
+        self.assertEqual(snapshot["owner_view"]["backlog"], [])
+        quarantine = snapshot["owner_view"]["system_quarantines"][0]
+        self.assertEqual(quarantine["number"], 405)
+        self.assertEqual(quarantine["stage"], "System quarantine")
+        self.assertEqual(quarantine["reason"], "workspace before_run hook failed")
+        self.assertEqual(snapshot["quarantined"][0]["issue"], 405)
 
     def test_projects_runtime_model_routing_without_reclassifying_issues(self):
         model = {

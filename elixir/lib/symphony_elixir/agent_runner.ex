@@ -19,7 +19,10 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   @spec run(map(), pid() | nil, keyword()) ::
-          :ok | {:model_exhausted, ModelRouter.route(), atom()} | no_return()
+          :ok
+          | {:model_exhausted, ModelRouter.route(), atom()}
+          | {:workspace_hook_failed, String.t(), integer(), String.t()}
+          | no_return()
   def run(issue, codex_update_recipient \\ nil, opts \\ []) do
     # The orchestrator owns host retries so one worker lifetime never hops machines.
     worker_host = selected_worker_host(Keyword.get(opts, :worker_host), Config.settings!().worker.ssh_hosts)
@@ -31,6 +34,9 @@ defmodule SymphonyElixir.AgentRunner do
     case run_on_worker_host(issue, codex_update_recipient, opts, worker_host, model_route) do
       :ok ->
         :ok
+
+      {:error, {:workspace_hook_failed, "before_run", _status, _output} = reason} ->
+        reason
 
       {:error, reason} ->
         case {model_route, ModelRouter.exhaustion_reason(reason)} do

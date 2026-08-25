@@ -52,7 +52,7 @@ class TelegramCommandHandler:
             if command == "/ready":
                 return self._items("Ready", self._snapshot_provider(), "ready_for_acceptance")
             if command == "/blocked":
-                return self._items("Blocked", self._snapshot_provider(), "blocked", include_question=True)
+                return self._blocked(self._snapshot_provider())
             if command == "/backlog":
                 return self._items("Backlog", self._snapshot_provider(), "backlog")
             if command == "/logs":
@@ -108,6 +108,13 @@ class TelegramCommandHandler:
         else:
             service_text = "○ Down"
         test_suffix = " ✓" if test.get("synced") else " ⚠ drift"
+        attention_counts = [
+            f"Blocked: {counts.get('blocked', 0)}",
+        ]
+        quarantined = counts.get("quarantined", 0)
+        if isinstance(quarantined, int) and quarantined > 0:
+            attention_counts.append(f"Quarantined: {quarantined}")
+        attention_counts.append(f"Ready: {counts.get('ready_for_acceptance', 0)}")
         return "\n".join(
             [
                 f"Symphony {service_text}",
@@ -120,8 +127,7 @@ class TelegramCommandHandler:
                 f"Ready for AI: {counts.get('ready_for_ai', 0)}",
                 f"Running: {counts.get('running', 0)}",
                 f"Queued: {counts.get('queued', 0)}",
-                f"Blocked: {counts.get('blocked', 0)}",
-                f"Ready: {counts.get('ready_for_acceptance', 0)}",
+                *attention_counts,
                 "",
                 f"Canonical: {canonical}",
                 f"TEST: {_short_sha(test.get('sha'))}{test_suffix}",
@@ -144,6 +150,26 @@ class TelegramCommandHandler:
                 line += f"\nQuestion: {item['question']}"
             lines.append(line.strip())
         return "\n".join(lines)
+
+    @staticmethod
+    def _blocked(snapshot: dict[str, Any]) -> str:
+        owner = snapshot.get("owner_view") or {}
+        blocked = owner.get("blocked") or []
+        quarantines = owner.get("system_quarantines") or []
+        lines = [TelegramCommandHandler._items("Blocked", snapshot, "blocked", include_question=True)]
+        if quarantines:
+            lines.append(f"System quarantine: {len(quarantines)}")
+            for item in quarantines[:20]:
+                number = item.get("number") or item.get("issue_identifier") or "?"
+                issue = (
+                    f"#{number} {item.get('title') or ''}"
+                    if str(number).isdigit()
+                    else f"{number} {item.get('title') or ''}"
+                )
+                lines.append(
+                    f"{issue.strip()}\nReason: {item.get('reason') or 'unavailable'}"
+                )
+        return "\n".join(lines) if blocked or quarantines else "Blocked: none"
 
     @staticmethod
     def _issue_argument(value: str) -> int:
@@ -179,6 +205,7 @@ class NotificationDetector:
                 "owner_view": {
                     "blocked": current_owner.get("blocked") or [],
                     "ready_for_acceptance": current_owner.get("ready_for_acceptance") or [],
+                    "system_quarantines": current_owner.get("system_quarantines") or [],
                 },
                 "failures": [],
             }
@@ -193,6 +220,18 @@ class NotificationDetector:
             _number(item): _ready_sha(item, previous)
             for item in previous_owner.get("ready_for_acceptance", [])
         }
+        previous_quarantine_items = previous_owner.get("system_quarantines")
+        previous_quarantines = (
+            {
+                _number(item): item.get("reason") or "system quarantine"
+                for item in previous_quarantine_items
+            }
+            if isinstance(previous_quarantine_items, list)
+            else {
+                _number(item): item.get("reason") or "system quarantine"
+                for item in current_owner.get("system_quarantines", [])
+            }
+        )
 
         for item in current_owner.get("blocked", []):
             question = item.get("question") or item.get("reason") or "Owner input required"
@@ -219,6 +258,21 @@ class NotificationDetector:
                             f"TEST: {test.get('url') or 'not reported'}\n"
                             f"SHA: {_short_sha(test.get('sha'))}"
                         ),
+                    }
+                )
+
+        for item in current_owner.get("system_quarantines", []):
+            reason = item.get("reason") or "system quarantine"
+            if previous_quarantines.get(_number(item)) != reason:
+                events.append(
+                    {
+                        "kind": "system_quarantine",
+                        "fingerprint": f"quarantine:{_number(item)}:{reason}",
+                        "text": (
+                            f"System quarantine #{_number(item)}: {item.get('title') or ''}\n"
+                            f"Reason: {reason}\n"
+                            f"{item.get('issue_url') or ''}"
+                        ).strip(),
                     }
                 )
 

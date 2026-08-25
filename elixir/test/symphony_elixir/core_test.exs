@@ -1783,6 +1783,37 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "agent runner returns a deterministic before_run hook failure" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-before-run-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_before_run: "printf 'branch mismatch' >&2; exit 2"
+      )
+
+      issue = %Issue{
+        id: "issue-before-run",
+        identifier: "MT-BEFORE-RUN",
+        title: "Before run hook",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-BEFORE-RUN"
+      }
+
+      assert {:workspace_hook_failed, "before_run", 2, output} = AgentRunner.run(issue)
+      assert output =~ "branch mismatch"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "agent runner forwards timestamped codex updates to recipient" do
     test_root =
       Path.join(

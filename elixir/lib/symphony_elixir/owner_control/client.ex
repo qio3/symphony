@@ -19,7 +19,7 @@ defmodule SymphonyElixir.OwnerControl.Client do
     issue_id issue_url title stage state labels owner_question question project_item_id pr ci
     merged due_at last_message last_event last_event_at error attempt worker_host workspace_path
     session_id turn_count tokens health_url models model selected_tier actual_model routing_reason
-    escalated_from escalation_history luna terra sol completed from to
+    escalated_from escalation_history luna terra sol completed from to quarantined issue
   )a
   @key_lookup Map.new(@known_keys, &{Atom.to_string(&1), &1})
 
@@ -52,6 +52,21 @@ defmodule SymphonyElixir.OwnerControl.Client do
   end
 
   def action(_action, _params), do: {:error, :unsupported_action}
+
+  @spec complete_run(pos_integer()) :: {:ok, map()} | {:error, term()}
+  def complete_run(issue_number) when is_integer(issue_number) and issue_number > 0 do
+    internal_action("complete_run", %{issue: issue_number})
+  end
+
+  def complete_run(_issue_number), do: {:error, :invalid_issue_number}
+
+  @spec quarantine_before_run(pos_integer(), String.t()) :: {:ok, map()} | {:error, term()}
+  def quarantine_before_run(issue_number, reason)
+      when is_integer(issue_number) and issue_number > 0 and is_binary(reason) do
+    internal_action("quarantine_before_run", %{issue: issue_number, reason: reason})
+  end
+
+  def quarantine_before_run(_issue_number, _reason), do: {:error, :invalid_quarantine_request}
 
   @spec intake_active?() :: boolean()
   def intake_active? do
@@ -92,6 +107,14 @@ defmodule SymphonyElixir.OwnerControl.Client do
     exception -> {:error, {:owner_control_request_failed, Exception.message(exception)}}
   end
 
+  defp internal_action(action, params) do
+    case Config.owner_control_settings() do
+      {:ok, settings} -> request(:post, settings, "/v1/internal/actions/#{action}", params)
+      :disabled -> {:error, :owner_control_disabled}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp default_request(method, url, headers, body) do
     options = [
       method: method,
@@ -122,10 +145,23 @@ defmodule SymphonyElixir.OwnerControl.Client do
 
   defp decode_body(_body), do: {:error, :invalid_owner_control_payload}
 
-  defp decode_http_error(status, body) when status in [409, 503] do
+  defp decode_http_error(503, body) do
+    case decode_retryable_error(body) do
+      {:ok, message} ->
+        {:error, {:owner_control_retryable, message}}
+
+      :error ->
+        case decode_error_message(body) do
+          {:ok, message} -> {:error, {:owner_control_action_rejected, message}}
+          :error -> {:error, {:owner_control_http_error, 503}}
+        end
+    end
+  end
+
+  defp decode_http_error(409, body) do
     case decode_error_message(body) do
       {:ok, message} -> {:error, {:owner_control_action_rejected, message}}
-      :error -> {:error, {:owner_control_http_error, status}}
+      :error -> {:error, {:owner_control_http_error, 409}}
     end
   end
 
@@ -145,6 +181,23 @@ defmodule SymphonyElixir.OwnerControl.Client do
     do: {:ok, message}
 
   defp decode_error_message(_body), do: :error
+
+  defp decode_retryable_error(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, decoded} -> decode_retryable_error(decoded)
+      _error -> :error
+    end
+  end
+
+  defp decode_retryable_error(%{"error" => %{"code" => "retryable", "message" => message}})
+       when is_binary(message),
+       do: {:ok, message}
+
+  defp decode_retryable_error(%{error: %{code: "retryable", message: message}})
+       when is_binary(message),
+       do: {:ok, message}
+
+  defp decode_retryable_error(_body), do: :error
 
   defp normalize_keys(value) when is_list(value), do: Enum.map(value, &normalize_keys/1)
 

@@ -3,7 +3,13 @@ import unittest
 import urllib.error
 from unittest.mock import patch
 
-from owner_control.clients import GitHubClient, extract_owner_question, request_json
+from owner_control.clients import (
+    GitHubClient,
+    SymphonyClient,
+    TestEnvironmentClient,
+    extract_owner_question,
+    request_json,
+)
 
 
 class FakeTransport:
@@ -143,6 +149,28 @@ class GitHubClientTest(unittest.TestCase):
             },
         )
 
+    def test_remove_label_accepts_githubs_array_response(self):
+        transport = FakeTransport([[]])
+        client = GitHubClient(
+            token="token",
+            repository="qio3/zavod",
+            project_id="project-id",
+            transport=transport,
+        )
+
+        client.remove_label(401, "symphony")
+
+        self.assertEqual(
+            transport.calls,
+            [
+                (
+                    "DELETE",
+                    "https://api.github.com/repos/qio3/zavod/issues/401/labels/symphony",
+                    None,
+                )
+            ],
+        )
+
     def test_graphql_rate_limit_variant_is_owner_readable(self):
         transport = FakeTransport(
             [
@@ -188,6 +216,24 @@ class GitHubClientTest(unittest.TestCase):
     def test_extract_owner_question_requires_explicit_marker(self):
         self.assertEqual(extract_owner_question([{"body": "Вопрос владельцу: какой вариант?"}]), "какой вариант?")
         self.assertIsNone(extract_owner_question([{"body": "ordinary progress"}]))
+
+
+class RuntimeClientTest(unittest.TestCase):
+    def test_symphony_state_rejects_non_object_json(self):
+        client = SymphonyClient("http://127.0.0.1:4082", transport=FakeTransport([[]]))
+
+        with self.assertRaisesRegex(RuntimeError, "^Symphony state response must be a JSON object$"):
+            client.state()
+
+    def test_test_deployment_rejects_non_object_health_json(self):
+        client = TestEnvironmentClient(
+            "https://test.example/health",
+            "https://test.example",
+            transport=FakeTransport([[]]),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "^TEST health response must be a JSON object$"):
+            client.deployment()
 
 
 if __name__ == "__main__":

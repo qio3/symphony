@@ -37,6 +37,7 @@ def snapshot():
             "running": 1,
             "queued": 0,
             "blocked": 1,
+            "quarantined": 0,
             "ready_for_acceptance": 3,
             "done": 10,
         },
@@ -57,6 +58,7 @@ def snapshot():
             ],
             "ready_for_acceptance": [{"number": 402, "title": "Ready"}],
             "blocked": [{"number": 403, "title": "Blocked", "question": "Choose A or B?"}],
+            "system_quarantines": [],
             "backlog": [{"number": 404, "title": "Next", "stage": "Backlog"}],
         },
     }
@@ -92,7 +94,33 @@ class TelegramCommandHandlerTest(unittest.TestCase):
         self.assertIn("TEST: be44cf15 ✓", text)
         self.assertIn("Models: Luna 0 · Terra 1 · Sol 0", text)
         self.assertIn("Weekly: 42% used", text)
+        self.assertNotIn("Quarantined:", text)
         self.assertNotIn("tokens", text.casefold())
+
+    def test_status_and_blocked_keep_system_quarantine_separate_from_owner_blockers(self):
+        current = snapshot()
+        current["counts"]["quarantined"] = 1
+        current["owner_view"]["system_quarantines"] = [
+            {
+                "number": 405,
+                "title": "Quarantined work",
+                "reason": "workspace before_run hook failed",
+                "issue_url": "https://github.test/issues/405",
+            }
+        ]
+        handler = TelegramCommandHandler(
+            snapshot_provider=lambda: current,
+            action_service=self.actions,
+            logs_provider=lambda _tail: [],
+            ai=self.ai,
+        )
+
+        self.assertIn("Quarantined: 1", handler.handle("/status"))
+        blocked = handler.handle("/blocked")
+        self.assertIn("Blocked: 1", blocked)
+        self.assertIn("System quarantine: 1", blocked)
+        self.assertIn("#405 Quarantined work", blocked)
+        self.assertIn("Reason: workspace before_run hook failed", blocked)
 
     def test_status_does_not_report_down_when_supervisor_state_is_unknown(self):
         unknown = snapshot()
@@ -174,6 +202,14 @@ class NotificationDetectorTest(unittest.TestCase):
                 "unrecoverable": True,
             }
         ]
+        current["owner_view"]["system_quarantines"] = [
+            {
+                "number": 407,
+                "title": "Existing quarantine",
+                "reason": "already known before startup",
+                "issue_url": "https://github.test/issues/407",
+            }
+        ]
 
         events = NotificationDetector().detect(None, current)
 
@@ -181,6 +217,41 @@ class NotificationDetectorTest(unittest.TestCase):
             [event["kind"] for event in events],
             ["service_stopped", "systemic_failure"],
         )
+
+    def test_system_quarantine_notifies_on_new_reason_but_not_repeated_snapshot(self):
+        previous = snapshot()
+        current = snapshot()
+        current["owner_view"]["system_quarantines"] = [
+            {
+                "number": 407,
+                "title": "Quarantined work",
+                "reason": "workspace before_run hook failed",
+                "issue_url": "https://github.test/issues/407",
+            }
+        ]
+
+        events = NotificationDetector().detect(previous, current)
+
+        self.assertEqual([event["kind"] for event in events], ["system_quarantine"])
+        self.assertEqual(
+            events[0]["fingerprint"],
+            "quarantine:407:workspace before_run hook failed",
+        )
+        self.assertIn("System quarantine #407: Quarantined work", events[0]["text"])
+        self.assertIn("Reason: workspace before_run hook failed", events[0]["text"])
+        self.assertIn("https://github.test/issues/407", events[0]["text"])
+        self.assertEqual(NotificationDetector().detect(current, current), [])
+
+        changed = snapshot()
+        changed["owner_view"]["system_quarantines"] = [
+            {
+                **current["owner_view"]["system_quarantines"][0],
+                "reason": "workspace before_run hook failed again",
+            }
+        ]
+        changed_events = NotificationDetector().detect(current, changed)
+        self.assertEqual([event["kind"] for event in changed_events], ["system_quarantine"])
+        self.assertIn("failed again", changed_events[0]["text"])
 
     def test_emits_only_attention_transitions(self):
         previous = snapshot()

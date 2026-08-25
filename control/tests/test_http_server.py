@@ -11,12 +11,19 @@ from owner_control.http_server import create_server
 class FakeActions:
     def __init__(self):
         self.calls = []
+        self.internal_calls = []
         self.error = None
 
     def execute(self, action, params):
         if self.error is not None:
             raise self.error
         self.calls.append((action, params))
+        return {"status": "accepted", "action": action}
+
+    def execute_internal(self, action, params):
+        if self.error is not None:
+            raise self.error
+        self.internal_calls.append((action, params))
         return {"status": "accepted", "action": action}
 
 
@@ -121,6 +128,20 @@ class ControlHttpServerTest(unittest.TestCase):
             css,
         )
 
+    def test_needs_owner_distinguishes_system_quarantine_from_owner_questions(self):
+        with self.request("/assets/owner-control.js", authorized=False) as response:
+            javascript = response.read().decode("utf-8")
+        with self.request("/assets/owner-control.css", authorized=False) as response:
+            css = response.read().decode("utf-8")
+
+        blocked_renderer = javascript.split("function renderBlocked", 1)[1].split(
+            "function renderRunning", 1
+        )[0]
+        self.assertIn("system_quarantines", blocked_renderer)
+        self.assertIn('"System quarantine"', blocked_renderer)
+        self.assertIn('actionButton("Start", "run"', blocked_renderer)
+        self.assertIn(".issue-card.quarantine", css)
+
     def test_browser_snapshot_and_actions_require_same_origin_csrf(self):
         _html, csrf, _headers = self.browser_session()
         with self.assertRaises(urllib.error.HTTPError) as raised:
@@ -168,6 +189,41 @@ class ControlHttpServerTest(unittest.TestCase):
             self.request("/v1/actions/shell", method="POST", body={"command": "whoami"})
         self.assertEqual(raised.exception.code, 404)
 
+    def test_internal_runtime_actions_are_bearer_only_and_not_public_or_browser_routes(self):
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.request("/v1/actions/complete_run", method="POST", body={"issue": 401})
+        self.assertEqual(raised.exception.code, 404)
+
+        _html, csrf, _headers = self.browser_session()
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.request(
+                "/ui/actions/complete_run",
+                method="POST",
+                body={"issue": 401},
+                authorized=False,
+                headers={"Origin": self.base_url, "X-Owner-Control-CSRF": csrf},
+            )
+        self.assertEqual(raised.exception.code, 404)
+
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.request(
+                "/v1/internal/actions/complete_run",
+                method="POST",
+                body={"issue": 401},
+                authorized=False,
+            )
+        self.assertEqual(raised.exception.code, 401)
+
+        with self.request(
+            "/v1/internal/actions/complete_run",
+            method="POST",
+            body={"issue": 401},
+        ) as response:
+            self.assertEqual(json.load(response)["action"], "complete_run")
+
+        self.assertEqual(self.actions.calls, [])
+        self.assertEqual(self.actions.internal_calls, [("complete_run", {"issue": 401})])
+
     def test_exposes_service_actions_and_action_rejections(self):
         with self.request("/v1/actions/start_service", method="POST", body={}) as response:
             self.assertEqual(json.load(response)["action"], "start_service")
@@ -183,6 +239,23 @@ class ControlHttpServerTest(unittest.TestCase):
         self.assertEqual(
             json.load(raised.exception)["error"]["code"],
             "action_rejected",
+        )
+
+    def test_internal_retryable_actions_have_a_typed_service_response(self):
+        from owner_control.actions import RetryableActionError
+
+        self.actions.error = RetryableActionError("runtime is still active")
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.request(
+                "/v1/internal/actions/complete_run",
+                method="POST",
+                body={"issue": 401},
+            )
+
+        self.assertEqual(raised.exception.code, 503)
+        self.assertEqual(
+            json.load(raised.exception)["error"],
+            {"code": "retryable", "message": "runtime is still active"},
         )
 
     def test_logs_tail_is_numeric_and_bounded(self):

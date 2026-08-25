@@ -52,7 +52,11 @@ def base_snapshot():
     return {
         "service": {"live": True},
         "sources": {"runtime": {"status": "fresh"}},
-        "owner_view": {"blocked": [], "ready_for_acceptance": []},
+        "owner_view": {
+            "blocked": [],
+            "ready_for_acceptance": [],
+            "system_quarantines": [],
+        },
         "failures": [],
     }
 
@@ -115,7 +119,8 @@ class NotificationPublisherTest(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
-        self.store = StateStore(Path(self.tempdir.name) / "state.json")
+        self.state_path = Path(self.tempdir.name) / "state.json"
+        self.store = StateStore(self.state_path)
         self.api = FakeTelegramApi()
         self.publisher = NotificationPublisher(
             api=self.api,
@@ -225,6 +230,68 @@ class NotificationPublisherTest(unittest.TestCase):
             {"number": 401, "title": "Already ready", "test": {"sha": "abc12345"}}
         ]
 
+        self.publisher.publish(transient)
+        self.publisher.publish(healthy)
+
+        self.assertEqual(self.api.sent, [])
+
+    def test_system_quarantine_alert_is_once_per_reason_across_owner_control_restart(self):
+        self.publisher.publish(base_snapshot())
+        quarantined = base_snapshot()
+        quarantined["owner_view"]["system_quarantines"] = [
+            {
+                "number": 407,
+                "title": "Quarantined work",
+                "reason": "workspace before_run hook failed",
+                "issue_url": "https://github.test/issues/407",
+            }
+        ]
+
+        self.publisher.publish(quarantined)
+        self.publisher.publish(quarantined)
+        restarted = NotificationPublisher(
+            api=self.api,
+            state_store=StateStore(self.state_path),
+            detector=NotificationDetector(),
+        )
+        restarted.publish(quarantined)
+
+        self.assertEqual(len(self.api.sent), 1)
+        self.assertIn("System quarantine #407: Quarantined work", self.api.sent[0])
+        self.assertIn("Reason: workspace before_run hook failed", self.api.sent[0])
+        self.assertIn("https://github.test/issues/407", self.api.sent[0])
+
+        changed_reason = base_snapshot()
+        changed_reason["owner_view"]["system_quarantines"] = [
+            {
+                **quarantined["owner_view"]["system_quarantines"][0],
+                "reason": "workspace before_run hook failed again",
+            }
+        ]
+        restarted.publish(changed_reason)
+        self.assertEqual(len(self.api.sent), 2)
+        self.assertIn("failed again", self.api.sent[1])
+
+    def test_github_outage_preserves_system_quarantine_notification_baseline(self):
+        healthy = base_snapshot()
+        healthy["owner_view"]["system_quarantines"] = [
+            {
+                "number": 408,
+                "title": "Existing quarantine",
+                "reason": "workspace before_run hook failed",
+                "issue_url": "https://github.test/issues/408",
+            }
+        ]
+        self.publisher.publish(healthy)
+
+        transient = base_snapshot()
+        transient["failures"] = [
+            {
+                "fingerprint": "github:RuntimeError:transient",
+                "message": "github snapshot unavailable",
+                "unrecoverable": False,
+            }
+        ]
         self.publisher.publish(transient)
         self.publisher.publish(healthy)
 

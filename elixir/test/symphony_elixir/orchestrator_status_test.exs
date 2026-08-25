@@ -1,6 +1,17 @@
 defmodule SymphonyElixir.OrchestratorStatusTest do
   use SymphonyElixir.TestSupport
 
+  defmodule BeforeRunQuarantineControl do
+    def quarantine_before_run(issue_number, reason) do
+      send(
+        Application.fetch_env!(:symphony_elixir, :before_run_quarantine_test_pid),
+        {:before_run_quarantine, issue_number, reason}
+      )
+
+      {:ok, %{status: "accepted"}}
+    end
+  end
+
   test "snapshot returns :timeout when snapshot server is unresponsive" do
     server_name = Module.concat(__MODULE__, :UnresponsiveSnapshotServer)
     parent = self()
@@ -1700,6 +1711,293 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
              identifier: "MT-INPUT",
              error: "codex turn requires operator input"
            } = state.blocked[issue_id]
+  end
+
+  test "orchestrator blocks deterministic before_run hook failures without a retry" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue_id = "issue-before-run-hook"
+    orchestrator_name = Module.concat(__MODULE__, :BeforeRunHookBlockOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    ref = make_ref()
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-BEFORE-RUN",
+      issue: %Issue{
+        id: issue_id,
+        identifier: "MT-BEFORE-RUN",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-BEFORE-RUN",
+        dispatchable: true
+      },
+      worker_host: "worker-a",
+      workspace_path: "/workspaces/MT-BEFORE-RUN",
+      session_id: "thread-before-run",
+      started_at: DateTime.utc_now()
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [running_entry.issue])
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    failure =
+      {:workspace_hook_failed, "before_run", 2,
+       String.duplicate("x", 490) <>
+         "при" <>
+         "💥" <>
+         String.duplicate(" y", 20) <>
+         <<0xC2, 0x9B>> <>
+         <<0xFF>> <>
+         <<0>>}
+
+    send(pid, {:DOWN, ref, :process, self(), failure})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    assert MapSet.member?(state.claimed, issue_id)
+
+    assert %{identifier: "MT-BEFORE-RUN", error: error, worker_host: "worker-a", workspace_path: "/workspaces/MT-BEFORE-RUN"} =
+             state.blocked[issue_id]
+
+    error_prefix = "workspace before_run hook failed (exit 2): "
+    sanitized_output = String.replace_prefix(error, error_prefix, "")
+
+    assert error =~ error_prefix <> String.duplicate("x", 20)
+    assert error =~ "при"
+    assert error =~ "... [truncated]"
+    refute error =~ "\n"
+    refute error =~ "\r"
+    refute error =~ "\t"
+    refute error =~ <<0>>
+    refute error =~ <<0xC2, 0x9B>>
+    refute error =~ <<0xFF>>
+    assert String.valid?(error)
+    assert byte_size(sanitized_output) <= 512
+  end
+
+  test "orchestrator persists deterministic before_run failures through owner control before blocking" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    previous_client = Application.get_env(:symphony_elixir, :owner_control_client_module)
+    previous_pid = Application.get_env(:symphony_elixir, :before_run_quarantine_test_pid)
+    Application.put_env(:symphony_elixir, :owner_control_client_module, BeforeRunQuarantineControl)
+    Application.put_env(:symphony_elixir, :before_run_quarantine_test_pid, self())
+
+    on_exit(fn ->
+      if is_nil(previous_client),
+        do: Application.delete_env(:symphony_elixir, :owner_control_client_module),
+        else: Application.put_env(:symphony_elixir, :owner_control_client_module, previous_client)
+
+      if is_nil(previous_pid),
+        do: Application.delete_env(:symphony_elixir, :before_run_quarantine_test_pid),
+        else: Application.put_env(:symphony_elixir, :before_run_quarantine_test_pid, previous_pid)
+    end)
+
+    issue_id = "404"
+    orchestrator_name = Module.concat(__MODULE__, :BeforeRunOwnerControlQuarantineOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    ref = make_ref()
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "GH-404",
+      state: "In Progress",
+      url: "https://example.org/issues/404",
+      labels: ["symphony"],
+      dispatchable: true
+    }
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: "thread-before-run-quarantine",
+      started_at: DateTime.utc_now()
+    }
+
+    initial_state = :sys.get_state(pid)
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), {:workspace_hook_failed, "before_run", 2, "bad branch\n"}})
+
+    assert_receive {:before_run_quarantine, 404, reason}, 1_000
+    assert reason == "workspace before_run hook failed (exit 2): bad branch"
+
+    state = :sys.get_state(pid)
+    refute Map.has_key?(state.blocked, issue_id)
+    refute MapSet.member?(state.claimed, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+  end
+
+  test "orchestrator blocks a real before_run task failure without retrying" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-before-run-task-#{System.unique_integer([:positive])}")
+    workspace_root = Path.join(test_root, "workspaces")
+    issue = %Issue{id: "before-run-task", identifier: "MT-BEFORE-RUN-TASK", title: "Before run task", state: "In Progress", url: "https://example.org/issues/MT-BEFORE-RUN-TASK", dispatchable: true}
+    orchestrator_name = Module.concat(__MODULE__, "BeforeRunTaskOrchestrator#{System.unique_integer([:positive])}")
+
+    try do
+      File.mkdir_p!(workspace_root)
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        tracker_active_states: ["In Progress"],
+        max_concurrent_agents: 1,
+        poll_interval_ms: 60_000,
+        hook_before_run: "printf 'branch mismatch' >&2; exit 2"
+      )
+
+      {:ok, task_supervisor} = Task.Supervisor.start_link()
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name, task_supervisor: task_supervisor)
+      Process.unlink(pid)
+      Process.unlink(task_supervisor)
+
+      assert wait_until(
+               fn ->
+                 state = :sys.get_state(pid)
+                 Map.has_key?(state.blocked, issue.id)
+               end,
+               2_000
+             )
+
+      state = :sys.get_state(pid)
+      refute Map.has_key?(state.running, issue.id)
+      refute Map.has_key?(state.retry_attempts, issue.id)
+      assert MapSet.member?(state.claimed, issue.id)
+      assert state.blocked[issue.id].error =~ "workspace before_run hook failed (exit 2): branch mismatch"
+    after
+      if Process.whereis(orchestrator_name), do: GenServer.stop(orchestrator_name)
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "orchestrator keeps before_run hook timeouts retryable" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-before-run-timeout-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+
+    issue = %Issue{
+      id: "before-run-timeout",
+      identifier: "MT-BEFORE-RUN-TIMEOUT",
+      title: "Before run timeout",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-BEFORE-RUN-TIMEOUT",
+      dispatchable: true
+    }
+
+    orchestrator_name =
+      Module.concat(__MODULE__, "BeforeRunTimeoutOrchestrator#{System.unique_integer([:positive])}")
+
+    try do
+      File.mkdir_p!(workspace_root)
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        tracker_active_states: ["In Progress"],
+        max_concurrent_agents: 1,
+        poll_interval_ms: 60_000,
+        hook_before_run: "sleep 1",
+        hook_timeout_ms: 10
+      )
+
+      {:ok, task_supervisor} = Task.Supervisor.start_link()
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name, task_supervisor: task_supervisor)
+      Process.unlink(pid)
+      Process.unlink(task_supervisor)
+
+      assert wait_until(
+               fn ->
+                 state = :sys.get_state(pid)
+                 Map.has_key?(state.retry_attempts, issue.id)
+               end,
+               2_000
+             )
+
+      state = :sys.get_state(pid)
+      assert %{error: error} = state.retry_attempts[issue.id]
+      assert error =~ "workspace_hook_timeout"
+      refute Map.has_key?(state.blocked, issue.id)
+    after
+      if Process.whereis(orchestrator_name), do: GenServer.stop(orchestrator_name)
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "orchestrator keeps after_create task failures retryable" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-after-create-task-#{System.unique_integer([:positive])}")
+    workspace_root = Path.join(test_root, "workspaces")
+
+    issue = %Issue{
+      id: "after-create-task",
+      identifier: "MT-AFTER-CREATE-TASK",
+      title: "After create task",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-AFTER-CREATE-TASK",
+      dispatchable: true
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, "AfterCreateTaskOrchestrator#{System.unique_integer([:positive])}")
+
+    try do
+      File.mkdir_p!(workspace_root)
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        tracker_active_states: ["In Progress"],
+        max_concurrent_agents: 1,
+        poll_interval_ms: 60_000,
+        hook_after_create: "printf 'bootstrap unavailable' >&2; exit 17"
+      )
+
+      {:ok, task_supervisor} = Task.Supervisor.start_link()
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name, task_supervisor: task_supervisor)
+      Process.unlink(pid)
+      Process.unlink(task_supervisor)
+
+      assert wait_until(fn -> Map.has_key?(:sys.get_state(pid).retry_attempts, issue.id) end, 2_000)
+
+      state = :sys.get_state(pid)
+      assert %{error: error} = state.retry_attempts[issue.id]
+      assert error =~ "workspace_hook_failed"
+      refute Map.has_key?(state.blocked, issue.id)
+    after
+      if Process.whereis(orchestrator_name), do: GenServer.stop(orchestrator_name)
+      File.rm_rf(test_root)
+    end
   end
 
   test "orchestrator blocks normal worker exits after input required completion" do
