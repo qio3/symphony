@@ -28,7 +28,9 @@ _INTERNAL_ACTIONS = {"complete_run", "quarantine_before_run"}
 _MAX_BODY_BYTES = 16_384
 _ASSET_ROOT = Path(__file__).with_name("web")
 _ASSETS = {
+    "/assets/theme-init.js": ("theme-init.js", "text/javascript; charset=utf-8"),
     "/assets/owner-control.css": ("owner-control.css", "text/css; charset=utf-8"),
+    "/assets/chart.umd.min.js": ("chart.umd.min.js", "text/javascript; charset=utf-8"),
     "/assets/owner-control.js": ("owner-control.js", "text/javascript; charset=utf-8"),
 }
 _CSP = (
