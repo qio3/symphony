@@ -498,6 +498,7 @@ defmodule SymphonyElixir.Orchestrator do
       active_state_set(),
       terminal_state_set(),
       owner_control_intake_active?(),
+      :owner_control_disabled,
       :owner_control_disabled
     )
   end
@@ -919,7 +920,7 @@ defmodule SymphonyElixir.Orchestrator do
     owner_control = owner_control_dispatch_context()
 
     issues
-    |> sort_issues_for_dispatch()
+    |> sort_issues_for_dispatch(owner_control.resumable_issue_numbers)
     |> Enum.reduce(state, fn issue, state_acc ->
       maybe_dispatch_issue(
         issue,
@@ -939,27 +940,38 @@ defmodule SymphonyElixir.Orchestrator do
              active_states,
              terminal_states,
              owner_control.intake_active,
-             owner_control.ready_issue_numbers
+             owner_control.ready_issue_numbers,
+             owner_control.resumable_issue_numbers
            ),
-         :ok <- acquire_owner_control_lease(issue, owner_control.ready_issue_numbers) do
+         :ok <-
+           acquire_owner_control_lease(
+             issue,
+             owner_control.ready_issue_numbers,
+             owner_control.resumable_issue_numbers
+           ) do
       dispatch_issue(state, issue)
     else
       _not_dispatchable -> state
     end
   end
 
-  defp sort_issues_for_dispatch(issues) when is_list(issues) do
+  defp sort_issues_for_dispatch(issues, resumable_issue_numbers \\ %{}) when is_list(issues) do
     Enum.sort_by(issues, fn
       %Issue{} = issue ->
         {
+          resumable_issue_rank(issue, resumable_issue_numbers),
           priority_rank(issue.priority),
           issue_created_at_sort_key(issue),
           issue.identifier || issue.id || ""
         }
 
       _ ->
-        {priority_rank(nil), issue_created_at_sort_key(nil), ""}
+        {1, priority_rank(nil), issue_created_at_sort_key(nil), ""}
     end)
+  end
+
+  defp resumable_issue_rank(issue, resumable_issue_numbers) do
+    if resumable_issue?(issue, resumable_issue_numbers), do: 0, else: 1
   end
 
   defp priority_rank(priority) when is_integer(priority) and priority in 1..4, do: priority
@@ -978,10 +990,17 @@ defmodule SymphonyElixir.Orchestrator do
          active_states,
          terminal_states,
          intake_active,
-         ready_issue_numbers
+         ready_issue_numbers,
+         resumable_issue_numbers
        ) do
     intake_active and
-      candidate_issue?(issue, active_states, terminal_states, ready_issue_numbers) and
+      candidate_issue?(
+        issue,
+        active_states,
+        terminal_states,
+        ready_issue_numbers,
+        resumable_issue_numbers
+      ) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
       !Map.has_key?(blocked, issue.id) and
@@ -996,7 +1015,8 @@ defmodule SymphonyElixir.Orchestrator do
          _active_states,
          _terminal_states,
          _intake_active,
-         _ready_issue_numbers
+         _ready_issue_numbers,
+         _resumable_issue_numbers
        ),
        do: false
 
@@ -1029,25 +1049,45 @@ defmodule SymphonyElixir.Orchestrator do
          } = issue,
          active_states,
          terminal_states,
-         ready_issue_numbers
+         ready_issue_numbers,
+         resumable_issue_numbers
        )
        when is_binary(id) and is_binary(identifier) and is_binary(title) and is_binary(state_name) do
     Enum.all?([id, identifier, title, state_name], &present_string?/1) and
-      issue_dispatch_routable?(issue, ready_issue_numbers) and
+      issue_dispatch_routable?(issue, ready_issue_numbers, resumable_issue_numbers) and
       active_issue_state?(state_name, active_states) and
       !terminal_issue_state?(state_name, terminal_states)
   end
 
-  defp candidate_issue?(_issue, _active_states, _terminal_states, _ready_issue_numbers), do: false
+  defp candidate_issue?(
+         _issue,
+         _active_states,
+         _terminal_states,
+         _ready_issue_numbers,
+         _resumable_issue_numbers
+       ),
+       do: false
 
-  defp issue_dispatch_routable?(%Issue{} = issue, ready_issue_numbers)
-       when is_map(ready_issue_numbers) do
-    Map.has_key?(ready_issue_numbers, issue.id) and
-      (issue_routable?(issue) or issue_routable_without_owner_lease?(issue))
+  defp issue_dispatch_routable?(%Issue{} = issue, ready_issue_numbers, resumable_issue_numbers)
+       when is_map(ready_issue_numbers) and is_map(resumable_issue_numbers) do
+    (Map.has_key?(ready_issue_numbers, issue.id) and
+       (issue_routable?(issue) or issue_routable_without_owner_lease?(issue))) or
+      resumable_issue?(issue, resumable_issue_numbers)
   end
 
-  defp issue_dispatch_routable?(%Issue{} = issue, :owner_control_disabled),
-    do: issue_routable?(issue)
+  defp issue_dispatch_routable?(
+         %Issue{} = issue,
+         :owner_control_disabled,
+         :owner_control_disabled
+       ),
+       do: issue_routable?(issue)
+
+  defp resumable_issue?(%Issue{} = issue, resumable_issue_numbers)
+       when is_map(resumable_issue_numbers) do
+    Map.has_key?(resumable_issue_numbers, issue.id) and issue_routable?(issue)
+  end
+
+  defp resumable_issue?(_issue, _resumable_issue_numbers), do: false
 
   defp issue_routable_without_owner_lease?(%Issue{} = issue) do
     required_labels = Config.settings!().tracker.required_labels
@@ -1627,7 +1667,8 @@ defmodule SymphonyElixir.Orchestrator do
       {:ok, snapshot} when is_map(snapshot) ->
         %{
           intake_active: true,
-          ready_issue_numbers: fresh_ready_issue_numbers(snapshot)
+          ready_issue_numbers: fresh_ready_issue_numbers(snapshot),
+          resumable_issue_numbers: fresh_resumable_issue_numbers(snapshot)
         }
 
       _disabled_or_unavailable ->
@@ -1638,14 +1679,16 @@ defmodule SymphonyElixir.Orchestrator do
   defp empty_owner_control_dispatch_context(intake_active) do
     %{
       intake_active: intake_active,
-      ready_issue_numbers: %{}
+      ready_issue_numbers: %{},
+      resumable_issue_numbers: %{}
     }
   end
 
   defp legacy_owner_control_dispatch_context do
     %{
       intake_active: true,
-      ready_issue_numbers: :owner_control_disabled
+      ready_issue_numbers: :owner_control_disabled,
+      resumable_issue_numbers: :owner_control_disabled
     }
   end
 
@@ -1656,6 +1699,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp fresh_ready_issue_numbers(snapshot) do
     if fresh_owner_control_snapshot?(snapshot), do: ready_issue_numbers(snapshot), else: %{}
+  end
+
+  defp fresh_resumable_issue_numbers(snapshot) do
+    if fresh_owner_control_snapshot?(snapshot), do: project_issue_numbers(snapshot, "in progress"), else: %{}
   end
 
   defp fresh_owner_control_snapshot?(snapshot) when is_map(snapshot) do
@@ -1686,11 +1733,19 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp project_issue_numbers(_snapshot, _expected_status), do: %{}
 
-  defp acquire_owner_control_lease(%Issue{} = issue, ready_issue_numbers)
-       when is_map(ready_issue_numbers) do
+  defp acquire_owner_control_lease(
+         %Issue{} = issue,
+         ready_issue_numbers,
+         resumable_issue_numbers
+       )
+       when is_map(ready_issue_numbers) and is_map(resumable_issue_numbers) do
     case owner_control_intake_active?() do
       true ->
-        acquire_owner_control_lease_while_active(issue, ready_issue_numbers)
+        acquire_owner_control_lease_while_active(
+          issue,
+          ready_issue_numbers,
+          resumable_issue_numbers
+        )
 
       false ->
         Logger.info("Skipping dispatch while Owner Control intake is paused for #{issue_context(issue)}")
@@ -1708,10 +1763,23 @@ defmodule SymphonyElixir.Orchestrator do
       {:error, {kind, reason}}
   end
 
-  defp acquire_owner_control_lease(%Issue{}, :owner_control_disabled), do: :ok
+  defp acquire_owner_control_lease(
+         %Issue{},
+         :owner_control_disabled,
+         :owner_control_disabled
+       ),
+       do: :ok
 
-  defp acquire_owner_control_lease_while_active(%Issue{} = issue, ready_issue_numbers) do
-    request_owner_control_lease(issue, ready_issue_numbers)
+  defp acquire_owner_control_lease_while_active(
+         %Issue{} = issue,
+         ready_issue_numbers,
+         resumable_issue_numbers
+       ) do
+    if resumable_issue?(issue, resumable_issue_numbers) do
+      :ok
+    else
+      request_owner_control_lease(issue, ready_issue_numbers)
+    end
   end
 
   defp request_owner_control_lease(%Issue{} = issue, ready_issue_numbers) do
@@ -2504,7 +2572,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_candidate_issue?(%Issue{} = issue, terminal_states) do
-    candidate_issue?(issue, active_state_set(), terminal_states, :owner_control_disabled)
+    candidate_issue?(
+      issue,
+      active_state_set(),
+      terminal_states,
+      :owner_control_disabled,
+      :owner_control_disabled
+    )
   end
 
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do

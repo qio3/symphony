@@ -656,18 +656,56 @@ defmodule SymphonyElixir.OwnerControlTest do
     refute_receive {:owner_control_action, ^cycle_ref, :lease, _params}, 100
   end
 
-  test "labeled Project In Progress issues are not inferred to be runtime work" do
-    issue = %{dispatch_issue(410) | labels: ["symphony"]}
-    snapshot = dispatch_snapshot([%{number: 410, status: "In Progress", state: "OPEN"}])
+  test "leased Project In Progress work resumes before new Ready for AI work after runtime state loss" do
+    ready_issue = dispatch_issue(410)
+    resumable_issue = %{dispatch_issue(499) | labels: ["symphony"]}
+
+    snapshot =
+      dispatch_snapshot([
+        %{number: 410, status: "Ready for AI", state: "OPEN"},
+        %{number: 499, status: "In Progress", state: "OPEN"}
+      ])
 
     {pid, task_supervisor, cycle_ref, test_root} =
-      start_dispatch_cycle([issue], snapshot, {:ok, %{status: "accepted"}})
+      start_dispatch_cycle(
+        [ready_issue, resumable_issue],
+        snapshot,
+        {:ok, %{status: "accepted"}},
+        max_concurrent_agents: 1
+      )
 
     on_exit(fn -> stop_dispatch_cycle(pid, task_supervisor, test_root) end)
 
     assert_receive {:owner_control_snapshot, ^cycle_ref}, 1_000
-    assert :sys.get_state(pid).running == %{}
+    assert eventually(fn -> Map.has_key?(:sys.get_state(pid).running, "499") end)
+    refute Map.has_key?(:sys.get_state(pid).running, "410")
     refute_receive {:owner_control_action, ^cycle_ref, :lease, _params}, 100
+  end
+
+  test "unleased or stale Project In Progress work remains fail-closed" do
+    unleased_snapshot = dispatch_snapshot([%{number: 411, status: "In Progress", state: "OPEN"}])
+
+    stale_snapshot =
+      dispatch_snapshot([%{number: 412, status: "In Progress", state: "OPEN"}], stale: true)
+
+    cases = [
+      {:unleased, dispatch_issue(411), unleased_snapshot},
+      {:stale, %{dispatch_issue(412) | labels: ["symphony"]}, stale_snapshot}
+    ]
+
+    Enum.each(cases, fn {case_name, issue, snapshot} ->
+      {pid, task_supervisor, cycle_ref, test_root} =
+        start_dispatch_cycle([issue], snapshot, {:ok, %{status: "accepted"}})
+
+      assert_receive {:owner_control_snapshot, ^cycle_ref}, 1_000, "missing snapshot for #{case_name}"
+      assert :sys.get_state(pid).running == %{}
+
+      refute_receive {:owner_control_action, ^cycle_ref, :lease, _params},
+                     25,
+                     "unexpected lease for #{case_name}"
+
+      stop_dispatch_cycle(pid, task_supervisor, test_root)
+    end)
   end
 
   test "unleased issues fail closed outside a fresh active Ready for AI snapshot" do
