@@ -291,6 +291,82 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            }
   end
 
+  test "plain-text codex payload does not crash usage integration" do
+    issue_id = "issue-plain-text-update"
+    orchestrator_name = Module.concat(__MODULE__, :PlainTextUpdateOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    initial_state = :sys.get_state(pid)
+    now = DateTime.utc_now()
+
+    running_entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: "MT-TEXT",
+      issue: %Issue{id: issue_id, identifier: "MT-TEXT", state: "In Progress"},
+      session_id: "thread-plain-text-turn-1",
+      turn_count: 1,
+      started_at: now
+    }
+
+    :sys.replace_state(pid, fn state ->
+      %{
+        state
+        | running: %{issue_id => running_entry},
+          claimed: MapSet.put(initial_state.claimed, issue_id)
+      }
+    end)
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :account_usage,
+         payload: %{
+           "threadUsage" => %{
+             "estimatedUsageCreditsMicros" => 123,
+             "groups" => ["subscription"]
+           }
+         },
+         timestamp: now
+       }}
+    )
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :account_usage,
+         payload: %{"threadUsage" => "malformed nested usage"},
+         timestamp: now
+       }}
+    )
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :other_message,
+         payload: "plain text emitted by a tool wrapper",
+         raw: "plain text emitted by a tool wrapper",
+         timestamp: now
+       }}
+    )
+
+    assert %{running: [snapshot_entry]} = GenServer.call(pid, :snapshot)
+    assert Process.alive?(pid)
+    assert snapshot_entry.last_codex_event == :other_message
+    assert snapshot_entry.last_codex_message.message == "plain text emitted by a tool wrapper"
+
+    running_entry_after_updates = :sys.get_state(pid).running[issue_id]
+    assert running_entry_after_updates.estimated_usage_credits_micros == 123
+    assert running_entry_after_updates.estimated_usage_groups == ["subscription"]
+  end
+
   test "orchestrator snapshot tracks codex thread totals and app-server pid" do
     issue_id = "issue-usage-snapshot"
 
