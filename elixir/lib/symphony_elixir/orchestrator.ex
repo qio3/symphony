@@ -2223,7 +2223,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp account_usage_for_update(update) do
     payload = update[:payload] || Map.get(update, "payload") || %{}
-    thread_usage = Map.get(payload, "threadUsage") || Map.get(payload, :thread_usage) || payload
+    thread_usage = account_usage_payload(payload)
 
     %{
       estimated_usage_credits_micros:
@@ -2234,6 +2234,15 @@ defmodule SymphonyElixir.Orchestrator do
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
   end
+
+  defp account_usage_payload(payload) when is_map(payload) do
+    case Map.get(payload, "threadUsage") || Map.get(payload, :thread_usage) || payload do
+      usage when is_map(usage) -> usage
+      _non_map_usage -> %{}
+    end
+  end
+
+  defp account_usage_payload(_payload), do: %{}
 
   defp record_usage_completion(%State{usage_ledger: nil} = state, _issue_id, _running_entry), do: state
 

@@ -172,6 +172,7 @@ class SnapshotBuilderTest(unittest.TestCase):
         self.assertTrue(snapshot["test"]["synced"])
         self.assertFalse(snapshot["test"]["drift"])
         self.assertEqual([item["number"] for item in snapshot["owner_view"]["work_items"]], [401])
+        self.assertEqual(snapshot["owner_view"]["work_items"][0]["stage"], "In Progress")
         self.assertEqual([item["number"] for item in snapshot["owner_view"]["blocked"]], [402])
         self.assertEqual([item["number"] for item in snapshot["owner_view"]["ready_for_acceptance"]], [403])
         owner_numbers = [

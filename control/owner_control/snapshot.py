@@ -109,7 +109,7 @@ class SnapshotBuilder:
             elif runtime_running is not None:
                 item = self._with_runtime(item, runtime_running)
                 item["status"] = "running"
-                item["stage"] = item.get("stage") or "In Progress"
+                item["stage"] = "In Progress"
                 item["test"] = item.get("test") or normalized_test
                 lanes["work_items"].append(item)
                 counts["running"] += 1
