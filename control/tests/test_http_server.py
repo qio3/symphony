@@ -83,8 +83,87 @@ class ControlHttpServerTest(unittest.TestCase):
 
         with self.request("/assets/owner-control.css", authorized=False) as response:
             self.assertEqual(response.headers.get_content_type(), "text/css")
+        with self.request("/assets/theme-init.js", authorized=False) as response:
+            self.assertEqual(response.headers.get_content_type(), "text/javascript")
         with self.request("/assets/owner-control.js", authorized=False) as response:
             self.assertEqual(response.headers.get_content_type(), "text/javascript")
+
+    def test_serves_chartjs_locally_before_the_owner_client(self):
+        html, _csrf, headers = self.browser_session()
+
+        theme_src = 'src="/assets/theme-init.js"'
+        chart_src = 'src="/assets/chart.umd.min.js"'
+        owner_src = 'src="/assets/owner-control.js"'
+        self.assertIn(theme_src, html)
+        self.assertIn(chart_src, html)
+        self.assertIn(owner_src, html)
+        self.assertLess(html.index(theme_src), html.index('rel="stylesheet"'))
+        self.assertLess(html.index(chart_src), html.index(owner_src))
+        self.assertNotRegex(html, r'https?://[^"\']*(?:chart|cdn)')
+        self.assertIn("script-src 'self'", headers["Content-Security-Policy"])
+
+        with self.request("/assets/chart.umd.min.js", authorized=False) as response:
+            chart = response.read().decode("utf-8")
+            self.assertEqual(response.headers.get_content_type(), "text/javascript")
+        self.assertIn("Chart", chart)
+
+    def test_owner_shell_has_theme_tabs_table_chart_and_detail_drawer(self):
+        html, _csrf, _headers = self.browser_session()
+
+        for token in (
+            'id="owner-header"',
+            'id="theme-toggle"',
+            'id="owner-tabs"',
+            'role="tablist"',
+            'id="owner-work-chart"',
+            'id="issue-table"',
+            'id="issue-table-body"',
+            'id="issue-drawer"',
+            'id="issue-drawer-close"',
+            'id="runtime-diagnostics"',
+        ):
+            self.assertIn(token, html)
+        self.assertNotRegex(
+            html,
+            r'<details[^>]*id="runtime-diagnostics"[^>]*\bopen\b',
+        )
+
+        with self.request("/assets/owner-control.css", authorized=False) as response:
+            css = response.read().decode("utf-8")
+        self.assertRegex(css, r"#owner-header\s*\{[^}]*position:\s*sticky")
+        self.assertIn(':root[data-theme="dark"]', css)
+        self.assertIn(".issue-table-wrap", css)
+        self.assertRegex(css, r"@media \(max-width:\s*760px\)[\s\S]*#issue-drawer")
+        self.assertRegex(
+            css,
+            r"@media \(max-width:\s*760px\)[\s\S]*\.owner-tabs\s*\{[^}]*grid-template-columns:\s*repeat\(2",
+        )
+        self.assertRegex(
+            css,
+            r"@media \(max-width:\s*760px\)[\s\S]*#issue-drawer\s*\{[^}]*top:\s*auto",
+        )
+
+    def test_owner_client_persists_theme_and_projects_one_selectable_work_table(self):
+        with self.request("/assets/owner-control.js", authorized=False) as response:
+            javascript = response.read().decode("utf-8")
+
+        self.assertIn('const THEME_STORAGE_KEY = "owner-control-theme"', javascript)
+        self.assertIn("localStorage.getItem(THEME_STORAGE_KEY)", javascript)
+        self.assertIn("localStorage.setItem(THEME_STORAGE_KEY", javascript)
+        self.assertIn("document.documentElement.dataset.theme", javascript)
+        self.assertIn("new Chart(", javascript)
+        self.assertIn("snapshot.counts", javascript)
+        self.assertIn("data-owner-tab", javascript)
+        self.assertIn("data-issue-select", javascript)
+        self.assertIn("data-issue-row", javascript)
+        self.assertIn("aria-selected", javascript)
+        self.assertIn("issue-drawer", javascript)
+        self.assertIn("ownerTabs.addEventListener(\"keydown\"", javascript)
+        self.assertIn("ArrowRight", javascript)
+        self.assertIn("tab.tabIndex", javascript)
+        self.assertIn('setAttribute("aria-labelledby"', javascript)
+        self.assertIn('fetch(`/ui/actions/${action}`', javascript)
+        self.assertNotIn("/ui/actions/shell", javascript)
 
     def test_service_action_menu_stacks_above_service_facts(self):
         with self.request("/assets/owner-control.css", authorized=False) as response:
@@ -106,27 +185,16 @@ class ControlHttpServerTest(unittest.TestCase):
         self.assertRegex(css, r"\.source-row\s*\{[^}]*flex-wrap:\s*wrap")
         self.assertRegex(css, r"\.source-error\s*\{[^}]*overflow-wrap:\s*anywhere")
 
-    def test_ready_queue_has_a_bounded_expandable_preview(self):
+    def test_workbench_has_a_bounded_expandable_table(self):
         with self.request("/assets/owner-control.js", authorized=False) as response:
             javascript = response.read().decode("utf-8")
         with self.request("/assets/owner-control.css", authorized=False) as response:
             css = response.read().decode("utf-8")
 
-        ready_renderer = javascript.split("function renderReady", 1)[1].split(
-            "function renderBacklog", 1
-        )[0]
-        self.assertIn("const previewCount = 5", ready_renderer)
-        self.assertIn("items.slice(0, previewCount)", ready_renderer)
-        self.assertIn("Show ${items.length - previewCount} more", ready_renderer)
-        self.assertIn("readyMoreOpen", javascript)
-        self.assertIn(
-            "details.ready-more:not([open]) > .ready-more-list",
-            css,
-        )
-        self.assertIn(
-            "details.backlog-more:not([open]) > .backlog-more-list",
-            css,
-        )
+        self.assertIn("const TABLE_PAGE_SIZE = 12", javascript)
+        self.assertIn("items.slice(0, visibleRows)", javascript)
+        self.assertIn("visibleRows += TABLE_PAGE_SIZE", javascript)
+        self.assertIn(".issue-table-wrap", css)
 
     def test_needs_owner_distinguishes_system_quarantine_from_owner_questions(self):
         with self.request("/assets/owner-control.js", authorized=False) as response:
@@ -134,13 +202,46 @@ class ControlHttpServerTest(unittest.TestCase):
         with self.request("/assets/owner-control.css", authorized=False) as response:
             css = response.read().decode("utf-8")
 
-        blocked_renderer = javascript.split("function renderBlocked", 1)[1].split(
-            "function renderRunning", 1
+        work_items = javascript.split("function workItems", 1)[1].split(
+            "function findWorkbenchItem", 1
         )[0]
-        self.assertIn("system_quarantines", blocked_renderer)
-        self.assertIn('"System quarantine"', blocked_renderer)
-        self.assertIn('actionButton("Start", "run"', blocked_renderer)
-        self.assertIn(".issue-card.quarantine", css)
+        drawer = javascript.split("function renderDrawer", 1)[1].split(
+            "function renderWorkChart", 1
+        )[0]
+        self.assertIn("system_quarantines", work_items)
+        self.assertIn('lane: "quarantine"', work_items)
+        self.assertIn('"System quarantine"', drawer)
+        self.assertIn('actionButton("Start", "run"', drawer)
+        self.assertIn(".state-cell.quarantine", css)
+
+    def test_loaded_summary_and_running_rows_expose_owner_facts_without_skeletons(self):
+        with self.request("/assets/owner-control.js", authorized=False) as response:
+            javascript = response.read().decode("utf-8")
+
+        render = javascript.split("function render(snapshot", 1)[1].split(
+            "function renderFreshness", 1
+        )[0]
+        row = javascript.split("function issueTableRow", 1)[1].split(
+            "function renderDrawer", 1
+        )[0]
+        self.assertIn('classList.remove("loading-block")', render)
+        self.assertIn("modelName(item.model)", row)
+        self.assertIn("elapsed(item.started_at)", row)
+        self.assertIn("item.turn_count", row)
+        self.assertIn("item.usage?.total_tokens", row)
+
+    def test_drawer_can_stay_closed_and_legacy_card_renderers_are_removed(self):
+        with self.request("/assets/owner-control.js", authorized=False) as response:
+            javascript = response.read().decode("utf-8")
+
+        self.assertIn("let drawerDismissed = false", javascript)
+        self.assertIn("drawerDismissed = true", javascript)
+        self.assertIn("issueDrawer.inert", javascript)
+        self.assertNotIn("function renderCounters", javascript)
+        self.assertNotIn("function renderBlocked", javascript)
+        self.assertNotIn("function renderRunning", javascript)
+        self.assertNotIn("function renderReady", javascript)
+        self.assertNotIn("function renderBacklog", javascript)
 
     def test_browser_snapshot_and_actions_require_same_origin_csrf(self):
         _html, csrf, _headers = self.browser_session()

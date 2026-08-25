@@ -4,6 +4,100 @@ from owner_control.snapshot import SnapshotBuilder
 
 
 class SnapshotBuilderTest(unittest.TestCase):
+    def test_projects_conservative_owner_display_phases_from_existing_evidence(self):
+        project_items = [
+            {
+                "number": 601,
+                "title": "Checks are still running",
+                "status": "In Progress",
+                "state": "OPEN",
+                "pr": {"number": 91, "url": "https://github.test/pull/91", "state": "OPEN", "merged": False},
+                "ci": {"status": "pending"},
+            },
+            {
+                "number": 602,
+                "title": "Green and waiting to merge",
+                "status": "In Progress",
+                "state": "OPEN",
+                "pr": {"number": 92, "url": "https://github.test/pull/92", "state": "OPEN", "merged": False},
+                "ci": {"status": "success"},
+            },
+            {
+                "number": 603,
+                "title": "Merged and waiting for TEST",
+                "status": "In Progress",
+                "state": "OPEN",
+                "pr": {"number": 93, "url": "https://github.test/pull/93", "state": "MERGED", "merged": True},
+                "ci": {"status": "success"},
+                "test": {"sha": "bbbbbbbb22222222", "synced": False},
+            },
+            {
+                "number": 604,
+                "title": "Still doing agent work",
+                "status": "In Progress",
+                "state": "OPEN",
+                "pr": {"number": 94, "url": "https://github.test/pull/94", "state": "MERGED", "merged": True},
+                "ci": {"status": "success"},
+                "test": {"sha": "aaaaaaaa11111111", "synced": True},
+            },
+            {
+                "number": 605,
+                "title": "Failed CI needs agent work",
+                "status": "In Progress",
+                "state": "OPEN",
+                "pr": {"number": 95, "url": "https://github.test/pull/95", "state": "OPEN", "merged": False},
+                "ci": {"status": "failure"},
+            },
+            {
+                "number": 606,
+                "title": "No delivery evidence yet",
+                "status": "In Progress",
+                "state": "OPEN",
+            },
+            {
+                "number": 607,
+                "title": "Scheduled retry",
+                "status": "In Progress",
+                "state": "OPEN",
+                "pr": {"number": 97, "url": "https://github.test/pull/97", "state": "OPEN", "merged": False},
+                "ci": {"status": "pending"},
+            },
+        ]
+        snapshot = SnapshotBuilder().build(
+            service={"live": True},
+            intake_active=True,
+            worker_limit=8,
+            runtime={
+                "generated_at": "2026-08-25T10:00:00Z",
+                "running": [{"issue_id": str(number)} for number in range(601, 607)],
+                "retrying": [{"issue_id": "607", "attempt": 2}],
+                "blocked": [],
+                "codex_totals": {},
+                "rate_limits": None,
+            },
+            project={"items": project_items},
+            canonical={"sha": "aaaaaaaa11111111"},
+            test={"sha": "aaaaaaaa11111111", "url": "https://test.example"},
+        )
+
+        phases = {
+            item["number"]: item["display_phase"]
+            for lane in ("work_items", "follow_ups")
+            for item in snapshot["owner_view"][lane]
+        }
+        self.assertEqual(
+            phases,
+            {
+                601: "Waiting CI",
+                602: "Waiting merge",
+                603: "Waiting TEST",
+                604: "Agent active",
+                605: "Agent active",
+                606: "Agent active",
+                607: "Retrying",
+            },
+        )
+
     def test_owner_work_items_contains_only_runtime_running_entries(self):
         snapshot = SnapshotBuilder().build(
             service={"live": True},

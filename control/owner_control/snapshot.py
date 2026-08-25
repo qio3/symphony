@@ -122,11 +122,13 @@ class SnapshotBuilder:
                 item["status"] = "running"
                 item["stage"] = "In Progress"
                 item["test"] = item.get("test") or normalized_test
+                item["display_phase"] = self._display_phase(item)
                 lanes["work_items"].append(item)
                 counts["running"] += 1
             elif runtime_retry is not None:
                 item = self._with_runtime(item, runtime_retry)
                 item["stage"] = item.get("stage") or "Delivery follow-up"
+                item["display_phase"] = "Retrying"
                 lanes["follow_ups"].append(item)
                 counts["queued"] += 1
             elif status.casefold() == "in progress":
@@ -225,6 +227,30 @@ class SnapshotBuilder:
             if runtime.get(key) is not None:
                 item[key] = runtime[key]
         return item
+
+    @staticmethod
+    def _display_phase(item: dict[str, Any]) -> str:
+        pr = item.get("pr")
+        if not isinstance(pr, dict):
+            return "Agent active"
+
+        if pr.get("merged") is True:
+            test = item.get("test")
+            if not isinstance(test, dict) or test.get("synced") is not True:
+                return "Waiting TEST"
+            return "Agent active"
+
+        state = str(pr.get("state") or "").casefold()
+        if state not in {"", "open"}:
+            return "Agent active"
+
+        ci = item.get("ci")
+        ci_status = str(ci.get("status") or "").casefold() if isinstance(ci, dict) else ""
+        if ci_status in {"pending", "queued", "in_progress", "waiting", "expected"}:
+            return "Waiting CI"
+        if ci_status == "success":
+            return "Waiting merge"
+        return "Agent active"
 
     @staticmethod
     def _with_system_quarantine(item: dict[str, Any], quarantine: dict[str, Any]) -> dict[str, Any]:

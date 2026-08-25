@@ -1,5 +1,7 @@
 "use strict";
 
+const THEME_STORAGE_KEY = "owner-control-theme";
+const TABLE_PAGE_SIZE = 12;
 const csrf = document.querySelector('meta[name="owner-control-csrf"]').content;
 const runtimeUrl = document.querySelector('meta[name="runtime-diagnostics-url"]').content;
 const app = document.getElementById("app");
@@ -13,6 +15,16 @@ const dialogTitle = document.getElementById("dialog-title");
 const dialogBody = document.getElementById("dialog-body");
 const dialogConfirm = document.getElementById("dialog-confirm");
 const toastRegion = document.getElementById("toast-region");
+const themeToggle = document.getElementById("theme-toggle");
+const ownerTabs = document.getElementById("owner-tabs");
+const issueTablePanel = document.getElementById("issue-table-panel");
+const issueTableBody = document.getElementById("issue-table-body");
+const issueDrawer = document.getElementById("issue-drawer");
+const issueDrawerContent = document.getElementById("issue-drawer-content");
+const issueDrawerTitle = document.getElementById("issue-drawer-title");
+const issueDrawerKicker = document.getElementById("issue-drawer-kicker");
+const showMoreButton = document.getElementById("issue-show-more");
+const workbenchBody = document.querySelector(".workbench-body");
 
 runtimeLink.href = runtimeUrl;
 
@@ -21,6 +33,13 @@ let requestInFlight = false;
 let actionInFlight = false;
 let pendingAction = null;
 let renderedSignature = null;
+let activeTab = "blocked";
+let activeTabInitialized = false;
+let selectedIssue = null;
+let drawerDismissed = false;
+let visibleRows = TABLE_PAGE_SIZE;
+let workChart = null;
+let workChartSignature = null;
 const actionErrors = new Map();
 
 const targets = {
@@ -28,11 +47,6 @@ const targets = {
   serviceActions: document.getElementById("service-actions"),
   delivery: document.getElementById("delivery-content"),
   quota: document.getElementById("quota-content"),
-  counters: document.getElementById("counter-strip"),
-  needsOwner: document.getElementById("needs-owner-content"),
-  running: document.getElementById("running-content"),
-  ready: document.getElementById("ready-content"),
-  backlog: document.getElementById("backlog-content"),
   sourceHealth: document.getElementById("source-health"),
   diagnosticWork: document.getElementById("diagnostic-work"),
   logs: document.getElementById("diagnostic-logs"),
@@ -42,6 +56,28 @@ function browserHeaders(json = false) {
   const headers = { "X-Owner-Control-CSRF": csrf };
   if (json) headers["Content-Type"] = "application/json";
   return headers;
+}
+
+function setTheme(theme, persist = true) {
+  document.documentElement.dataset.theme = theme;
+  const dark = theme === "dark";
+  themeToggle.setAttribute("aria-pressed", String(dark));
+  themeToggle.setAttribute("aria-label", dark ? "Use light theme" : "Use dark theme");
+  themeToggle.textContent = dark ? "☼" : "◐";
+  if (persist) {
+    try { localStorage.setItem(THEME_STORAGE_KEY, theme); } catch (_error) { /* unavailable storage */ }
+  }
+  if (currentSnapshot) renderWorkChart(currentSnapshot);
+}
+
+function initialTheme() {
+  const preloaded = document.documentElement.dataset.theme;
+  if (preloaded === "light" || preloaded === "dark") return preloaded;
+  try {
+    const stored = localStorage.getItem(THEME_STORAGE_KEY);
+    if (stored === "light" || stored === "dark") return stored;
+  } catch (_error) { /* unavailable storage */ }
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
 async function refreshSnapshot(options = {}) {
@@ -72,13 +108,15 @@ function render(snapshot, options = {}) {
   if (!options.force && signature === renderedSignature) return;
   const viewState = captureViewState();
   renderService(snapshot);
+  targets.delivery.classList.remove("loading-block");
+  targets.delivery.removeAttribute("role");
+  targets.delivery.removeAttribute("aria-label");
+  targets.quota.classList.remove("loading-block");
+  targets.quota.removeAttribute("role");
+  targets.quota.removeAttribute("aria-label");
   renderDelivery(snapshot);
   renderQuota(snapshot);
-  renderCounters(snapshot);
-  renderBlocked(snapshot);
-  renderRunning(snapshot);
-  renderReady(snapshot);
-  renderBacklog(snapshot);
+  renderWorkbench(snapshot);
   renderSources(snapshot);
   renderWorkDiagnostics(snapshot);
   renderActionErrors();
@@ -187,164 +225,227 @@ function renderQuota(snapshot) {
   targets.quota.append(quotaWindow("5 hour", quota.five_hour), quotaWindow("Weekly", quota.weekly));
 }
 
-function renderCounters(snapshot) {
-  clear(targets.counters);
-  const counts = snapshot.counts || {};
-  const definitions = [
-    ["Ready for AI", counts.ready_for_ai, "#backlog-title", "neutral"],
-    ["Running", counts.running, "#running-title", "neutral"],
-    ["Blocked", counts.blocked, "#needs-owner-title", number(counts.blocked) > 0 ? "danger" : "neutral"],
-    ["Ready for Acceptance", counts.ready_for_acceptance, "#ready-title", number(counts.ready_for_acceptance) > 0 ? "good" : "neutral"],
-    ["Backlog", counts.backlog, "#backlog-title", "neutral"],
+function renderWorkbench(snapshot) {
+  const tabs = workbenchTabs(snapshot);
+  if (!activeTabInitialized) {
+    activeTab = tabs.find(([key]) => workItems(snapshot, key).length)?.[0] || "queue";
+    activeTabInitialized = true;
+  }
+  clear(ownerTabs);
+  for (const [key, label, count, tone] of tabs) {
+    const tab = el("button", "owner-tab " + tone, label);
+    const selected = activeTab === key;
+    tab.type = "button";
+    tab.id = `owner-tab-${key}`;
+    tab.dataset.ownerTab = key;
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-controls", "issue-table-panel");
+    tab.setAttribute("aria-selected", String(selected));
+    tab.tabIndex = selected ? 0 : -1;
+    tab.append(el("span", "tab-count", count));
+    ownerTabs.append(tab);
+  }
+  issueTablePanel.setAttribute("aria-labelledby", `owner-tab-${activeTab}`);
+  const items = workItems(snapshot, activeTab);
+  if (!items.some((item) => String(item.number) === String(selectedIssue))) {
+    selectedIssue = null;
+    if (!drawerDismissed && !narrowWorkbench()) selectedIssue = items[0]?.number ?? null;
+  }
+  clear(issueTableBody);
+  for (const item of items.slice(0, visibleRows)) issueTableBody.append(issueTableRow(item));
+  if (!items.length) {
+    const row = document.createElement("tr");
+    const cell = el("td", "empty-table-cell", "No Issues in this queue.");
+    cell.colSpan = 4;
+    row.append(cell);
+    issueTableBody.append(row);
+  }
+  const remaining = items.length - Math.min(items.length, visibleRows);
+  showMoreButton.classList.toggle("is-hidden", remaining <= 0);
+  showMoreButton.textContent = "Show " + Math.min(remaining, TABLE_PAGE_SIZE) + " more";
+  renderDrawer(findWorkbenchItem(snapshot, selectedIssue));
+  renderWorkChart(snapshot);
+}
+
+function workbenchTabs(snapshot) {
+  return [
+    ["blocked", "Needs owner", number(snapshot.counts?.blocked) + number(snapshot.counts?.quarantined), "danger"],
+    ["running", "Running", number(snapshot.counts?.running), "neutral"],
+    ["ready", "Ready", number(snapshot.counts?.ready_for_acceptance), "good"],
+    ["queue", "Queue", number(snapshot.counts?.ready_for_ai) + number(snapshot.counts?.backlog), "neutral"],
   ];
-  for (const [label, value, href, tone] of definitions) {
-    const counter = el("a", `counter ${tone}`);
-    counter.href = href;
-    counter.append(el("strong", "", number(value)), el("span", "", label));
-    targets.counters.append(counter);
-  }
 }
 
-function renderBlocked(snapshot) {
-  clear(targets.needsOwner);
-  const items = snapshot.owner_view?.blocked || [];
-  const quarantines = snapshot.owner_view?.system_quarantines || [];
-  if (!items.length && !quarantines.length) return targets.needsOwner.append(emptyState("No owner decisions", "Blocked questions will appear here."));
-  const list = el("div", "issue-list attention-list");
-  for (const item of items) {
-    const card = issueCard(item, "blocked");
-    const question = el("div", "owner-question");
-    question.append(el("span", "question-label", "Owner question"), el("p", "", item.question || item.reason || "Owner input required"));
-    const actions = el("div", "row-actions");
-    actions.append(externalLink(item.issue_url, "Open Issue", "button secondary"));
-    card.append(question, actions);
-    list.append(card);
-  }
-  const githubFresh = snapshot.sources?.github?.status === "fresh";
-  for (const item of quarantines) {
-    const card = issueCard(item, "quarantine");
-    const detail = el("div", "owner-question system-quarantine");
-    detail.append(el("span", "question-label", "System quarantine"), el("p", "", item.reason || "Deterministic before_run failure"));
-    const actions = el("div", "row-actions");
-    actions.append(
-      externalLink(item.issue_url, "Open Issue", "button secondary"),
-      actionButton("Start", "run", "primary", !githubFresh, item.number),
-    );
-    card.append(detail, actions);
-    if (!githubFresh) card.append(actionHint("Start is unavailable until GitHub state is fresh."));
-    list.append(card);
-  }
-  targets.needsOwner.append(list);
+function workItems(snapshot, tab) {
+  const owner = snapshot.owner_view || {};
+  const lanes = {
+    blocked: (owner.blocked || []).map((item) => ({ ...item, lane: "blocked" })).concat((owner.system_quarantines || []).map((item) => ({ ...item, lane: "quarantine" }))),
+    running: (owner.work_items || []).map((item) => ({ ...item, lane: "running" })),
+    ready: (owner.ready_for_acceptance || []).map((item) => ({ ...item, lane: "ready" })),
+    queue: (owner.backlog || []).map((item) => ({ ...item, lane: "queue" })),
+  };
+  const unique = new Map();
+  for (const item of lanes[tab] || []) if (!unique.has(String(item.number))) unique.set(String(item.number), item);
+  return [...unique.values()];
 }
 
-function renderRunning(snapshot) {
-  clear(targets.running);
-  const items = snapshot.owner_view?.work_items || [];
-  const followUps = snapshot.owner_view?.follow_ups || [];
-  document.getElementById("running-title").textContent = items.length ? `Active workers · ${items.length}` : "Active workers";
-  if (followUps.length) {
-    const note = el("div", "worker-scope-note");
-    note.append(
-      el("strong", "", `${followUps.length} delivery follow-up${followUps.length === 1 ? "" : "s"}`),
-      el("span", "", "Not running now; Symphony reserves their WIP places for continuation, so ready work may wait."),
-    );
-    targets.running.append(note);
+function findWorkbenchItem(snapshot, issue) {
+  if (issue === null || issue === undefined) return null;
+  for (const tab of ["blocked", "running", "ready", "queue"]) {
+    const found = workItems(snapshot, tab).find((item) => String(item.number) === String(issue));
+    if (found) return found;
   }
-  if (!items.length) return targets.running.append(emptyState("No active workers", snapshot.intake?.active ? "Ready tasks will start when capacity is available." : "Intake is paused."));
-  const list = el("div", "issue-list running-list");
-  for (const item of items) {
-    const card = issueCard(item, "running");
-    const meta = el("div", "runtime-meta");
-    meta.append(
-      metaItem("Stage", item.stage || item.status || "In progress"),
-      metaItem("Model", modelName(item.model)),
-      elapsedItem(item.started_at),
-      metaItem("Turns", number(item.turn_count)),
-    );
-    card.append(meta, evidenceRow(item), usageRow(item.usage));
-    list.append(card);
-  }
-  targets.running.append(list);
+  return null;
 }
 
-function renderReady(snapshot) {
-  clear(targets.ready);
-  const items = snapshot.owner_view?.ready_for_acceptance || [];
-  document.getElementById("ready-title").textContent = items.length ? `Ready for Acceptance · ${items.length}` : "Ready for Acceptance";
-  if (!items.length) return targets.ready.append(emptyState("Nothing waiting for acceptance", "Completed delivery evidence will appear here."));
-  const list = el("div", "issue-list");
-  const githubFresh = snapshot.sources?.github?.status === "fresh";
-  const testFresh = snapshot.sources?.test?.status === "fresh";
-  const previewCount = 5;
-  for (const item of items.slice(0, previewCount)) list.append(readyCard(item, snapshot, githubFresh, testFresh));
-  if (items.length > previewCount) {
-    const more = el("details", "ready-more");
-    more.append(el("summary", "", `Show ${items.length - previewCount} more`));
-    const remaining = el("div", "issue-list ready-more-list");
-    for (const item of items.slice(previewCount)) remaining.append(readyCard(item, snapshot, githubFresh, testFresh));
-    more.append(remaining);
-    list.append(more);
-  }
-  targets.ready.append(list);
-}
-
-function readyCard(item, snapshot, githubFresh, testFresh) {
-  const card = issueCard(item, "ready");
-  card.append(evidenceRow(item), usageRow(item.usage));
-  const actions = el("div", "row-actions");
-  const itemTest = item.test || snapshot.test || {};
-  const itemTestSynced = itemTest.synced === true;
-  const globalTestSynced = snapshot.test?.synced === true;
-  const acceptDisabled = !githubFresh || !testFresh || !globalTestSynced || !itemTestSynced;
-  const accept = actionButton("Accept", "accept", "primary", acceptDisabled, item.number);
-  const rework = actionButton("Rework", "rework", "secondary", !githubFresh, item.number);
-  actions.append(
-    externalLink(itemTest.url, "Open TEST", "button secondary"),
-    accept,
-    rework,
-  );
-  card.append(actions);
-  if (!githubFresh) {
-    card.append(actionHint("Actions are unavailable until GitHub state is fresh."));
-  } else if (!testFresh) {
-    card.append(actionHint("Acceptance is unavailable until TEST evidence is fresh."));
-  } else if (!globalTestSynced) {
-    card.append(actionHint("Acceptance is unavailable: TEST is not on the canonical SHA."));
-  } else if (!itemTestSynced) {
-    card.append(actionHint("Acceptance is unavailable: this Issue's TEST evidence is not synced."));
-  }
-  return card;
-}
-
-function renderBacklog(snapshot) {
-  clear(targets.backlog);
-  const items = snapshot.owner_view?.backlog || [];
-  if (!items.length) return targets.backlog.append(emptyState("Backlog is clear", "No unclaimed Symphony Issues."));
-  const list = el("div", "compact-list");
-  const githubFresh = snapshot.sources?.github?.status === "fresh";
-  const previewCount = 5;
-  for (const item of items.slice(0, previewCount)) list.append(backlogRow(item, snapshot, githubFresh));
-  if (items.length > previewCount) {
-    const more = el("details", "backlog-more");
-    more.append(el("summary", "", `Show ${items.length - previewCount} more`));
-    const remaining = el("div", "compact-list backlog-more-list");
-    for (const item of items.slice(previewCount)) remaining.append(backlogRow(item, snapshot, githubFresh));
-    more.append(remaining);
-    list.append(more);
-  }
-  if (!githubFresh) list.append(actionHint("Start is unavailable until GitHub state is fresh."));
-  targets.backlog.append(list);
-}
-
-function backlogRow(item, snapshot, githubFresh) {
-  const row = el("article", "compact-row");
+function issueTableRow(item) {
+  const row = document.createElement("tr");
+  row.setAttribute("data-issue-row", String(item.number || ""));
   row.dataset.issueCard = String(item.number || "");
-  const copy = el("div", "compact-copy");
-  copy.append(externalLink(item.issue_url, `#${item.number} ${item.title || "Untitled Issue"}`, "issue-link"), badge(item.status || item.stage || "Backlog", statusTone(item.status)));
-  const start = actionButton("Start", "run", "primary", !githubFresh, item.number);
-  if (!snapshot.intake?.active) start.title = "Issue will become Ready for AI and wait until intake resumes.";
-  row.append(copy, start);
+  row.setAttribute("aria-selected", String(String(selectedIssue) === String(item.number)));
+  const issue = el("button", "issue-select");
+  issue.type = "button";
+  issue.dataset.issueSelect = String(item.number || "");
+  issue.setAttribute("aria-expanded", String(String(selectedIssue) === String(item.number)));
+  issue.append(el("strong", "", "#" + item.number), el("span", "issue-title", item.title || "Untitled Issue"));
+  const issueCell = document.createElement("td");
+  issueCell.dataset.label = "Issue";
+  issueCell.append(issue);
+  const stateCell = el("td", "state-cell " + item.lane, laneLabel(item));
+  stateCell.dataset.label = "State";
+
+  const progressCell = document.createElement("td");
+  progressCell.dataset.label = "Progress";
+  const progress = item.lane === "blocked" || item.lane === "quarantine"
+    ? item.question || item.reason || "Owner input required"
+    : item.display_phase || item.stage || item.status || "—";
+  progressCell.append(el("strong", "row-phase", progress));
+  if (item.lane === "running") {
+    const facts = el("div", "cell-meta");
+    facts.append(el("span", "", modelName(item.model)));
+    const elapsedValue = el("span", "", elapsed(item.started_at));
+    if (item.started_at) elapsedValue.dataset.startedAt = item.started_at;
+    facts.append(elapsedValue, el("span", "", `${number(item.turn_count)} turns`));
+    progressCell.append(facts);
+  }
+
+  const deliveryCell = document.createElement("td");
+  deliveryCell.dataset.label = "Delivery / usage";
+  const evidence = el("div", "evidence-summary");
+  if (item.pr || item.ci || item.test) {
+    evidence.append(
+      evidenceLink(item.pr?.url, item.pr?.number ? `PR #${item.pr.number}` : "PR —", item.pr?.url ? "neutral" : "muted"),
+      evidenceLink(item.ci?.url, `CI ${titleCase(item.ci?.status || "unknown")}`, statusTone(item.ci?.status)),
+      evidenceLink(item.test?.url, `TEST ${titleCase(item.test?.status || (item.test?.synced ? "synced" : "unknown"))}`, item.test?.synced ? "good" : statusTone(item.test?.status)),
+    );
+  } else {
+    evidence.append(el("span", "muted", "—"));
+  }
+  deliveryCell.append(evidence);
+  if (item.lane === "running" || item.lane === "ready") {
+    const tokens = item.usage?.total_tokens;
+    const usage = el("div", "usage-summary", Number.isFinite(Number(tokens)) ? `${formatNumber(tokens)} tokens · ${estimatedCredits(item.usage?.estimated_credits_micros)}` : "Task usage unavailable");
+    deliveryCell.append(usage);
+  }
+  row.append(issueCell, stateCell, progressCell, deliveryCell);
   return row;
+}
+
+function selectWorkbenchIssue(issue) {
+  selectedIssue = issue;
+  drawerDismissed = false;
+  for (const row of document.querySelectorAll("[data-issue-row]")) {
+    const selected = String(row.dataset.issueRow) === String(issue);
+    row.setAttribute("aria-selected", String(selected));
+    row.querySelector("[data-issue-select]")?.setAttribute("aria-expanded", String(selected));
+  }
+  renderDrawer(findWorkbenchItem(currentSnapshot || {}, issue));
+}
+
+function renderDrawer(item) {
+  clear(issueDrawerContent);
+  if (!item) {
+    issueDrawer.classList.remove("is-open");
+    issueDrawer.setAttribute("aria-hidden", "true");
+    issueDrawer.inert = true;
+    delete issueDrawer.dataset.issueCard;
+    workbenchBody.classList.add("drawer-closed");
+    issueDrawerKicker.textContent = "Select an Issue";
+    issueDrawerTitle.textContent = "Issue details";
+    issueDrawerContent.append(el("p", "muted", "Select an Issue to review evidence and available owner actions."));
+    return;
+  }
+  issueDrawer.classList.add("is-open");
+  issueDrawer.setAttribute("aria-hidden", "false");
+  issueDrawer.inert = false;
+  issueDrawer.dataset.issueCard = String(item.number || "");
+  workbenchBody.classList.remove("drawer-closed");
+  issueDrawerKicker.textContent = laneLabel(item);
+  issueDrawerTitle.textContent = "#" + item.number + " " + (item.title || "Untitled Issue");
+  if (item.lane === "blocked" || item.lane === "quarantine") {
+    const question = el("div", "owner-question " + (item.lane === "quarantine" ? "system-quarantine" : ""));
+    question.append(el("span", "question-label", item.lane === "quarantine" ? "System quarantine" : "Owner question"), el("p", "", item.question || item.reason || "Owner input required"));
+    issueDrawerContent.append(question);
+  }
+  if (item.lane === "running") {
+    const meta = el("div", "runtime-meta");
+    meta.append(metaItem("Phase", item.display_phase || item.stage || item.status || "In progress"), metaItem("Model", modelName(item.model)), elapsedItem(item.started_at), metaItem("Turns", number(item.turn_count)));
+    issueDrawerContent.append(meta, evidenceRow(item), usageRow(item.usage));
+  } else if (item.lane === "ready") {
+    issueDrawerContent.append(evidenceRow(item), usageRow(item.usage));
+  } else if (item.lane === "queue") {
+    issueDrawerContent.append(el("p", "drawer-summary", item.status === "Ready for AI" ? "Ready for AI: eligible to start when intake and GitHub state allow it." : "Backlog: not promoted until it is Ready for AI."));
+  }
+  const actions = el("div", "row-actions");
+  const githubFresh = currentSnapshot?.sources?.github?.status === "fresh";
+  const testFresh = currentSnapshot?.sources?.test?.status === "fresh";
+  if (item.issue_url) actions.append(externalLink(item.issue_url, "Open Issue", "button secondary"));
+  if (item.lane === "quarantine" || item.lane === "queue") {
+    actions.append(actionButton("Start", "run", "primary", !githubFresh, item.number));
+    if (!githubFresh) issueDrawerContent.append(actionHint("Start is unavailable until GitHub state is fresh."));
+  }
+  if (item.lane === "ready") {
+    const itemTest = item.test || currentSnapshot?.test || {};
+    const acceptDisabled = !githubFresh || !testFresh || currentSnapshot?.test?.synced !== true || itemTest.synced !== true;
+    actions.append(externalLink(itemTest.url, "Open TEST", "button secondary"), actionButton("Accept", "accept", "primary", acceptDisabled, item.number), actionButton("Rework", "rework", "secondary", !githubFresh, item.number));
+    if (!githubFresh) {
+      issueDrawerContent.append(actionHint("Actions are unavailable until GitHub state is fresh."));
+    } else if (!testFresh) {
+      issueDrawerContent.append(actionHint("Acceptance is unavailable until TEST evidence is fresh."));
+    } else if (currentSnapshot?.test?.synced !== true) {
+      issueDrawerContent.append(actionHint("Acceptance is unavailable: TEST is not on the canonical SHA."));
+    } else if (itemTest.synced !== true) {
+      issueDrawerContent.append(actionHint("Acceptance is unavailable: this Issue's TEST evidence is not synced."));
+    }
+  }
+  if (actions.childElementCount) issueDrawerContent.append(actions);
+}
+
+function renderWorkChart(snapshot) {
+  if (typeof Chart !== "function") return;
+  const counts = snapshot.counts || {};
+  const data = [number(counts.blocked), number(counts.running), number(counts.ready_for_acceptance), number(counts.ready_for_ai) + number(counts.backlog)];
+  const signature = JSON.stringify([data, document.documentElement.dataset.theme]);
+  if (signature === workChartSignature) return;
+  if (workChart) workChart.destroy();
+  workChart = new Chart(document.getElementById("owner-work-chart"), {
+    type: "doughnut",
+    data: { labels: ["Needs owner", "Running", "Ready", "Queue"], datasets: [{ data, backgroundColor: ["#b65742", "#64748b", "#167a54", "#9a7a30"], borderWidth: 0 }] },
+    options: { responsive: true, maintainAspectRatio: false, cutout: "68%", plugins: { legend: { display: false }, tooltip: { displayColors: false } } },
+  });
+  workChartSignature = signature;
+}
+
+function narrowWorkbench() {
+  return window.matchMedia?.("(max-width: 760px)").matches === true;
+}
+
+function laneLabel(item) {
+  if (item.lane === "blocked") return "Needs owner";
+  if (item.lane === "quarantine") return "System quarantine";
+  if (item.lane === "running") return "Running";
+  if (item.lane === "ready") return "Ready for Acceptance";
+  return item.status === "Ready for AI" ? "Ready for AI" : "Backlog";
 }
 
 function renderSources(snapshot) {
@@ -396,17 +497,6 @@ function diagnosticWorkRow(item) {
   const attempt = Number(item.attempt);
   row.append(copy, Number.isFinite(attempt) && attempt > 0 ? badge(`Attempt ${attempt}`, "warning") : badge(item.stage || item.status || "In Progress", "neutral"));
   return row;
-}
-
-function issueCard(item, tone) {
-  const card = el("article", `issue-card ${tone}`);
-  card.dataset.issueCard = String(item.number || "");
-  const heading = el("div", "issue-heading");
-  const copy = el("div", "issue-copy");
-  copy.append(externalLink(item.issue_url, `#${item.number}`, "issue-number"), el("h3", "", item.title || "Untitled Issue"));
-  heading.append(copy, badge(item.stage || item.status || titleCase(tone), tone === "blocked" ? "danger" : tone === "ready" ? "good" : tone === "quarantine" ? "warning" : "neutral"));
-  card.append(heading);
-  return card;
 }
 
 function evidenceRow(item) {
@@ -624,8 +714,12 @@ function showInlineActionError(issue, message) {
 function renderActionErrors() {
   document.querySelectorAll(".action-error[data-persistent]").forEach((node) => node.remove());
   for (const [key, message] of actionErrors) {
-    const selector = key === "service" ? ".service-panel" : `[data-issue-card="${CSS.escape(key)}"]`;
-    const target = document.querySelector(selector) || globalNotice;
+    const target = key === "service"
+      ? document.querySelector(".service-panel")
+      : String(issueDrawer.dataset.issueCard || "") === key
+        ? issueDrawerContent
+        : null;
+    if (!target) continue;
     const error = el("div", "action-error", message);
     error.dataset.persistent = "true";
     error.setAttribute("role", "alert");
@@ -680,15 +774,24 @@ function renderUnavailable(message) {
   retry.type = "button";
   retry.addEventListener("click", () => refreshSnapshot());
   targets.serviceActions.append(retry);
+  targets.delivery.classList.remove("loading-block");
+  targets.delivery.removeAttribute("role");
+  targets.delivery.removeAttribute("aria-label");
   clear(targets.delivery);
   targets.delivery.append(emptyState("Delivery unavailable", message));
+  targets.quota.classList.remove("loading-block");
+  targets.quota.removeAttribute("role");
+  targets.quota.removeAttribute("aria-label");
   clear(targets.quota);
   targets.quota.append(emptyState("Quota unavailable", "Waiting for Owner Control data."));
-  clear(targets.counters);
-  for (const target of [targets.needsOwner, targets.running, targets.ready, targets.backlog]) {
-    clear(target);
-    target.append(emptyState("Unavailable", "Try again when the local control source recovers."));
-  }
+  clear(issueTableBody);
+  const row = document.createElement("tr");
+  const cell = el("td", "empty-table-cell", "Unavailable. Try again when the local control source recovers.");
+  cell.colSpan = 4;
+  row.append(cell);
+  issueTableBody.append(row);
+  showMoreButton.classList.add("is-hidden");
+  renderDrawer(null);
   clear(targets.sourceHealth);
   targets.sourceHealth.append(emptyState("No source health", "The snapshot endpoint did not respond."));
   clear(targets.diagnosticWork);
@@ -720,8 +823,6 @@ function captureViewState() {
   return {
     openUsage,
     serviceAdvancedOpen: Boolean(document.querySelector("details.service-advanced[open]")),
-    readyMoreOpen: Boolean(document.querySelector("details.ready-more[open]")),
-    backlogMoreOpen: Boolean(document.querySelector("details.backlog-more[open]")),
     focus,
   };
 }
@@ -734,10 +835,6 @@ function restoreViewState(state) {
   }
   const advanced = document.querySelector("details.service-advanced");
   if (advanced) advanced.open = state.serviceAdvancedOpen;
-  const readyMore = document.querySelector("details.ready-more");
-  if (readyMore) readyMore.open = state.readyMoreOpen;
-  const backlogMore = document.querySelector("details.backlog-more");
-  if (backlogMore) backlogMore.open = state.backlogMoreOpen;
   if (state.focus?.action) {
     const issueSelector = state.focus.issue
       ? `[data-issue="${CSS.escape(state.focus.issue)}"]`
@@ -750,12 +847,7 @@ function restoreViewState(state) {
 }
 
 function findOwnerItem(issue) {
-  const owner = currentSnapshot?.owner_view || {};
-  for (const lane of ["blocked", "work_items", "ready_for_acceptance", "backlog"]) {
-    const found = (owner[lane] || []).find((item) => String(item.number) === String(issue));
-    if (found) return found;
-  }
-  return null;
+  return findWorkbenchItem(currentSnapshot || {}, issue);
 }
 
 function clear(node) { node.replaceChildren(); }
@@ -778,9 +870,59 @@ function formatReset(epoch) { const value = Number(epoch) * 1000; return Number.
 function relativeTime(value) { const timestamp = Date.parse(value); if (!Number.isFinite(timestamp)) return "now"; const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000)); if (seconds < 5) return "now"; if (seconds < 60) return `${seconds}s ago`; const minutes = Math.round(seconds / 60); return minutes < 60 ? `${minutes}m ago` : `${Math.round(minutes / 60)}h ago`; }
 function elapsed(value) { const timestamp = Date.parse(value); if (!Number.isFinite(timestamp)) return "—"; const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000)); const hours = Math.floor(seconds / 3600); const minutes = Math.floor((seconds % 3600) / 60); return hours ? `${hours}h ${minutes}m` : `${minutes}m`; }
 
+function activateOwnerTab(key, focus = false) {
+  activeTab = key;
+  activeTabInitialized = true;
+  selectedIssue = null;
+  drawerDismissed = false;
+  visibleRows = TABLE_PAGE_SIZE;
+  renderWorkbench(currentSnapshot || {});
+  renderActionErrors();
+  if (focus) ownerTabs.querySelector(`[data-owner-tab="${key}"]`)?.focus({ preventScroll: true });
+}
+
 document.addEventListener("click", (event) => {
+  const tab = event.target.closest("[data-owner-tab]");
+  if (tab) {
+    activateOwnerTab(tab.dataset.ownerTab, true);
+    return;
+  }
+  const select = event.target.closest("[data-issue-select]");
+  if (select) {
+    selectWorkbenchIssue(select.dataset.issueSelect);
+    renderActionErrors();
+    return;
+  }
   const button = event.target.closest("button[data-action]");
   if (button) openActionDialog(button.dataset.action, button.dataset.issue || null);
+});
+ownerTabs.addEventListener("keydown", (event) => {
+  const tab = event.target.closest("[data-owner-tab]");
+  if (!tab) return;
+  const tabs = [...ownerTabs.querySelectorAll("[data-owner-tab]")];
+  const currentIndex = tabs.indexOf(tab);
+  let nextIndex = null;
+  if (event.key === "ArrowRight" || event.key === "ArrowDown") nextIndex = (currentIndex + 1) % tabs.length;
+  if (event.key === "ArrowLeft" || event.key === "ArrowUp") nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+  if (event.key === "Home") nextIndex = 0;
+  if (event.key === "End") nextIndex = tabs.length - 1;
+  if (nextIndex === null) return;
+  event.preventDefault();
+  activateOwnerTab(tabs[nextIndex].dataset.ownerTab, true);
+});
+themeToggle.addEventListener("click", () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
+showMoreButton.addEventListener("click", () => {
+  visibleRows += TABLE_PAGE_SIZE;
+  renderWorkbench(currentSnapshot || {});
+});
+document.getElementById("issue-drawer-close").addEventListener("click", () => {
+  drawerDismissed = true;
+  selectedIssue = null;
+  for (const row of document.querySelectorAll("[data-issue-row]")) {
+    row.setAttribute("aria-selected", "false");
+    row.querySelector("[data-issue-select]")?.setAttribute("aria-expanded", "false");
+  }
+  renderDrawer(null);
 });
 dialogForm.addEventListener("submit", (event) => { event.preventDefault(); performPendingAction(); });
 document.getElementById("dialog-close").addEventListener("click", () => actionDialog.close());
@@ -790,4 +932,5 @@ refreshButton.addEventListener("click", () => refreshSnapshot());
 document.getElementById("runtime-diagnostics").addEventListener("toggle", (event) => { if (event.target.open) loadLogs(); });
 window.setInterval(() => document.querySelectorAll("[data-started-at]").forEach((node) => { node.textContent = elapsed(node.dataset.startedAt); }), 1000);
 window.setInterval(() => refreshSnapshot({ announce: false }), 5000);
+setTheme(initialTheme(), false);
 refreshSnapshot();
