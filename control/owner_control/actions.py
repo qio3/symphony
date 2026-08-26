@@ -11,6 +11,7 @@ from .state_store import StateStore
 
 _SERVICE_ACTION_TIMEOUT_SECONDS = 120
 _SYSTEM_QUARANTINE_LABEL = "symphony:quarantined"
+_OWNER_WAITING_LABEL = "ждёт-владельца"
 _QUARANTINE_REASON_MAX_BYTES = 512
 _ANSI_ESCAPE_SEQUENCE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
@@ -238,6 +239,8 @@ class ActionService:
             raise ActionError("lease requires an open issue")
         if str(issue.get("status", "")).casefold() != "ready for ai":
             raise ActionError("lease requires Ready for AI")
+        if self._has_label(issue, _OWNER_WAITING_LABEL):
+            raise ActionError("lease refused because issue requires owner input")
         if (
             self._state_store.quarantine_for(issue_number) is not None
             or self._has_label(issue, _SYSTEM_QUARANTINE_LABEL)

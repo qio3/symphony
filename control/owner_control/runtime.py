@@ -323,7 +323,7 @@ class SnapshotService:
     ) -> tuple[dict[str, Any], dict[str, Any], Exception | None]:
         try:
             value = {
-                "project": self._github.project_snapshot(),
+                "project": self._github.project_snapshot(reconcile_intake=True),
                 "canonical": self._github.canonical(self._canonical_ref),
             }
         except Exception as error:

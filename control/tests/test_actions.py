@@ -169,6 +169,14 @@ class ActionServiceTest(unittest.TestCase):
             self.actions.execute("lease", {"issue": 403})
         self.assertEqual(self.lifecycle.calls, [("set_status", 403, "In Progress")])
 
+    def test_lease_rejects_an_owner_gated_issue_even_if_project_status_is_ready(self):
+        self.snapshot["issues"]["403"]["labels"] = ["ждёт-владельца"]
+
+        with self.assertRaisesRegex(ActionError, "owner input"):
+            self.actions.execute("lease", {"issue": 403})
+
+        self.assertEqual(self.lifecycle.calls, [])
+
     def test_lease_rejects_persisted_or_labeled_system_quarantine(self):
         self.store.set_quarantine(403, "workspace hook failed", "2026-08-25T10:00:00Z")
 
