@@ -96,6 +96,7 @@ class NotificationPublisher:
         previous = state.get("last_notification_snapshot")
         known = set(state.get("notification_fingerprints") or [])
         comparison_snapshot = self._preserve_attention_baseline(previous, snapshot)
+        known = self._normalize_ready_fingerprints(known, comparison_snapshot)
         events = self._detector.detect(previous, comparison_snapshot)
         expected_restart = float(state.get("expected_service_restart_until") or 0)
         expected_stop = bool(state.get("expected_service_stop"))
@@ -143,6 +144,24 @@ class NotificationPublisher:
         if previous is not None or not self._attention_source_unavailable(snapshot):
             state_update["last_notification_snapshot"] = projection
         self._state_store.update(state_update)
+
+    @staticmethod
+    def _normalize_ready_fingerprints(
+        known: set[str],
+        snapshot: dict[str, Any],
+    ) -> set[str]:
+        active_ready = {
+            str(item.get("number") or item.get("issue_id") or item.get("issue_identifier"))
+            for item in (snapshot.get("owner_view") or {}).get("ready_for_acceptance", [])
+        }
+        retained = {fingerprint for fingerprint in known if not fingerprint.startswith("ready:")}
+        previously_notified = {
+            fingerprint.split(":", 2)[1]
+            for fingerprint in known
+            if fingerprint.startswith("ready:") and len(fingerprint.split(":", 2)) >= 2
+        }
+        retained.update(f"ready:{issue}" for issue in active_ready.intersection(previously_notified))
+        return retained
 
     @staticmethod
     def _preserve_attention_baseline(

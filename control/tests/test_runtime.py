@@ -562,6 +562,7 @@ class SnapshotServiceTest(unittest.TestCase):
         self.assertEqual(patched["sources"]["supervisor"]["status"], "unavailable")
         self.assertEqual(patched["workers"]["running"], 1)
         self.assertEqual(len(patched["running"]), 1)
+        service.snapshot(fresh=True)
 
     def test_live_container_stays_starting_until_runtime_is_fresh(self):
         symphony = RichSymphony()

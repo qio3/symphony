@@ -279,14 +279,23 @@ class NotificationDetectorTest(unittest.TestCase):
         self.assertIn("Which option?", events[0]["text"])
         self.assertIn("TEST: https://test.example", events[1]["text"])
 
-    def test_changed_owner_question_or_ready_deploy_is_a_new_attention_event(self):
+    def test_changed_owner_question_is_a_new_attention_event(self):
+        previous = snapshot()
+        current = snapshot()
+        current["owner_view"]["blocked"][0]["question"] = "Choose C or D?"
+
+        events = NotificationDetector().detect(previous, current)
+
+        self.assertEqual([event["kind"] for event in events], ["blocked"])
+        self.assertIn("Choose C or D?", events[0]["text"])
+
+    def test_same_ready_issue_does_not_notify_again_when_global_test_sha_changes(self):
         previous = snapshot()
         previous["owner_view"]["ready_for_acceptance"][0]["test"] = {
             "sha": "oldsha11",
             "url": "https://test.example",
         }
         current = snapshot()
-        current["owner_view"]["blocked"][0]["question"] = "Choose C or D?"
         current["owner_view"]["ready_for_acceptance"][0]["test"] = {
             "sha": "newsha22",
             "url": "https://test.example",
@@ -294,12 +303,7 @@ class NotificationDetectorTest(unittest.TestCase):
 
         events = NotificationDetector().detect(previous, current)
 
-        self.assertEqual(
-            [event["kind"] for event in events],
-            ["blocked", "ready_for_acceptance"],
-        )
-        self.assertIn("Choose C or D?", events[0]["text"])
-        self.assertIn("newsha22", events[1]["text"])
+        self.assertEqual(events, [])
 
     def test_detects_unexpected_service_stop_once_as_transition(self):
         previous = snapshot()

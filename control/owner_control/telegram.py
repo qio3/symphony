@@ -217,8 +217,7 @@ class NotificationDetector:
             for item in previous_owner.get("blocked", [])
         }
         previous_ready = {
-            _number(item): _ready_sha(item, previous)
-            for item in previous_owner.get("ready_for_acceptance", [])
+            _number(item) for item in previous_owner.get("ready_for_acceptance", [])
         }
         previous_quarantine_items = previous_owner.get("system_quarantines")
         previous_quarantines = (
@@ -245,13 +244,13 @@ class NotificationDetector:
                 )
 
         for item in current_owner.get("ready_for_acceptance", []):
-            if _number(item) not in previous_ready or previous_ready.get(_number(item)) != _ready_sha(item, current):
+            if _number(item) not in previous_ready:
                 test = item.get("test") or current.get("test") or {}
                 pr = item.get("pr") or {}
                 events.append(
                     {
                         "kind": "ready_for_acceptance",
-                        "fingerprint": f"ready:{_number(item)}:{test.get('sha')}",
+                        "fingerprint": f"ready:{_number(item)}",
                         "text": (
                             f"Ready for Acceptance #{_number(item)}: {item.get('title') or ''}\n"
                             f"PR: {pr.get('url') or 'not reported'}\n"
@@ -309,10 +308,6 @@ def _number(item: dict[str, Any]) -> Any:
 
 def _short_sha(value: Any) -> str:
     return str(value)[:8] if value else "unknown"
-
-
-def _ready_sha(item: dict[str, Any], snapshot: dict[str, Any]) -> Any:
-    return ((item.get("test") or snapshot.get("test") or {}).get("sha"))
 
 
 def _model_count(models: dict[str, Any], tier: str) -> str:
