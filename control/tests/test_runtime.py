@@ -40,7 +40,11 @@ class FailingSymphony:
 
 
 class FakeGitHub:
-    def project_snapshot(self):
+    def __init__(self):
+        self.reconcile_requests = []
+
+    def project_snapshot(self, *, reconcile_intake=False):
+        self.reconcile_requests.append(reconcile_intake)
         return {"items": []}
 
     def canonical(self, _ref):
@@ -49,6 +53,7 @@ class FakeGitHub:
 
 class ChangingGitHub(FakeGitHub):
     def __init__(self):
+        super().__init__()
         self.sha = "firstsha"
 
     def canonical(self, _ref):
@@ -62,11 +67,11 @@ class CountingGitHub(ChangingGitHub):
         self.canonical_calls = 0
         self.fail = False
 
-    def project_snapshot(self):
+    def project_snapshot(self, *, reconcile_intake=False):
         self.project_calls += 1
         if self.fail:
             raise RuntimeError("GitHub GraphQL rate limit exhausted")
-        return super().project_snapshot()
+        return super().project_snapshot(reconcile_intake=reconcile_intake)
 
     def canonical(self, ref):
         self.canonical_calls += 1
@@ -91,23 +96,25 @@ class BlockingGitHub(ChangingGitHub):
         self.refresh_started = threading.Event()
         self.release_refresh = threading.Event()
 
-    def project_snapshot(self):
+    def project_snapshot(self, *, reconcile_intake=False):
         if self.block:
             self.refresh_started.set()
             self.release_refresh.wait(timeout=2)
-        return super().project_snapshot()
+        return super().project_snapshot(reconcile_intake=reconcile_intake)
 
 
 class AuthFailingGitHub(FakeGitHub):
-    def project_snapshot(self):
+    def project_snapshot(self, *, reconcile_intake=False):
         raise RuntimeError("HTTP 401 from api.github.com")
 
 
 class ToggleGitHub(FakeGitHub):
     def __init__(self):
+        super().__init__()
         self.fail = False
 
-    def project_snapshot(self):
+    def project_snapshot(self, *, reconcile_intake=False):
+        self.reconcile_requests.append(reconcile_intake)
         if self.fail:
             raise OSError("temporary GitHub outage")
         return {
@@ -220,9 +227,10 @@ class SnapshotServiceTest(unittest.TestCase):
         self.store = StateStore(Path(self.tempdir.name) / "state.json")
 
     def test_aggregates_all_sources_without_ai(self):
+        github = FakeGitHub()
         service = SnapshotService(
             symphony=FakeSymphony(),
-            github=FakeGitHub(),
+            github=github,
             test_environment=FakeTest(),
             supervisor=FakeSupervisor(),
             state_store=self.store,
@@ -236,6 +244,7 @@ class SnapshotServiceTest(unittest.TestCase):
         self.assertEqual(snapshot["canonical"]["sha"], "abc12345")
         self.assertEqual(snapshot["test"]["sha"], "abc12345")
         self.assertEqual(snapshot["workers"], {"running": 0, "limit": 2})
+        self.assertEqual(github.reconcile_requests, [True])
 
     def test_cached_snapshot_fails_closed_until_initial_collection_completes(self):
         service = SnapshotService(

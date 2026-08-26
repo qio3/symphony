@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -98,9 +100,15 @@ class GitHubClient:
         self._status_field_id: str | None = None
         self._status_options: dict[str, str] = {}
         self._project_items: dict[int, str] = {}
+        self._lock = threading.RLock()
 
-    def project_snapshot(self) -> dict[str, Any]:
+    def project_snapshot(self, *, reconcile_intake: bool = False) -> dict[str, Any]:
+        with self._lock:
+            return self._project_snapshot(reconcile_intake=reconcile_intake)
+
+    def _project_snapshot(self, *, reconcile_intake: bool) -> dict[str, Any]:
         items = []
+        self._project_items = {}
         cursor = None
         while True:
             response = self._graphql(
@@ -122,7 +130,10 @@ class GitHubClient:
             cursor = page.get("endCursor")
             if not cursor:
                 raise RuntimeError("GitHub project pagination returned no cursor")
-        return {"updated_at": datetime.now(timezone.utc).isoformat(), "items": items}
+        project = {"updated_at": datetime.now(timezone.utc).isoformat(), "items": items}
+        if reconcile_intake:
+            self._reconcile_intake(project)
+        return project
 
     def canonical(self, ref: str) -> dict[str, Any]:
         encoded_ref = urllib.parse.quote(ref, safe="")
@@ -135,27 +146,32 @@ class GitHubClient:
         }
 
     def set_status(self, issue: int, status: str) -> None:
-        if issue not in self._project_items or not self._status_options:
-            self.project_snapshot()
-        item_id = self._project_items.get(issue)
-        option_id = self._status_options.get(status.casefold())
-        if not item_id:
-            raise RuntimeError(f"issue #{issue} is not in the configured GitHub project")
-        if not self._status_field_id or not option_id:
-            raise RuntimeError(f"GitHub project status option is unavailable: {status}")
-        self._graphql(
-            _STATUS_MUTATION,
-            {
-                "projectId": self._project_id,
-                "itemId": item_id,
-                "fieldId": self._status_field_id,
-                "optionId": option_id,
-            },
-            operation_name="OwnerControlSetStatus",
-        )
+        with self._lock:
+            if issue not in self._project_items or not self._status_options:
+                self.project_snapshot()
+            item_id = self._project_items.get(issue)
+            option_id = self._status_options.get(status.casefold())
+            if not item_id:
+                raise RuntimeError(f"issue #{issue} is not in the configured GitHub project")
+            if not self._status_field_id or not option_id:
+                raise RuntimeError(f"GitHub project status option is unavailable: {status}")
+            self._graphql(
+                _STATUS_MUTATION,
+                {
+                    "projectId": self._project_id,
+                    "itemId": item_id,
+                    "fieldId": self._status_field_id,
+                    "optionId": option_id,
+                },
+                operation_name="OwnerControlSetStatus",
+            )
 
     def add_label(self, issue: int, label: str) -> None:
-        self._rest("POST", f"/repos/{self._repository}/issues/{issue}/labels", {"labels": [label]})
+        self._rest_value(
+            "POST",
+            f"/repos/{self._repository}/issues/{issue}/labels",
+            {"labels": [label]},
+        )
 
     def remove_label(self, issue: int, label: str) -> None:
         encoded_label = urllib.parse.quote(label, safe="")
@@ -172,7 +188,150 @@ class GitHubClient:
     def close_issue(self, issue: int) -> None:
         self._rest("PATCH", f"/repos/{self._repository}/issues/{issue}", {"state": "closed"})
 
-    def _graphql(self, query: str, variables: dict[str, Any], *, operation_name: str) -> dict[str, Any]:
+    def _reconcile_intake(self, project: dict[str, Any]) -> None:
+        items = project.get("items") or []
+        newly_blocked: list[int] = []
+        items_by_number = {
+            int(item["number"]): item
+            for item in items
+            if isinstance(item, dict) and isinstance(item.get("number"), int)
+        }
+        for issue in self._open_issues():
+            if (
+                issue.get("pull_request")
+                or str(issue.get("state") or "").casefold() != "open"
+            ):
+                continue
+            number = issue.get("number")
+            node_id = issue.get("node_id")
+            if not isinstance(number, int) or not node_id:
+                raise RuntimeError("GitHub open issue is missing its number or node id")
+
+            labels = _issue_labels(issue)
+            owner_gated = _owner_gate_requested(issue, labels)
+            current = items_by_number.get(number)
+
+            if owner_gated:
+                if _OWNER_WAITING_LABEL.casefold() not in {
+                    label.casefold() for label in labels
+                }:
+                    self.add_label(number, _OWNER_WAITING_LABEL)
+                    labels.append(_OWNER_WAITING_LABEL)
+                if "symphony" in {label.casefold() for label in labels}:
+                    self.remove_label(number, "symphony")
+                    labels = [
+                        label for label in labels if label.casefold() != "symphony"
+                    ]
+                was_missing = current is None
+                current = current or self._add_project_issue(issue, labels, items, items_by_number)
+                if str(current.get("status") or "").casefold() != "blocked":
+                    self.set_status(number, "Blocked")
+                _project_status(current, "Blocked")
+                current["labels"] = labels
+                if was_missing:
+                    newly_blocked.append(number)
+                continue
+
+            if current is None:
+                current = self._add_project_issue(issue, labels, items, items_by_number)
+                self.set_status(number, "Ready for AI")
+                _project_status(current, "Ready for AI")
+            elif current.get("status_missing"):
+                self.set_status(number, "Ready for AI")
+                _project_status(current, "Ready for AI")
+
+        if newly_blocked:
+            self._reassert_new_blocked(newly_blocked)
+
+    def _reassert_new_blocked(self, issue_numbers: list[int]) -> None:
+        time.sleep(_PROJECT_WORKFLOW_SETTLE_SECONDS)
+        for issue_number in issue_numbers:
+            if self._project_item_status(issue_number).casefold() != "blocked":
+                self.set_status(issue_number, "Blocked")
+
+        time.sleep(_PROJECT_WORKFLOW_CONFIRM_SECONDS)
+        for issue_number in issue_numbers:
+            if self._project_item_status(issue_number).casefold() == "blocked":
+                continue
+            self.set_status(issue_number, "Blocked")
+            if self._project_item_status(issue_number).casefold() != "blocked":
+                raise RuntimeError(
+                    f"GitHub Project workflow did not retain Blocked for issue #{issue_number}"
+                )
+
+    def _project_item_status(self, issue_number: int) -> str:
+        item_id = self._project_items.get(issue_number)
+        if not item_id:
+            raise RuntimeError(f"issue #{issue_number} is not in the configured GitHub project")
+        response = self._graphql(
+            _PROJECT_ITEM_STATUS_QUERY,
+            {"itemId": item_id},
+            operation_name="OwnerControlProjectItemStatus",
+        )
+        values = (((response.get("data") or {}).get("node") or {}).get("fieldValues") or {}).get("nodes") or []
+        for value in values:
+            if str((value.get("field") or {}).get("name") or "").casefold() == "status":
+                return str(value.get("name") or "")
+        return ""
+
+    def _add_project_issue(
+        self,
+        issue: dict[str, Any],
+        labels: list[str],
+        items: list[dict[str, Any]],
+        items_by_number: dict[int, dict[str, Any]],
+    ) -> dict[str, Any]:
+        number = int(issue["number"])
+        response = self._graphql(
+            _ADD_PROJECT_ITEM_MUTATION,
+            {"projectId": self._project_id, "contentId": issue["node_id"]},
+            operation_name="OwnerControlAddProjectItem",
+        )
+        item_id = (
+            ((response.get("data") or {}).get("addProjectV2ItemById") or {}).get("item")
+            or {}
+        ).get("id")
+        if not item_id:
+            raise RuntimeError(
+                f"GitHub did not return the Project item for issue #{number}"
+            )
+        self._project_items[number] = item_id
+        item = {
+            "number": number,
+            "identifier": f"#{number}",
+            "title": issue.get("title"),
+            "url": issue.get("html_url"),
+            "status": "Backlog",
+            "status_missing": True,
+            "state": str(issue.get("state") or "OPEN").upper(),
+            "labels": list(labels),
+            "owner_question": None,
+            "project_item_id": item_id,
+            "pr": None,
+            "ci": None,
+        }
+        items.append(item)
+        items_by_number[number] = item
+        return item
+
+    def _open_issues(self) -> list[dict[str, Any]]:
+        issues: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            value = self._rest_value(
+                "GET",
+                f"/repos/{self._repository}/issues?state=open&per_page=100&page={page}",
+            )
+            if not isinstance(value, list):
+                raise RuntimeError("GitHub open issues response returned a non-list payload")
+            issues.extend(item for item in value if isinstance(item, dict))
+            if len(value) < 100:
+                return issues
+            page += 1
+
+    def _graphql(
+        self, query: str, variables: dict[str, Any], *, operation_name: str
+    ) -> dict[str, Any]:
         value = self._transport(
             "POST",
             self._graphql_url,
@@ -188,17 +347,21 @@ class GitHubClient:
         if errors:
             raise RuntimeError("GitHub GraphQL request failed")
         return value
+
     def _rest(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
-        value = self._transport(
+        value = self._rest_value(method, path, body)
+        if not isinstance(value, dict):
+            raise RuntimeError("GitHub REST response returned a non-object payload")
+        return value
+
+    def _rest_value(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
+        return self._transport(
             method,
             self._api_url + path,
             headers=self._headers,
             body=body,
             timeout=15,
         )
-        if not isinstance(value, dict):
-            raise RuntimeError("GitHub REST response returned a non-object payload")
-        return value
 
     def _remember_status_metadata(self, fields: dict[str, Any]) -> None:
         for field in fields.get("nodes") or []:
@@ -232,6 +395,7 @@ class GitHubClient:
             "title": content.get("title"),
             "url": content.get("url"),
             "status": status or "Backlog",
+            "status_missing": status is None,
             "state": content.get("state"),
             "labels": [label.get("name") for label in (content.get("labels") or {}).get("nodes") or [] if label.get("name")],
             "owner_question": extract_owner_question(comments),
@@ -239,6 +403,42 @@ class GitHubClient:
             "pr": normalized_pr,
             "ci": ci,
         }
+
+
+_OWNER_WAITING_LABEL = "ждёт-владельца"
+_PROJECT_WORKFLOW_SETTLE_SECONDS = 1.0
+_PROJECT_WORKFLOW_CONFIRM_SECONDS = 0.5
+_OWNER_GATE_FIELD = re.compile(
+    r"(?ims)^###\s*Пригодность\s*\r?\n+(?P<answer>.*?)(?=^###\s|\Z)"
+)
+
+
+def _issue_labels(issue: dict[str, Any]) -> list[str]:
+    return [
+        str(label.get("name"))
+        for label in issue.get("labels") or []
+        if isinstance(label, dict) and label.get("name")
+    ]
+
+
+def _owner_gate_requested(issue: dict[str, Any], labels: list[str]) -> bool:
+    if _OWNER_WAITING_LABEL.casefold() in {label.casefold() for label in labels}:
+        return True
+    field = _OWNER_GATE_FIELD.search(str(issue.get("body") or ""))
+    if field is None:
+        return False
+    return bool(
+        re.fullmatch(
+            r"красная\s*[—-]\s*решает\s+человек",
+            field.group("answer").strip(),
+            re.IGNORECASE,
+        )
+    )
+
+
+def _project_status(item: dict[str, Any], status: str) -> None:
+    item["status"] = status
+    item["status_missing"] = False
 
 
 def _http_error_text(error: urllib.error.HTTPError) -> str:
@@ -337,5 +537,30 @@ mutation OwnerControlSetStatus($projectId: ID!, $itemId: ID!, $fieldId: ID!, $op
     fieldId: $fieldId,
     value: {singleSelectOptionId: $optionId}
   }) { projectV2Item { id } }
+}
+"""
+
+_ADD_PROJECT_ITEM_MUTATION = """
+mutation OwnerControlAddProjectItem($projectId: ID!, $contentId: ID!) {
+  addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) {
+    item { id }
+  }
+}
+"""
+
+_PROJECT_ITEM_STATUS_QUERY = """
+query OwnerControlProjectItemStatus($itemId: ID!) {
+  node(id: $itemId) {
+    ... on ProjectV2Item {
+      fieldValues(first: 20) {
+        nodes {
+          ... on ProjectV2ItemFieldSingleSelectValue {
+            name
+            field { ... on ProjectV2FieldCommon { name } }
+          }
+        }
+      }
+    }
+  }
 }
 """

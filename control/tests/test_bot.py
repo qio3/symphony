@@ -283,6 +283,35 @@ class NotificationPublisherTest(unittest.TestCase):
         self.assertEqual(len(self.api.sent), 1)
         self.assertIn("#404", self.api.sent[0])
 
+    def test_restart_seeds_bulk_blocked_import_without_catch_up_alerts(self):
+        self.publisher.publish(base_snapshot())
+        restarted = NotificationPublisher(
+            api=self.api,
+            state_store=StateStore(self.state_path),
+            detector=NotificationDetector(),
+        )
+        imported = base_snapshot()
+        imported["owner_view"]["blocked"] = [
+            {
+                "number": number,
+                "title": f"Imported blocker {number}",
+                "question": "Owner input required",
+            }
+            for number in range(500, 524)
+        ]
+
+        restarted.publish(imported)
+
+        self.assertEqual(self.api.sent, [])
+        after_startup = base_snapshot()
+        after_startup["owner_view"]["blocked"] = [
+            *imported["owner_view"]["blocked"],
+            {"number": 524, "title": "New blocker", "question": "Choose A or B?"},
+        ]
+        restarted.publish(after_startup)
+        self.assertEqual(len(self.api.sent), 1)
+        self.assertIn("#524", self.api.sent[0])
+
     def test_restart_waits_for_fresh_sources_before_seeding_ready_backlog(self):
         previous = base_snapshot()
         previous["owner_view"]["ready_for_acceptance"] = [
