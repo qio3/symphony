@@ -6,6 +6,17 @@ from pathlib import Path
 from typing import Any, Callable
 
 
+_DOCKER_CONTAINER_STATUSES = {
+    "created",
+    "running",
+    "paused",
+    "restarting",
+    "removing",
+    "exited",
+    "dead",
+}
+
+
 class DockerComposeSupervisor:
     """Fixed-target service operations; no caller-provided command fragments."""
 
@@ -29,11 +40,17 @@ class DockerComposeSupervisor:
             tolerate_failure=True,
         )
         if completed.returncode != 0:
-            return {"live": False, "container": self._container_name, "reason": "container unavailable"}
+            raise RuntimeError("container state unavailable")
         try:
             state = json.loads(completed.stdout.strip())
-        except json.JSONDecodeError:
-            return {"live": False, "container": self._container_name, "reason": "invalid container state"}
+        except json.JSONDecodeError as error:
+            raise RuntimeError("invalid container state") from error
+        if (
+            not isinstance(state, dict)
+            or not isinstance(state.get("Running"), bool)
+            or state.get("Status") not in _DOCKER_CONTAINER_STATUSES
+        ):
+            raise RuntimeError("invalid container state")
         return {
             "live": bool(state.get("Running")),
             "container": self._container_name,
