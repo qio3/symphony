@@ -90,14 +90,26 @@ class NotificationPublisher:
         self._api = api
         self._state_store = state_store
         self._detector = detector
+        self._attention_baselined = False
 
     def publish(self, snapshot: dict[str, Any]) -> None:
         state = self._state_store.read()
         previous = state.get("last_notification_snapshot")
         known = set(state.get("notification_fingerprints") or [])
         comparison_snapshot = self._preserve_attention_baseline(previous, snapshot)
-        known = self._normalize_ready_fingerprints(known, comparison_snapshot)
-        events = self._detector.detect(previous, comparison_snapshot)
+        attention_unavailable = self._attention_source_unavailable(snapshot)
+        # Restarting Owner Control must not replay every attention transition
+        # accumulated while it was offline. Seed only from a complete snapshot.
+        seed_attention_baseline = not self._attention_baselined and not attention_unavailable
+        known = self._normalize_ready_fingerprints(
+            known,
+            comparison_snapshot,
+            seed_active=seed_attention_baseline,
+        )
+        events = self._detector.detect(
+            None if seed_attention_baseline else previous,
+            comparison_snapshot,
+        )
         expected_restart = float(state.get("expected_service_restart_until") or 0)
         expected_stop = bool(state.get("expected_service_stop"))
         service_live = bool((snapshot.get("service") or {}).get("live"))
@@ -141,14 +153,18 @@ class NotificationPublisher:
                     "service_action_in_progress_until": 0,
                 }
             )
-        if previous is not None or not self._attention_source_unavailable(snapshot):
+        if previous is not None or not attention_unavailable:
             state_update["last_notification_snapshot"] = projection
         self._state_store.update(state_update)
+        if seed_attention_baseline:
+            self._attention_baselined = True
 
     @staticmethod
     def _normalize_ready_fingerprints(
         known: set[str],
         snapshot: dict[str, Any],
+        *,
+        seed_active: bool = False,
     ) -> set[str]:
         active_ready = {
             str(item.get("number") or item.get("issue_id") or item.get("issue_identifier"))
@@ -160,7 +176,14 @@ class NotificationPublisher:
             for fingerprint in known
             if fingerprint.startswith("ready:") and len(fingerprint.split(":", 2)) >= 2
         }
-        retained.update(f"ready:{issue}" for issue in active_ready.intersection(previously_notified))
+        retained.update(
+            f"ready:{issue}"
+            for issue in (
+                active_ready
+                if seed_active
+                else active_ready.intersection(previously_notified)
+            )
+        )
         return retained
 
     @staticmethod
@@ -184,6 +207,12 @@ class NotificationPublisher:
 
     @staticmethod
     def _attention_source_unavailable(snapshot: dict[str, Any]) -> bool:
+        sources = snapshot.get("sources") or {}
+        if any(
+            ((sources.get(name) or {}).get("status") != "fresh")
+            for name in ("github", "test")
+        ):
+            return True
         unavailable_sources = {
             str(failure.get("fingerprint") or "").partition(":")[0]
             for failure in snapshot.get("failures") or []
