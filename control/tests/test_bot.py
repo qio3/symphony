@@ -51,7 +51,11 @@ class FakeHandler:
 def base_snapshot():
     return {
         "service": {"live": True},
-        "sources": {"runtime": {"status": "fresh"}},
+        "sources": {
+            "runtime": {"status": "fresh"},
+            "github": {"status": "fresh"},
+            "test": {"status": "fresh"},
+        },
         "owner_view": {
             "blocked": [],
             "ready_for_acceptance": [],
@@ -240,6 +244,98 @@ class NotificationPublisherTest(unittest.TestCase):
 
         self.assertEqual(len(self.api.sent), 1)
         self.assertIn("#401", self.api.sent[0])
+
+    def test_restart_seeds_current_ready_backlog_without_catch_up_alerts(self):
+        previous = base_snapshot()
+        previous["owner_view"]["ready_for_acceptance"] = [
+            {"number": 401, "title": "Previously ready", "test": {"sha": "abc12345"}}
+        ]
+        self.publisher.publish(previous)
+
+        restarted = NotificationPublisher(
+            api=self.api,
+            state_store=StateStore(self.state_path),
+            detector=NotificationDetector(),
+        )
+        current = base_snapshot()
+        current["owner_view"]["ready_for_acceptance"] = [
+            *previous["owner_view"]["ready_for_acceptance"],
+            {"number": 402, "title": "Ready while offline", "test": {"sha": "abc12345"}},
+            {"number": 403, "title": "Also ready while offline", "test": {"sha": "abc12345"}},
+        ]
+
+        restarted.publish(current)
+        restarted.publish(current)
+
+        self.assertEqual(self.api.sent, [])
+        self.assertEqual(
+            set(self.store.read()["notification_fingerprints"]),
+            {"ready:401", "ready:402", "ready:403"},
+        )
+
+        newly_ready = base_snapshot()
+        newly_ready["owner_view"]["ready_for_acceptance"] = [
+            *current["owner_view"]["ready_for_acceptance"],
+            {"number": 404, "title": "Ready after startup", "test": {"sha": "abc12345"}},
+        ]
+        restarted.publish(newly_ready)
+
+        self.assertEqual(len(self.api.sent), 1)
+        self.assertIn("#404", self.api.sent[0])
+
+    def test_restart_waits_for_fresh_sources_before_seeding_ready_backlog(self):
+        previous = base_snapshot()
+        previous["owner_view"]["ready_for_acceptance"] = [
+            {"number": 401, "title": "Previously ready", "test": {"sha": "abc12345"}}
+        ]
+        self.publisher.publish(previous)
+
+        restarted = NotificationPublisher(
+            api=self.api,
+            state_store=StateStore(self.state_path),
+            detector=NotificationDetector(),
+        )
+        stale = base_snapshot()
+        stale["sources"]["github"] = {"status": "stale"}
+        stale["owner_view"]["ready_for_acceptance"] = []
+        restarted.publish(stale)
+
+        recovered = base_snapshot()
+        recovered["owner_view"]["ready_for_acceptance"] = [
+            *previous["owner_view"]["ready_for_acceptance"],
+            {"number": 402, "title": "Ready while offline", "test": {"sha": "abc12345"}},
+        ]
+        restarted.publish(recovered)
+
+        self.assertEqual(self.api.sent, [])
+        self.assertEqual(
+            set(self.store.read()["notification_fingerprints"]),
+            {"ready:401", "ready:402"},
+        )
+
+    def test_restart_baseline_still_sends_system_events_once(self):
+        self.publisher.publish(base_snapshot())
+        restarted = NotificationPublisher(
+            api=self.api,
+            state_store=StateStore(self.state_path),
+            detector=NotificationDetector(),
+        )
+        failed = base_snapshot()
+        failed["service"] = {"live": False, "status": "exited", "reason": "crash"}
+        failed["failures"] = [
+            {
+                "fingerprint": "runtime:RuntimeError:worker pool crashed",
+                "message": "worker pool crashed",
+                "unrecoverable": True,
+            }
+        ]
+
+        restarted.publish(failed)
+        restarted.publish(failed)
+
+        self.assertEqual(len(self.api.sent), 2)
+        self.assertTrue(any("unexpectedly stopped" in text for text in self.api.sent))
+        self.assertTrue(any("Systemic Symphony failure" in text for text in self.api.sent))
 
     def test_ready_reentry_with_the_same_test_sha_notifies_again(self):
         self.publisher.publish(base_snapshot())
