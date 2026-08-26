@@ -10,6 +10,7 @@ from owner_control.clients import SymphonyClient
 from owner_control.runtime import SnapshotService
 from owner_control.state_store import StateStore
 from owner_control.supervisor import DockerComposeSupervisor
+from owner_control.telegram import NotificationDetector
 
 
 class FakeSymphony:
@@ -289,6 +290,49 @@ class SnapshotServiceTest(unittest.TestCase):
         self.assertIn("docker socket unavailable", snapshot["service"]["reason"])
         self.assertEqual(snapshot["failures"][0]["fingerprint"], "supervisor:OSError:transient")
         self.assertEqual(snapshot["sources"]["runtime"]["status"], "fresh")
+
+    def test_unconfirmed_docker_state_cannot_emit_service_stopped_notification(self):
+        inspect_calls = 0
+
+        def runner(command, **kwargs):
+            nonlocal inspect_calls
+            inspect_calls += 1
+            if inspect_calls == 1:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout='{"Running": true, "Status": "running"}',
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout="",
+                stderr="Docker daemon temporarily unavailable",
+            )
+
+        service = SnapshotService(
+            symphony=FakeSymphony(),
+            github=FakeGitHub(),
+            test_environment=FakeTest(),
+            supervisor=DockerComposeSupervisor(
+                compose_file=Path("C:/control/docker-compose.yml"),
+                container_name="zavod-symphony",
+                service_name="symphony",
+                runner=runner,
+            ),
+            state_store=self.store,
+            worker_limit=2,
+            canonical_ref="rebrand/stanina",
+        )
+
+        previous = service.snapshot(fresh=True)
+        current = service.snapshot(fresh=True)
+
+        self.assertTrue(previous["service"]["live"])
+        self.assertEqual(current["service"]["status"], "unknown")
+        self.assertEqual(current["sources"]["supervisor"]["status"], "unavailable")
+        self.assertEqual(NotificationDetector().detect(previous, current), [])
 
     def test_invalidate_forces_the_next_reader_to_rebuild_snapshot(self):
         github = ChangingGitHub()
@@ -817,6 +861,75 @@ class SnapshotServiceTest(unittest.TestCase):
 
 
 class DockerComposeSupervisorTest(unittest.TestCase):
+    def test_status_confirms_a_stopped_container_from_valid_docker_state(self):
+        def runner(command, **kwargs):
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout='{"Running": false, "Status": "exited"}',
+                stderr="",
+            )
+
+        supervisor = DockerComposeSupervisor(
+            compose_file=Path("C:/control/docker-compose.yml"),
+            container_name="zavod-symphony",
+            service_name="symphony",
+            runner=runner,
+        )
+
+        status = supervisor.status()
+
+        self.assertFalse(status["live"])
+        self.assertEqual(status["status"], "exited")
+
+    def test_status_is_unknown_when_docker_cannot_confirm_container_state(self):
+        def runner(command, **kwargs):
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout="",
+                stderr="Docker daemon temporarily unavailable",
+            )
+
+        supervisor = DockerComposeSupervisor(
+            compose_file=Path("C:/control/docker-compose.yml"),
+            container_name="zavod-symphony",
+            service_name="symphony",
+            runner=runner,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "container state unavailable"):
+            supervisor.status()
+
+    def test_status_is_unknown_when_docker_returns_unconfirmed_state(self):
+        for stdout in (
+            "not-json",
+            "{}",
+            "[]",
+            '{"Running": false}',
+            '{"Running": "false", "Status": "exited"}',
+            '{"Running": false, "Status": ""}',
+            '{"Running": false, "Status": "unavailable"}',
+        ):
+            with self.subTest(stdout=stdout):
+                def runner(command, **kwargs):
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        stdout=stdout,
+                        stderr="",
+                    )
+
+                supervisor = DockerComposeSupervisor(
+                    compose_file=Path("C:/control/docker-compose.yml"),
+                    container_name="zavod-symphony",
+                    service_name="symphony",
+                    runner=runner,
+                )
+
+                with self.assertRaisesRegex(RuntimeError, "invalid container state"):
+                    supervisor.status()
+
     def test_start_stop_and_status_use_fixed_targets_without_shell(self):
         calls = []
 
