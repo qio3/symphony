@@ -216,6 +216,45 @@ class NotificationPublisherTest(unittest.TestCase):
 
         self.assertEqual(self.api.sent, [])
 
+    def test_ready_alert_does_not_repeat_across_test_sha_changes_or_restart(self):
+        self.publisher.publish(base_snapshot())
+        ready = base_snapshot()
+        ready["owner_view"]["ready_for_acceptance"] = [
+            {"number": 401, "title": "Ready", "test": {"sha": "firstsha"}}
+        ]
+        self.publisher.publish(ready)
+
+        for sha in ("secondsha", "thirdsha", "fourthsha"):
+            changed_deploy = base_snapshot()
+            changed_deploy["owner_view"]["ready_for_acceptance"] = [
+                {"number": 401, "title": "Ready", "test": {"sha": sha}}
+            ]
+            self.publisher.publish(changed_deploy)
+
+        restarted = NotificationPublisher(
+            api=self.api,
+            state_store=StateStore(self.state_path),
+            detector=NotificationDetector(),
+        )
+        restarted.publish(changed_deploy)
+
+        self.assertEqual(len(self.api.sent), 1)
+        self.assertIn("#401", self.api.sent[0])
+
+    def test_ready_reentry_with_the_same_test_sha_notifies_again(self):
+        self.publisher.publish(base_snapshot())
+        ready = base_snapshot()
+        ready["owner_view"]["ready_for_acceptance"] = [
+            {"number": 401, "title": "Ready", "test": {"sha": "abc12345"}}
+        ]
+
+        self.publisher.publish(ready)
+        self.publisher.publish(base_snapshot())
+        self.publisher.publish(ready)
+
+        self.assertEqual(len(self.api.sent), 2)
+        self.assertTrue(all("#401" in message for message in self.api.sent))
+
     def test_initial_transient_source_failure_waits_for_a_healthy_attention_baseline(self):
         transient = base_snapshot()
         transient["failures"] = [
