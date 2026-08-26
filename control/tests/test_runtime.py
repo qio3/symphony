@@ -742,6 +742,39 @@ class SnapshotServiceTest(unittest.TestCase):
             time.sleep(0.01)
         self.assertEqual(service.snapshot()["canonical"]["sha"], "secondsha")
 
+    def test_cold_start_marks_persisted_github_data_stale_until_refresh_finishes(self):
+        warm = SnapshotService(
+            symphony=FakeSymphony(),
+            github=FakeGitHub(),
+            test_environment=FakeTest(),
+            supervisor=FakeSupervisor(),
+            state_store=self.store,
+            worker_limit=2,
+            canonical_ref="rebrand/stanina",
+        )
+        warm.snapshot(fresh=True)
+        github = BlockingGitHub()
+        github.block = True
+        cold = SnapshotService(
+            symphony=FakeSymphony(),
+            github=github,
+            test_environment=FakeTest(),
+            supervisor=FakeSupervisor(),
+            state_store=self.store,
+            worker_limit=2,
+            canonical_ref="rebrand/stanina",
+        )
+
+        try:
+            snapshot = cold.snapshot()
+
+            self.assertTrue(github.refresh_started.wait(timeout=1))
+            self.assertEqual(snapshot["sources"]["github"]["status"], "stale")
+            self.assertTrue(snapshot["stale"])
+        finally:
+            github.release_refresh.set()
+            cold.snapshot(fresh=True)
+
     def test_slow_github_refresh_does_not_block_runtime_refresh(self):
         symphony = CountingSymphony()
         github = BlockingGitHub()

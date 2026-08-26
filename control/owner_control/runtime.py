@@ -285,9 +285,16 @@ class SnapshotService:
                     last_error,
                 )
                 return value, source, last_error
+            confirmed_at = stored.get("confirmed_at") or refreshed_at
             return (
                 deepcopy(stored["value"]),
-                _fresh_source(stored.get("confirmed_at") or refreshed_at),
+                _fresh_source(confirmed_at)
+                if cached_at > 0
+                else {
+                    "status": "stale",
+                    "confirmed_at": confirmed_at,
+                    "error": "refreshing GitHub after Owner Control startup",
+                },
                 None,
             )
 
