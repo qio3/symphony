@@ -2836,8 +2836,6 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp usage_entry_in_window?(_entry, _cutoff), do: true
-
   defp weekly_window_start(rate_limits) do
     bucket = weekly_rate_limit_bucket(rate_limits)
     reset_at = rate_limit_reset_at(bucket)
