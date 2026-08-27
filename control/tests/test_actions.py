@@ -11,6 +11,7 @@ class FakeLifecycle:
     def __init__(self):
         self.calls = []
         self.fail_on = None
+        self.comment_keys = set()
 
     def set_status(self, issue, status):
         self.calls.append(("set_status", issue, status))
@@ -29,6 +30,14 @@ class FakeLifecycle:
 
     def comment(self, issue, body):
         self.calls.append(("comment", issue, body))
+
+    def comment_once(self, issue, body, action_key):
+        if action_key in self.comment_keys:
+            return
+        self.comment_keys.add(action_key)
+        self.comment(issue, body)
+        if self.fail_on == "comment_response":
+            raise RuntimeError("comment response lost")
 
     def close_issue(self, issue):
         self.calls.append(("close_issue", issue))
@@ -472,9 +481,9 @@ class ActionServiceTest(unittest.TestCase):
 
     def test_rework_resumes_after_restart_without_duplicate_owner_comment(self):
         params = {"issue": 402, "reason": "Keep legacy IDs"}
-        self.lifecycle.fail_on = "set_status"
+        self.lifecycle.fail_on = "comment_response"
 
-        with self.assertRaisesRegex(RuntimeError, "status unavailable"):
+        with self.assertRaisesRegex(RuntimeError, "comment response lost"):
             self.actions.execute("rework", params)
 
         self.lifecycle.fail_on = None

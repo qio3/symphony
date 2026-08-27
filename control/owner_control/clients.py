@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import threading
@@ -220,6 +221,28 @@ class GitHubClient:
 
     def comment(self, issue: int, body: str) -> None:
         self._rest("POST", f"/repos/{self._repository}/issues/{issue}/comments", {"body": body})
+
+    def comment_once(self, issue: int, body: str, action_key: str) -> None:
+        digest = hashlib.sha256(action_key.encode("utf-8")).hexdigest()
+        marker = f"<!-- owner-control-action:{digest} -->"
+        page = 1
+        while True:
+            comments = self._rest_value(
+                "GET",
+                f"/repos/{self._repository}/issues/{issue}/comments?per_page=100&page={page}",
+            )
+            if not isinstance(comments, list):
+                raise RuntimeError("GitHub issue comments response returned a non-list payload")
+            if any(
+                marker in str(comment.get("body") or "")
+                for comment in comments
+                if isinstance(comment, dict)
+            ):
+                return
+            if len(comments) < 100:
+                break
+            page += 1
+        self.comment(issue, f"{body}\n\n{marker}")
 
     def close_issue(self, issue: int) -> None:
         self._rest("PATCH", f"/repos/{self._repository}/issues/{issue}", {"state": "closed"})

@@ -31,6 +31,7 @@ class Lifecycle(Protocol):
     def add_label(self, issue: int, label: str) -> None: ...
     def remove_label(self, issue: int, label: str) -> None: ...
     def comment(self, issue: int, body: str) -> None: ...
+    def comment_once(self, issue: int, body: str, action_key: str) -> None: ...
     def close_issue(self, issue: int) -> None: ...
 
 
@@ -350,8 +351,10 @@ class ActionService:
             raise ActionError("rework reason is required")
         self._action_step(
             "comment",
-            lambda: self._lifecycle.comment(
-                issue_number, f"Owner requested rework: {normalized_reason}"
+            lambda: self._lifecycle.comment_once(
+                issue_number,
+                f"Owner requested rework: {normalized_reason}",
+                self._active_operation_key or f"rework:{issue_number}:{normalized_reason}",
             ),
         )
         self._action_step(

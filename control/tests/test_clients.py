@@ -171,6 +171,31 @@ class GitHubClientTest(unittest.TestCase):
             transport.calls[0][1],
         )
 
+    def test_comment_once_reuses_deterministic_marker_after_ambiguous_response(self):
+        action_key = '["rework", {"issue": 401, "reason": "fix"}]'
+        transport = FakeTransport([[], {"id": 10}])
+        client = GitHubClient(
+            token="token",
+            repository="qio3/zavod",
+            project_id="project-id",
+            transport=transport,
+        )
+
+        client.comment_once(401, "Owner requested rework: fix", action_key)
+        posted_body = transport.calls[1][2]["body"]
+        self.assertIn("<!-- owner-control-action:", posted_body)
+
+        retry_transport = FakeTransport([[{"id": 10, "body": posted_body}]])
+        retry_client = GitHubClient(
+            token="token",
+            repository="qio3/zavod",
+            project_id="project-id",
+            transport=retry_transport,
+        )
+        retry_client.comment_once(401, "Owner requested rework: fix", action_key)
+
+        self.assertEqual(len(retry_transport.calls), 1)
+
     def test_set_status_uses_cached_project_item_and_named_option(self):
         transport = FakeTransport([project_response(), {"data": {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "project-item-401"}}}}])
         client = GitHubClient(
