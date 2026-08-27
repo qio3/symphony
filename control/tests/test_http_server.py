@@ -107,6 +107,51 @@ class ControlHttpServerTest(unittest.TestCase):
             self.assertEqual(response.headers.get_content_type(), "text/javascript")
         self.assertIn("Chart", chart)
 
+    def test_serves_lucide_locally_before_the_owner_client(self):
+        html, _csrf, headers = self.browser_session()
+
+        icon_src = 'src="/assets/lucide.min.js"'
+        owner_src = 'src="/assets/owner-control.js"'
+        self.assertIn(icon_src, html)
+        self.assertLess(html.index(icon_src), html.index(owner_src))
+        self.assertNotRegex(html, r'https?://[^"\']*(?:lucide|cdn)')
+        self.assertIn("script-src 'self'", headers["Content-Security-Policy"])
+
+        with self.request("/assets/lucide.min.js", authorized=False) as response:
+            javascript = response.read().decode("utf-8")
+            self.assertEqual(response.headers.get_content_type(), "text/javascript")
+        self.assertIn("createIcons", javascript)
+
+    def test_owner_shell_exposes_primary_pages_and_compact_shared_range(self):
+        html, _csrf, _headers = self.browser_session()
+
+        for token in (
+            'id="primary-nav"',
+            'data-page="overview"',
+            'data-page="work"',
+            'data-page="review"',
+            'data-page="waves"',
+            'data-page="infrastructure"',
+            'data-page="owner"',
+            'data-page="quarantine"',
+            'data-page="runtime"',
+            'id="history-range"',
+            'data-history-range="60m"',
+            'data-history-range="12h"',
+            'data-history-range="24h"',
+            'data-history-range="3d"',
+            'id="overview-status-chart"',
+            'id="overview-history-state"',
+            'id="infrastructure-chart"',
+        ):
+            self.assertIn(token, html)
+
+        with self.request("/assets/owner-control.css", authorized=False) as response:
+            css = response.read().decode("utf-8")
+        self.assertRegex(css, r"\.history-range\s*\{[^}]*width:\s*fit-content")
+        self.assertIn(".history-range[hidden] { display: none; }", css)
+        self.assertRegex(css, r"@media \(max-width:\s*760px\)[\s\S]*\.history-range-buttons\s*\{[^}]*display:\s*none")
+
     def test_owner_shell_has_theme_tabs_table_chart_and_detail_drawer(self):
         html, _csrf, _headers = self.browser_session()
 
@@ -164,6 +209,36 @@ class ControlHttpServerTest(unittest.TestCase):
         self.assertIn('setAttribute("aria-labelledby"', javascript)
         self.assertIn('fetch(`/ui/actions/${action}`', javascript)
         self.assertNotIn("/ui/actions/shell", javascript)
+
+    def test_owner_client_projects_overview_pages_history_and_escalations_from_snapshot(self):
+        with self.request("/assets/owner-control.js", authorized=False) as response:
+            javascript = response.read().decode("utf-8")
+
+        for behavior in (
+            "function activatePage",
+            "function setHistoryRange",
+            "function renderOverview",
+            "function renderReview",
+            "function renderReleaseWaves",
+            "function renderInfrastructure",
+            "function renderAttentionPages",
+            "function escalationChain",
+        ):
+            self.assertIn(behavior, javascript)
+        self.assertIn("snapshot.history", javascript)
+        self.assertIn("snapshot.release_waves", javascript)
+        self.assertIn("snapshot.infrastructure", javascript)
+        self.assertIn('memory_percent', javascript)
+        self.assertIn('borderDash', javascript)
+        self.assertIn("Release wave data unavailable", javascript)
+        self.assertIn("Infrastructure metrics unavailable", javascript)
+        self.assertIn('"Active workers"', javascript)
+        self.assertIn('"Waiting delivery"', javascript)
+        self.assertIn('event.target.closest("button[data-page]")', javascript)
+        self.assertNotIn('event.target.closest("[data-page]")', javascript)
+        self.assertIn("item.pr?.merged === true && item.test?.synced === true", javascript)
+        self.assertIn("function optionalNumber", javascript)
+        self.assertIn("overviewHistoryState.textContent", javascript)
 
     def test_service_action_menu_stacks_above_service_facts(self):
         with self.request("/assets/owner-control.css", authorized=False) as response:

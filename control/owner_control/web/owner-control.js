@@ -25,6 +25,11 @@ const issueDrawerTitle = document.getElementById("issue-drawer-title");
 const issueDrawerKicker = document.getElementById("issue-drawer-kicker");
 const showMoreButton = document.getElementById("issue-show-more");
 const workbenchBody = document.querySelector(".workbench-body");
+const primaryNav = document.getElementById("primary-nav");
+const mobileNav = document.getElementById("mobile-nav");
+const historyRangeControl = document.getElementById("history-range");
+const historyRangeSelect = historyRangeControl.querySelector(".history-range-select");
+const overviewHistoryState = document.getElementById("overview-history-state");
 
 runtimeLink.href = runtimeUrl;
 
@@ -33,13 +38,19 @@ let requestInFlight = false;
 let actionInFlight = false;
 let pendingAction = null;
 let renderedSignature = null;
-let activeTab = "blocked";
+let activeTab = "running";
 let activeTabInitialized = false;
+let activePage = "overview";
+let historyRange = "60m";
 let selectedIssue = null;
 let drawerDismissed = false;
 let visibleRows = TABLE_PAGE_SIZE;
 let workChart = null;
 let workChartSignature = null;
+let overviewChart = null;
+let overviewChartSignature = null;
+let infrastructureChart = null;
+let infrastructureChartSignature = null;
 const actionErrors = new Map();
 
 const targets = {
@@ -50,6 +61,16 @@ const targets = {
   sourceHealth: document.getElementById("source-health"),
   diagnosticWork: document.getElementById("diagnostic-work"),
   logs: document.getElementById("diagnostic-logs"),
+  overviewCounters: document.getElementById("overview-counters"),
+  overviewActive: document.getElementById("overview-active"),
+  overviewWaves: document.getElementById("overview-waves"),
+  overviewInfrastructure: document.getElementById("overview-infrastructure"),
+  review: document.getElementById("review-content"),
+  waves: document.getElementById("waves-content"),
+  infrastructureCounters: document.getElementById("infrastructure-counters"),
+  infrastructureHosts: document.getElementById("infrastructure-hosts"),
+  needsOwner: document.getElementById("needs-owner-content"),
+  quarantine: document.getElementById("quarantine-content"),
 };
 
 function browserHeaders(json = false) {
@@ -63,11 +84,15 @@ function setTheme(theme, persist = true) {
   const dark = theme === "dark";
   themeToggle.setAttribute("aria-pressed", String(dark));
   themeToggle.setAttribute("aria-label", dark ? "Use light theme" : "Use dark theme");
-  themeToggle.textContent = dark ? "☼" : "◐";
+  themeToggle.replaceChildren(icon(dark ? "sun" : "moon"));
   if (persist) {
     try { localStorage.setItem(THEME_STORAGE_KEY, theme); } catch (_error) { /* unavailable storage */ }
   }
-  if (currentSnapshot) renderWorkChart(currentSnapshot);
+  if (currentSnapshot) {
+    renderWorkChart(currentSnapshot);
+    renderOverviewChart(currentSnapshot);
+    renderInfrastructureChart(currentSnapshot);
+  }
 }
 
 function initialTheme() {
@@ -78,6 +103,68 @@ function initialTheme() {
     if (stored === "light" || stored === "dark") return stored;
   } catch (_error) { /* unavailable storage */ }
   return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+const PAGE_META = {
+  overview: ["Owner dashboard", "Overview"],
+  work: ["Symphony execution", "Work"],
+  review: ["Owner acceptance", "Review"],
+  waves: ["Delivery queue", "Release waves"],
+  infrastructure: ["Capacity and CI", "Infrastructure"],
+  owner: ["Concrete decisions only", "Needs owner"],
+  quarantine: ["Retry circuit breaker", "Quarantine"],
+  runtime: ["Internal evidence", "Runtime diagnostics"],
+};
+
+function buildMobileNav() {
+  clear(mobileNav);
+  for (const source of primaryNav.querySelectorAll("[data-page]")) {
+    const button = el("button", "mobile-nav-item", source.querySelector("span")?.textContent || titleCase(source.dataset.page));
+    button.type = "button";
+    button.dataset.page = source.dataset.page;
+    mobileNav.append(button);
+  }
+}
+
+function activatePage(page, focus = false) {
+  if (!PAGE_META[page]) return;
+  activePage = page;
+  for (const panel of document.querySelectorAll(".page-panel")) panel.hidden = panel.dataset.page !== page;
+  for (const button of document.querySelectorAll("[data-page]")) {
+    const active = button.dataset.page === page;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-current", active ? "page" : "false");
+  }
+  const [kicker, title] = PAGE_META[page];
+  document.getElementById("page-kicker").textContent = kicker;
+  document.getElementById("page-title").textContent = title;
+  historyRangeControl.hidden = !["overview", "infrastructure"].includes(page);
+  if (page === "runtime") {
+    const diagnostics = document.getElementById("runtime-diagnostics");
+    diagnostics.open = true;
+    loadLogs();
+  }
+  if (currentSnapshot) {
+    if (page === "overview") renderOverviewChart(currentSnapshot);
+    if (page === "infrastructure") renderInfrastructureChart(currentSnapshot);
+  }
+  if (focus) document.querySelector(`[data-page="${CSS.escape(page)}"]`)?.focus({ preventScroll: true });
+}
+
+function setHistoryRange(range) {
+  if (!["60m", "12h", "24h", "3d"].includes(range)) return;
+  historyRange = range;
+  for (const button of historyRangeControl.querySelectorAll("[data-history-range]")) button.classList.toggle("is-active", button.dataset.historyRange === range);
+  historyRangeSelect.value = range;
+  const labels = { "60m": "Last 60 minutes", "12h": "Last 12 hours", "24h": "Last 24 hours", "3d": "Last 3 days" };
+  document.getElementById("overview-chart-range").textContent = labels[range];
+  document.getElementById("infrastructure-chart-range").textContent = labels[range];
+  overviewChartSignature = null;
+  infrastructureChartSignature = null;
+  if (currentSnapshot) {
+    renderOverviewChart(currentSnapshot);
+    renderInfrastructureChart(currentSnapshot);
+  }
 }
 
 async function refreshSnapshot(options = {}) {
@@ -116,12 +203,18 @@ function render(snapshot, options = {}) {
   targets.quota.removeAttribute("aria-label");
   renderDelivery(snapshot);
   renderQuota(snapshot);
+  renderOverview(snapshot);
   renderWorkbench(snapshot);
+  renderReview(snapshot);
+  renderReleaseWaves(snapshot);
+  renderInfrastructure(snapshot);
+  renderAttentionPages(snapshot);
   renderSources(snapshot);
   renderWorkDiagnostics(snapshot);
   renderActionErrors();
   app.classList.toggle("action-busy", actionInFlight);
   restoreViewState(viewState);
+  refreshIcons();
   renderedSignature = signature;
 }
 
@@ -225,6 +318,303 @@ function renderQuota(snapshot) {
   targets.quota.append(quotaWindow("5 hour", quota.five_hour), quotaWindow("Weekly", quota.weekly));
 }
 
+function renderOverview(snapshot) {
+  const counts = snapshot.counts || {};
+  document.getElementById("nav-running").textContent = number(counts.running);
+  document.getElementById("nav-review").textContent = number(counts.ready_for_acceptance);
+  document.getElementById("nav-owner").textContent = number(counts.blocked);
+  document.getElementById("nav-quarantine").textContent = number(counts.quarantined);
+
+  clear(targets.overviewCounters);
+  const stale = Boolean(snapshot.stale || Object.values(snapshot.sources || {}).some((source) => source?.status !== "fresh"));
+  overviewHistoryState.classList.toggle("is-stale", stale);
+  overviewHistoryState.textContent = stale ? "Last confirmed" : "Live";
+  overviewHistoryState.prepend(icon(stale ? "history" : "radio"));
+  targets.overviewCounters.append(
+    counterCard("users", "Workers", `${number(snapshot.workers?.running)} / ${number(snapshot.workers?.limit)}`),
+    counterCard("sparkles", "Ready AI", number(counts.ready_for_ai)),
+    counterCard("shield-alert", "Blocked", number(counts.blocked), "danger"),
+    counterCard("circle-check", "Ready review", number(counts.ready_for_acceptance), "good"),
+    counterCard("gauge", "Weekly used", snapshot.quota?.weekly ? formatPercent(snapshot.quota.weekly.used_percent) : "—"),
+  );
+
+  clear(targets.overviewActive);
+  targets.overviewActive.classList.remove("loading-block");
+  const active = snapshot.owner_view?.work_items || [];
+  if (!active.length) {
+    targets.overviewActive.append(emptyState("No active workers", "Ready AI remains queued until a worker starts."));
+  } else {
+    for (const item of active.slice(0, 4)) targets.overviewActive.append(compactWorkRow(item));
+  }
+
+  renderOverviewWaves(snapshot);
+  renderOverviewInfrastructure(snapshot);
+  renderOverviewChart(snapshot);
+}
+
+function counterCard(iconName, label, value, tone = "neutral") {
+  const card = el("div", `counter-card ${tone}`);
+  const heading = el("span", "counter-label");
+  heading.append(icon(iconName), document.createTextNode(label));
+  card.append(heading, el("strong", "", value));
+  return card;
+}
+
+function compactWorkRow(item) {
+  const row = el("div", "compact-work-row");
+  const copy = el("div");
+  copy.append(
+    el("strong", "", `#${item.number} · ${item.title || "Untitled Issue"}`),
+    el("small", "", `${modelName(item.model)} · ${item.display_phase || item.stage || "In progress"} · ${elapsed(item.started_at)}`),
+  );
+  const progress = el("div", "mini-progress");
+  const value = taskProgress(item);
+  progress.title = "Workflow-stage progress, not a time estimate.";
+  progress.setAttribute("aria-label", `Workflow stage progress ${value}%`);
+  const fill = el("span");
+  fill.style.width = `${value}%`;
+  progress.append(fill);
+  row.append(copy, progress, el("strong", "", `${value}%`));
+  return row;
+}
+
+function renderOverviewWaves(snapshot) {
+  clear(targets.overviewWaves);
+  const waves = Array.isArray(snapshot.release_waves?.waves) ? snapshot.release_waves.waves : [];
+  if (!waves.length) {
+    targets.overviewWaves.append(emptyState("Release wave data unavailable", "The UI is ready; the runtime has not exposed a deterministic wave queue yet."));
+    return;
+  }
+  for (const wave of waves.slice(0, 4)) targets.overviewWaves.append(waveCard(wave));
+}
+
+function renderOverviewInfrastructure(snapshot) {
+  clear(targets.overviewInfrastructure);
+  const hosts = Array.isArray(snapshot.infrastructure?.hosts) ? snapshot.infrastructure.hosts : [];
+  if (!hosts.length) {
+    const unavailable = el("section", "panel server-card");
+    unavailable.append(el("h3", "", "Infrastructure metrics unavailable"), el("p", "", "No deterministic host metrics source is configured."));
+    targets.overviewInfrastructure.append(unavailable);
+    return;
+  }
+  for (const host of hosts.slice(0, 3)) targets.overviewInfrastructure.append(serverCard(host));
+}
+
+function renderReview(snapshot) {
+  clear(targets.review);
+  const items = snapshot.owner_view?.ready_for_acceptance || [];
+  if (!items.length) {
+    targets.review.append(emptyState("Nothing awaiting acceptance", "Completed work will appear here after verified TEST delivery."));
+    return;
+  }
+  for (const item of items) targets.review.append(reviewCard(item));
+}
+
+function reviewCard(item) {
+  const card = ownerCard(item, "Ready for Acceptance", "good");
+  card.append(evidenceRow(item), usageRow(item.usage));
+  const actions = el("div", "row-actions");
+  const githubFresh = currentSnapshot?.sources?.github?.status === "fresh";
+  const testFresh = currentSnapshot?.sources?.test?.status === "fresh";
+  const itemTest = item.test || currentSnapshot?.test || {};
+  const disabled = !githubFresh || !testFresh || currentSnapshot?.test?.synced !== true || itemTest.synced !== true;
+  actions.append(
+    externalLink(itemTest.url, "Open TEST", "button secondary"),
+    actionButton("Accept", "accept", "primary", disabled, item.number),
+    actionButton("Rework", "rework", "secondary", !githubFresh, item.number),
+  );
+  card.append(actions);
+  return card;
+}
+
+function renderReleaseWaves(snapshot) {
+  clear(targets.waves);
+  const waves = Array.isArray(snapshot.release_waves?.waves) ? snapshot.release_waves.waves : [];
+  if (!waves.length) {
+    targets.waves.append(emptyState("Release wave data unavailable", "No wave queue is present in the deterministic snapshot. Direct delivery remains unchanged."));
+    return;
+  }
+  const grid = el("div", "wave-strip");
+  for (const wave of waves) grid.append(waveCard(wave));
+  targets.waves.append(grid);
+}
+
+function waveCard(wave) {
+  const card = el("article", "wave-card");
+  card.append(
+    badge(titleCase(wave.status || "queued"), statusTone(wave.status)),
+    el("h3", "", `Wave #${wave.number || "—"} · ${number(wave.ready_prs)} / ${number(wave.target_prs || 4)} PR`),
+    el("p", "", wave.summary || wave.blocker || "Waiting for deterministic delivery evidence."),
+  );
+  const progress = el("div", "task-progress");
+  const fill = el("span");
+  fill.style.width = `${Math.min(100, number(wave.progress_percent))}%`;
+  progress.append(fill);
+  card.append(progress);
+  return card;
+}
+
+function renderInfrastructure(snapshot) {
+  clear(targets.infrastructureCounters);
+  clear(targets.infrastructureHosts);
+  const infrastructure = snapshot.infrastructure || {};
+  const hosts = Array.isArray(infrastructure.hosts) ? infrastructure.hosts : [];
+  const runners = hosts.reduce((sum, host) => sum + number(host.runners_total), 0);
+  const busy = hosts.reduce((sum, host) => sum + number(host.runners_busy), 0);
+  targets.infrastructureCounters.append(
+    counterCard("server", "Hosts", hosts.length),
+    counterCard("cpu", "Runners", runners),
+    counterCard("activity", "Busy", busy),
+    counterCard("list-checks", "Queued jobs", number(infrastructure.queued_jobs)),
+    counterCard("triangle-alert", "Alerts", number(infrastructure.alerts), infrastructure.alerts ? "danger" : "neutral"),
+  );
+  if (!hosts.length) {
+    targets.infrastructureHosts.append(emptyState("Infrastructure metrics unavailable", "Configure a deterministic metrics source before CPU, RAM and runner charts can be shown."));
+  } else {
+    for (const host of hosts) targets.infrastructureHosts.append(serverCard(host));
+  }
+  renderInfrastructureChart(snapshot);
+}
+
+function serverCard(host) {
+  const card = el("article", "owner-card server-card");
+  const heading = el("h3");
+  heading.append(icon(host.kind === "local" ? "monitor" : "server"), document.createTextNode(host.name || "Host"));
+  card.append(heading, metricBar("CPU", host.cpu_percent), metricBar("RAM", host.memory_percent), el("p", "", `Runners ${number(host.runners_busy)}/${number(host.runners_total)}`));
+  if (Array.isArray(host.jobs) && host.jobs.length) card.append(el("p", "", host.jobs.map((job) => job.issue ? `#${job.issue} ${job.name || "CI"}` : job.name || "CI job").join(" · ")));
+  return card;
+}
+
+function metricBar(label, value) {
+  const numeric = optionalNumber(value);
+  const metric = el("div", "host-metric");
+  const heading = el("div", "host-metric-heading");
+  heading.append(el("span", "", label), el("strong", "", numeric === null ? "Unavailable" : formatPercent(numeric)));
+  const track = el("div", "host-metric-track");
+  const fill = el("span");
+  fill.style.width = numeric === null ? "0" : `${Math.min(100, Math.max(0, numeric))}%`;
+  track.classList.toggle("is-unavailable", numeric === null);
+  track.append(fill);
+  metric.append(heading, track);
+  return metric;
+}
+
+function renderAttentionPages(snapshot) {
+  clear(targets.needsOwner);
+  clear(targets.quarantine);
+  const blocked = snapshot.owner_view?.blocked || [];
+  const quarantines = snapshot.owner_view?.system_quarantines || [];
+  if (!blocked.length) targets.needsOwner.append(emptyState("No owner decisions", "Technical failures are kept out of this queue."));
+  for (const item of blocked) targets.needsOwner.append(attentionCard(item, false));
+  if (!quarantines.length) targets.quarantine.append(emptyState("No quarantined work", "Repeated deterministic failures will stop here instead of retrying forever."));
+  for (const item of quarantines) targets.quarantine.append(attentionCard(item, true));
+}
+
+function attentionCard(item, quarantine) {
+  const card = ownerCard(item, quarantine ? "System quarantine" : "Needs owner", quarantine ? "danger" : "warning");
+  const question = el("div", `owner-question ${quarantine ? "system-quarantine" : ""}`);
+  question.append(el("span", "question-label", quarantine ? "Failure reason" : "Owner question"), el("p", "", item.question || item.reason || "Owner input required"));
+  card.append(question);
+  const actions = el("div", "row-actions");
+  if (item.issue_url) actions.append(externalLink(item.issue_url, "Open Issue", "button secondary"));
+  if (quarantine) actions.append(actionButton("Retry clean", "run", "primary", currentSnapshot?.sources?.github?.status !== "fresh", item.number));
+  if (actions.childElementCount) card.append(actions);
+  return card;
+}
+
+function ownerCard(item, label, tone) {
+  const card = el("article", "owner-card");
+  card.dataset.issueCard = String(item.number || "");
+  const header = el("div", "owner-card-header");
+  header.append(el("h3", "", `#${item.number} · ${item.title || "Untitled Issue"}`), badge(label, tone));
+  card.append(header);
+  return card;
+}
+
+function escalationChain(model) {
+  const chain = el("div", "escalation-chain");
+  const history = Array.isArray(model?.escalation_history) ? model.escalation_history : [];
+  if (!history.length) {
+    chain.append(el("span", "model-tier is-active", modelName(model)));
+    return chain;
+  }
+  for (const step of history) {
+    chain.append(
+      el("span", "model-tier is-complete", titleCase(step.from)),
+      el("span", "escalation-reason", `→ ${titleCase(step.reason || "escalated")} →`),
+    );
+  }
+  chain.append(el("span", "model-tier is-active", modelName(model)));
+  return chain;
+}
+
+function taskProgress(item) {
+  const phase = String(item.display_phase || item.stage || item.status || "").toLowerCase();
+  if (item.pr?.merged === true && item.test?.synced === true) return 100;
+  if (phase.includes("test")) return 92;
+  if (phase.includes("merge") || item.ci?.status === "success") return 84;
+  if (phase.includes("ci") || item.pr) return 72;
+  if (phase.includes("review")) return 62;
+  return item.started_at ? 45 : 15;
+}
+
+function historySamples(snapshot) {
+  const history = Array.isArray(snapshot.history) ? snapshot.history : [];
+  return filterSamplesByRange(history, snapshot.refreshed_at || snapshot.generated_at);
+}
+
+function filterSamplesByRange(samples, reference) {
+  const ranges = { "60m": 60 * 60 * 1000, "12h": 12 * 60 * 60 * 1000, "24h": 24 * 60 * 60 * 1000, "3d": 3 * 24 * 60 * 60 * 1000 };
+  const latest = Date.parse(reference) || Date.parse(samples.at(-1)?.recorded_at) || Date.now();
+  const filtered = samples.filter((sample) => latest - Date.parse(sample.recorded_at) <= ranges[historyRange]);
+  return filtered.length ? filtered : samples.slice(-1);
+}
+
+function renderOverviewChart(snapshot) {
+  if (typeof Chart !== "function") return;
+  const samples = historySamples(snapshot);
+  const labels = samples.map((sample) => new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit" }).format(new Date(sample.recorded_at)));
+  const series = [
+    ["Ready AI", "ready_for_ai", "#64748b"], ["Running", "running", "#236ca8"], ["Blocked", "blocked", "#a83c36"], ["Ready review", "ready_for_acceptance", "#287d49"], ["Done", "done", "#ad5a17"],
+  ];
+  const data = series.map(([label, key, color]) => ({ label, data: samples.map((sample) => number(sample.counts?.[key])), borderColor: color, backgroundColor: color, borderWidth: 2, pointRadius: samples.length > 24 ? 0 : 2, tension: .24 }));
+  const signature = JSON.stringify([historyRange, labels, data.map((item) => item.data), document.documentElement.dataset.theme]);
+  if (signature === overviewChartSignature) return;
+  overviewChart?.destroy();
+  overviewChart = new Chart(document.getElementById("overview-status-chart"), { type: "line", data: { labels, datasets: data }, options: { responsive: true, maintainAspectRatio: false, interaction: { mode: "index", intersect: false }, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } }, plugins: { legend: { position: "bottom", labels: { boxWidth: 8, boxHeight: 8, usePointStyle: true } } } } });
+  overviewChartSignature = signature;
+}
+
+function renderInfrastructureChart(snapshot) {
+  if (typeof Chart !== "function") return;
+  const history = Array.isArray(snapshot.infrastructure?.history) ? snapshot.infrastructure.history : [];
+  const samples = filterSamplesByRange(history, snapshot.refreshed_at || snapshot.generated_at);
+  const canvas = document.getElementById("infrastructure-chart");
+  if (!samples.length) {
+    infrastructureChart?.destroy();
+    infrastructureChart = null;
+    infrastructureChartSignature = null;
+    canvas.hidden = true;
+    return;
+  }
+  canvas.hidden = false;
+  const hosts = Array.isArray(snapshot.infrastructure?.hosts) ? snapshot.infrastructure.hosts : [];
+  const labels = samples.map((sample) => new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit" }).format(new Date(sample.recorded_at)));
+  const colors = ["#287d49", "#236ca8", "#ad5a17", "#7c3aed"];
+  const datasets = hosts.flatMap((host, index) => {
+    const color = colors[index % colors.length];
+    return [
+      { label: `${host.name} CPU`, data: samples.map((sample) => optionalNumber(sample.hosts?.[host.name]?.cpu_percent)), borderColor: color, borderWidth: 2, pointRadius: 0, spanGaps: false, tension: .24 },
+      { label: `${host.name} RAM`, data: samples.map((sample) => optionalNumber(sample.hosts?.[host.name]?.memory_percent)), borderColor: color, borderDash: [5, 4], borderWidth: 1.5, pointRadius: 0, spanGaps: false, tension: .24 },
+    ];
+  });
+  const signature = JSON.stringify([historyRange, labels, datasets.map((item) => item.data), document.documentElement.dataset.theme]);
+  if (signature === infrastructureChartSignature) return;
+  infrastructureChart?.destroy();
+  infrastructureChart = new Chart(canvas, { type: "line", data: { labels, datasets }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 100 } }, plugins: { legend: { position: "bottom" } } } });
+  infrastructureChartSignature = signature;
+}
+
 function renderWorkbench(snapshot) {
   const tabs = workbenchTabs(snapshot);
   if (!activeTabInitialized) {
@@ -269,20 +659,22 @@ function renderWorkbench(snapshot) {
 
 function workbenchTabs(snapshot) {
   return [
-    ["blocked", "Needs owner", number(snapshot.counts?.blocked) + number(snapshot.counts?.quarantined), "danger"],
-    ["running", "Running", number(snapshot.counts?.running), "neutral"],
-    ["ready", "Ready", number(snapshot.counts?.ready_for_acceptance), "good"],
-    ["queue", "Queue", number(snapshot.counts?.ready_for_ai) + number(snapshot.counts?.backlog), "neutral"],
+    ["running", "Active workers", number(snapshot.counts?.running), "neutral"],
+    ["followups", "Waiting delivery", number(snapshot.counts?.queued), "warning"],
+    ["ready_ai", "Ready AI", number(snapshot.counts?.ready_for_ai), "good"],
+    ["backlog", "Backlog", number(snapshot.counts?.backlog), "neutral"],
   ];
 }
 
 function workItems(snapshot, tab) {
   const owner = snapshot.owner_view || {};
   const lanes = {
-    blocked: (owner.blocked || []).map((item) => ({ ...item, lane: "blocked" })).concat((owner.system_quarantines || []).map((item) => ({ ...item, lane: "quarantine" }))),
+    blocked: (owner.blocked || []).map((item) => ({ ...item, lane: "blocked" })),
+    quarantine: (owner.system_quarantines || []).map((item) => ({ ...item, lane: "quarantine" })),
     running: (owner.work_items || []).map((item) => ({ ...item, lane: "running" })),
-    ready: (owner.ready_for_acceptance || []).map((item) => ({ ...item, lane: "ready" })),
-    queue: (owner.backlog || []).map((item) => ({ ...item, lane: "queue" })),
+    followups: (owner.follow_ups || []).map((item) => ({ ...item, lane: "followups" })),
+    ready_ai: (owner.backlog || []).filter((item) => item.status === "Ready for AI").map((item) => ({ ...item, lane: "ready_ai" })),
+    backlog: (owner.backlog || []).filter((item) => item.status !== "Ready for AI").map((item) => ({ ...item, lane: "backlog" })),
   };
   const unique = new Map();
   for (const item of lanes[tab] || []) if (!unique.has(String(item.number))) unique.set(String(item.number), item);
@@ -291,7 +683,7 @@ function workItems(snapshot, tab) {
 
 function findWorkbenchItem(snapshot, issue) {
   if (issue === null || issue === undefined) return null;
-  for (const tab of ["blocked", "running", "ready", "queue"]) {
+  for (const tab of ["running", "followups", "ready_ai", "backlog"]) {
     const found = workItems(snapshot, tab).find((item) => String(item.number) === String(issue));
     if (found) return found;
   }
@@ -326,7 +718,13 @@ function issueTableRow(item) {
     const elapsedValue = el("span", "", elapsed(item.started_at));
     if (item.started_at) elapsedValue.dataset.startedAt = item.started_at;
     facts.append(elapsedValue, el("span", "", `${number(item.turn_count)} turns`));
-    progressCell.append(facts);
+    const taskBar = el("div", "task-progress");
+    taskBar.title = "Workflow-stage progress, not a time estimate.";
+    taskBar.setAttribute("aria-label", `Workflow stage progress ${taskProgress(item)}%`);
+    const taskFill = el("span");
+    taskFill.style.width = `${taskProgress(item)}%`;
+    taskBar.append(taskFill);
+    progressCell.append(facts, taskBar, escalationChain(item.model));
   }
 
   const deliveryCell = document.createElement("td");
@@ -342,7 +740,7 @@ function issueTableRow(item) {
     evidence.append(el("span", "muted", "—"));
   }
   deliveryCell.append(evidence);
-  if (item.lane === "running" || item.lane === "ready") {
+  if (item.lane === "running" || item.lane === "followups") {
     const tokens = item.usage?.total_tokens;
     const usage = el("div", "usage-summary", Number.isFinite(Number(tokens)) ? `${formatNumber(tokens)} tokens · ${estimatedCredits(item.usage?.estimated_credits_micros)}` : "Task usage unavailable");
     deliveryCell.append(usage);
@@ -390,33 +788,19 @@ function renderDrawer(item) {
   if (item.lane === "running") {
     const meta = el("div", "runtime-meta");
     meta.append(metaItem("Phase", item.display_phase || item.stage || item.status || "In progress"), metaItem("Model", modelName(item.model)), elapsedItem(item.started_at), metaItem("Turns", number(item.turn_count)));
-    issueDrawerContent.append(meta, evidenceRow(item), usageRow(item.usage));
-  } else if (item.lane === "ready") {
-    issueDrawerContent.append(evidenceRow(item), usageRow(item.usage));
-  } else if (item.lane === "queue") {
+    issueDrawerContent.append(meta, escalationChain(item.model), evidenceRow(item), usageRow(item.usage));
+  } else if (item.lane === "followups") {
+    issueDrawerContent.append(el("p", "drawer-summary", item.deferred_reason || item.error || "Waiting for the next deterministic delivery event."), evidenceRow(item), usageRow(item.usage));
+  } else if (item.lane === "ready_ai" || item.lane === "backlog") {
     issueDrawerContent.append(el("p", "drawer-summary", item.status === "Ready for AI" ? "Ready for AI: eligible to start when intake and GitHub state allow it." : "Backlog: not promoted until it is Ready for AI."));
   }
   const actions = el("div", "row-actions");
   const githubFresh = currentSnapshot?.sources?.github?.status === "fresh";
   const testFresh = currentSnapshot?.sources?.test?.status === "fresh";
   if (item.issue_url) actions.append(externalLink(item.issue_url, "Open Issue", "button secondary"));
-  if (item.lane === "quarantine" || item.lane === "queue") {
+  if (item.lane === "quarantine" || item.lane === "ready_ai" || item.lane === "backlog") {
     actions.append(actionButton("Start", "run", "primary", !githubFresh, item.number));
     if (!githubFresh) issueDrawerContent.append(actionHint("Start is unavailable until GitHub state is fresh."));
-  }
-  if (item.lane === "ready") {
-    const itemTest = item.test || currentSnapshot?.test || {};
-    const acceptDisabled = !githubFresh || !testFresh || currentSnapshot?.test?.synced !== true || itemTest.synced !== true;
-    actions.append(externalLink(itemTest.url, "Open TEST", "button secondary"), actionButton("Accept", "accept", "primary", acceptDisabled, item.number), actionButton("Rework", "rework", "secondary", !githubFresh, item.number));
-    if (!githubFresh) {
-      issueDrawerContent.append(actionHint("Actions are unavailable until GitHub state is fresh."));
-    } else if (!testFresh) {
-      issueDrawerContent.append(actionHint("Acceptance is unavailable until TEST evidence is fresh."));
-    } else if (currentSnapshot?.test?.synced !== true) {
-      issueDrawerContent.append(actionHint("Acceptance is unavailable: TEST is not on the canonical SHA."));
-    } else if (itemTest.synced !== true) {
-      issueDrawerContent.append(actionHint("Acceptance is unavailable: this Issue's TEST evidence is not synced."));
-    }
   }
   if (actions.childElementCount) issueDrawerContent.append(actions);
 }
@@ -424,13 +808,13 @@ function renderDrawer(item) {
 function renderWorkChart(snapshot) {
   if (typeof Chart !== "function") return;
   const counts = snapshot.counts || {};
-  const data = [number(counts.blocked), number(counts.running), number(counts.ready_for_acceptance), number(counts.ready_for_ai) + number(counts.backlog)];
+  const data = [number(counts.running), number(counts.queued), number(counts.ready_for_ai), number(counts.backlog)];
   const signature = JSON.stringify([data, document.documentElement.dataset.theme]);
   if (signature === workChartSignature) return;
   if (workChart) workChart.destroy();
   workChart = new Chart(document.getElementById("owner-work-chart"), {
     type: "doughnut",
-    data: { labels: ["Needs owner", "Running", "Ready", "Queue"], datasets: [{ data, backgroundColor: ["#b65742", "#64748b", "#167a54", "#9a7a30"], borderWidth: 0 }] },
+    data: { labels: ["Active", "Waiting delivery", "Ready AI", "Backlog"], datasets: [{ data, backgroundColor: ["#236ca8", "#ad5a17", "#287d49", "#64748b"], borderWidth: 0 }] },
     options: { responsive: true, maintainAspectRatio: false, cutout: "68%", plugins: { legend: { display: false }, tooltip: { displayColors: false } } },
   });
   workChartSignature = signature;
@@ -441,10 +825,8 @@ function narrowWorkbench() {
 }
 
 function laneLabel(item) {
-  if (item.lane === "blocked") return "Needs owner";
-  if (item.lane === "quarantine") return "System quarantine";
   if (item.lane === "running") return "Running";
-  if (item.lane === "ready") return "Ready for Acceptance";
+  if (item.lane === "followups") return "Waiting delivery";
   return item.status === "Ready for AI" ? "Ready for AI" : "Backlog";
 }
 
@@ -578,6 +960,8 @@ function fact(label, value, tone) {
 
 function actionButton(label, action, variant = "secondary", disabled = false, issue = null) {
   const button = el("button", `button ${variant}`, label);
+  const icons = { pause: "pause", resume: "play", restart: "rotate-cw", stop_service: "square", start_service: "power", accept: "check", rework: "undo-2", run: "play" };
+  if (icons[action]) button.prepend(icon(icons[action]));
   button.type = "button";
   button.dataset.action = action;
   if (issue !== null && issue !== undefined) button.dataset.issue = String(issue);
@@ -594,6 +978,7 @@ function actionHint(message) {
 function externalLink(url, label, className = "") {
   if (!url) return el("span", `${className} is-disabled`.trim(), label);
   const link = el("a", className, label);
+  if (className.split(" ").includes("button")) link.prepend(icon("external-link"));
   link.href = url;
   link.target = "_blank";
   link.rel = "noreferrer";
@@ -851,6 +1236,15 @@ function findOwnerItem(issue) {
 }
 
 function clear(node) { node.replaceChildren(); }
+function icon(name) {
+  const node = document.createElement("i");
+  node.dataset.lucide = name;
+  node.setAttribute("aria-hidden", "true");
+  return node;
+}
+function refreshIcons() {
+  if (window.lucide?.createIcons) window.lucide.createIcons();
+}
 function el(tag, className = "", text = null) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -858,6 +1252,11 @@ function el(tag, className = "", text = null) {
   return node;
 }
 function number(value) { return Number.isFinite(Number(value)) ? Number(value) : 0; }
+function optionalNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
 function formatNumber(value) { return Number.isFinite(Number(value)) ? new Intl.NumberFormat("en").format(Number(value)) : "—"; }
 function formatPercent(value) { return `${new Intl.NumberFormat("en", { maximumFractionDigits: 1 }).format(Number(value))}%`; }
 function shortSha(value) { return value ? String(value).slice(0, 8) : "Unknown"; }
@@ -882,6 +1281,21 @@ function activateOwnerTab(key, focus = false) {
 }
 
 document.addEventListener("click", (event) => {
+  const page = event.target.closest("button[data-page]");
+  if (page) {
+    activatePage(page.dataset.page, true);
+    return;
+  }
+  const pageLink = event.target.closest("[data-go-page]");
+  if (pageLink) {
+    activatePage(pageLink.dataset.goPage);
+    return;
+  }
+  const range = event.target.closest("[data-history-range]");
+  if (range) {
+    setHistoryRange(range.dataset.historyRange);
+    return;
+  }
   const tab = event.target.closest("[data-owner-tab]");
   if (tab) {
     activateOwnerTab(tab.dataset.ownerTab, true);
@@ -929,8 +1343,13 @@ document.getElementById("dialog-close").addEventListener("click", () => actionDi
 document.getElementById("dialog-cancel").addEventListener("click", () => actionDialog.close());
 actionDialog.addEventListener("close", () => { if (!actionInFlight) pendingAction = null; });
 refreshButton.addEventListener("click", () => refreshSnapshot());
+historyRangeSelect.addEventListener("change", () => setHistoryRange(historyRangeSelect.value));
 document.getElementById("runtime-diagnostics").addEventListener("toggle", (event) => { if (event.target.open) loadLogs(); });
 window.setInterval(() => document.querySelectorAll("[data-started-at]").forEach((node) => { node.textContent = elapsed(node.dataset.startedAt); }), 1000);
 window.setInterval(() => refreshSnapshot({ announce: false }), 5000);
+buildMobileNav();
+setHistoryRange("60m");
 setTheme(initialTheme(), false);
+activatePage("overview");
+refreshIcons();
 refreshSnapshot();

@@ -246,6 +246,33 @@ class SnapshotServiceTest(unittest.TestCase):
         self.assertEqual(snapshot["workers"], {"running": 0, "limit": 2})
         self.assertEqual(github.reconcile_requests, [True])
 
+    def test_snapshot_exposes_persisted_three_day_status_history(self):
+        service = SnapshotService(
+            symphony=FakeSymphony(),
+            github=FakeGitHub(),
+            test_environment=FakeTest(),
+            supervisor=FakeSupervisor(),
+            state_store=self.store,
+            worker_limit=12,
+            canonical_ref="rebrand/stanina",
+        )
+
+        snapshot = service.snapshot()
+
+        self.assertEqual(len(snapshot["history"]), 1)
+        self.assertEqual(
+            snapshot["history"][0]["counts"],
+            {
+                "ready_for_ai": 0,
+                "running": 0,
+                "blocked": 0,
+                "ready_for_acceptance": 0,
+                "done": 0,
+            },
+        )
+        self.assertEqual(snapshot["history"][0]["workers"], {"running": 0, "limit": 12})
+        self.assertEqual(self.store.status_history(), snapshot["history"])
+
     def test_cached_snapshot_fails_closed_until_initial_collection_completes(self):
         service = SnapshotService(
             symphony=FakeSymphony(),

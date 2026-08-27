@@ -9,52 +9,79 @@
     <script src="/assets/theme-init.js"></script>
     <link rel="stylesheet" href="/assets/owner-control.css">
     <script src="/assets/chart.umd.min.js" defer></script>
+    <script src="/assets/lucide.min.js" defer></script>
     <script src="/assets/owner-control.js" defer></script>
   </head>
   <body>
     <div class="app-shell" id="app" aria-busy="true">
-      <header class="topbar" id="owner-header">
-        <div class="brand-lockup"><p class="eyebrow">Symphony</p><h1>Owner Control</h1></div>
-        <div class="topbar-actions">
-          <span class="status-chip is-loading" id="snapshot-status">Loading…</span>
-          <button class="icon-button" id="theme-toggle" type="button" aria-label="Use dark theme" aria-pressed="false">◐</button>
-          <button class="icon-button" id="refresh-button" type="button" aria-label="Refresh snapshot">↻</button>
-          <a class="quiet-link" id="runtime-link" href="{{RUNTIME_DIAGNOSTICS_URL}}">Runtime ↗</a>
-        </div>
-      </header>
+      <aside class="primary-sidebar" aria-label="Owner Control navigation">
+        <div class="brand-lockup sidebar-brand"><p class="eyebrow">Symphony</p><strong>Owner Control</strong></div>
+        <nav class="primary-nav" id="primary-nav">
+          <button class="primary-nav-item is-active" type="button" data-page="overview"><i data-lucide="layout-dashboard"></i><span>Overview</span></button>
+          <button class="primary-nav-item" type="button" data-page="work"><i data-lucide="activity"></i><span>Work</span><b id="nav-running">0</b></button>
+          <button class="primary-nav-item" type="button" data-page="review"><i data-lucide="circle-check-big"></i><span>Review</span><b id="nav-review">0</b></button>
+          <button class="primary-nav-item" type="button" data-page="waves"><i data-lucide="git-merge"></i><span>Release waves</span></button>
+          <button class="primary-nav-item" type="button" data-page="infrastructure"><i data-lucide="server"></i><span>Infrastructure</span></button>
+          <button class="primary-nav-item" type="button" data-page="owner"><i data-lucide="message-circle-question"></i><span>Needs owner</span><b id="nav-owner">0</b></button>
+          <button class="primary-nav-item" type="button" data-page="quarantine"><i data-lucide="shield-alert"></i><span>Quarantine</span><b id="nav-quarantine">0</b></button>
+          <button class="primary-nav-item" type="button" data-page="runtime"><i data-lucide="terminal"></i><span>Runtime</span></button>
+        </nav>
+      </aside>
 
-      <div class="notice is-hidden" id="global-notice" role="status"></div>
-
-      <main>
-        <section class="summary-grid" aria-label="Service and delivery summary">
-          <section class="panel service-panel summary-card" aria-labelledby="service-title">
-            <div class="section-heading compact"><div><p class="section-kicker">Service</p><h2 id="service-title">Checking Symphony…</h2></div><div class="service-actions" id="service-actions"></div></div>
-            <div class="service-facts" id="service-facts"></div>
-          </section>
-          <section class="panel summary-card" aria-labelledby="delivery-title"><div class="section-heading compact"><h2 id="delivery-title">Delivery</h2></div><div id="delivery-content" class="loading-block" role="status" aria-label="Loading delivery state"></div></section>
-          <section class="panel summary-card" aria-labelledby="quota-title"><div class="section-heading compact"><h2 id="quota-title">Codex quota</h2></div><div id="quota-content" class="loading-block" role="status" aria-label="Loading Codex quota"></div></section>
-        </section>
-
-        <section class="panel workbench" aria-labelledby="workbench-title">
-          <div class="workbench-heading"><div><p class="section-kicker">Owner workbench</p><h2 id="workbench-title">Work at a glance</h2></div><div class="work-chart-wrap"><canvas id="owner-work-chart" aria-label="Owner work by status" role="img"></canvas></div></div>
-          <nav class="owner-tabs" id="owner-tabs" role="tablist" aria-label="Owner work queues"></nav>
-          <div class="workbench-body">
-            <section class="issue-table-panel" id="issue-table-panel" role="tabpanel" aria-live="polite">
-              <div class="issue-table-wrap"><table class="issue-table" id="issue-table"><thead><tr><th scope="col">Issue</th><th scope="col">State</th><th scope="col">Progress</th><th scope="col">Delivery / usage</th></tr></thead><tbody id="issue-table-body"><tr><td colspan="4" class="loading-cell">Loading work…</td></tr></tbody></table></div>
-              <button class="show-more is-hidden" id="issue-show-more" type="button">Show more</button>
-            </section>
-            <aside class="issue-drawer" id="issue-drawer" aria-hidden="true" aria-labelledby="issue-drawer-title" inert>
-              <div class="drawer-heading"><div><p class="section-kicker" id="issue-drawer-kicker">Select an Issue</p><h2 id="issue-drawer-title">Issue details</h2></div><button class="icon-button" id="issue-drawer-close" type="button" aria-label="Close issue details">×</button></div>
-              <div id="issue-drawer-content"><p class="muted">Select an Issue to review evidence and available owner actions.</p></div>
-            </aside>
+      <div class="app-content">
+        <header class="topbar" id="owner-header">
+          <div><p class="eyebrow" id="page-kicker">Owner dashboard</p><h1 id="page-title">Overview</h1></div>
+          <div class="topbar-actions">
+            <div class="history-range" id="history-range" hidden>
+              <span class="history-range-label"><i data-lucide="clock-3"></i>Range</span>
+              <div class="history-range-buttons">
+                <button class="is-active" type="button" data-history-range="60m">60m</button>
+                <button type="button" data-history-range="12h">12h</button>
+                <button type="button" data-history-range="24h">24h</button>
+                <button type="button" data-history-range="3d">3d</button>
+              </div>
+              <select class="history-range-select" aria-label="Chart history range"><option value="60m">60m</option><option value="12h">12h</option><option value="24h">24h</option><option value="3d">3d</option></select>
+            </div>
+            <span class="status-chip is-loading" id="snapshot-status">Loading…</span>
+            <button class="icon-button" id="theme-toggle" type="button" aria-label="Use dark theme" aria-pressed="false"><i data-lucide="moon"></i></button>
+            <button class="icon-button" id="refresh-button" type="button" aria-label="Refresh snapshot"><i data-lucide="refresh-cw"></i></button>
           </div>
-        </section>
+        </header>
 
-        <details class="panel diagnostics" id="runtime-diagnostics"><summary>Runtime diagnostics</summary><div id="source-health"></div><div id="diagnostic-work" class="diagnostic-work"></div><pre id="diagnostic-logs">Open to load recent logs.</pre></details>
-      </main>
+        <div class="mobile-nav-wrap"><nav class="mobile-nav" id="mobile-nav" aria-label="Mobile Owner Control navigation"></nav></div>
+        <div class="notice is-hidden" id="global-notice" role="status"></div>
+
+        <main>
+          <section class="page-panel" id="page-overview" data-page="overview">
+            <section class="summary-grid" aria-label="Service and delivery summary">
+              <section class="panel service-panel summary-card" aria-labelledby="service-title"><div class="section-heading compact"><div><p class="section-kicker">Service</p><h2 id="service-title">Checking Symphony…</h2></div><div class="service-actions" id="service-actions"></div></div><div class="service-facts" id="service-facts"></div></section>
+              <section class="panel summary-card" aria-labelledby="delivery-title"><div class="section-heading compact"><h2 id="delivery-title"><i data-lucide="git-commit-horizontal"></i>Delivery</h2></div><div id="delivery-content" class="loading-block" role="status" aria-label="Loading delivery state"></div></section>
+              <section class="panel summary-card" aria-labelledby="quota-title"><div class="section-heading compact"><h2 id="quota-title"><i data-lucide="gauge"></i>Codex quota</h2></div><div id="quota-content" class="loading-block" role="status" aria-label="Loading Codex quota"></div></section>
+            </section>
+            <section class="counter-grid" id="overview-counters" aria-label="Owner counters"></section>
+            <div class="overview-grid">
+              <section class="panel chart-panel"><div class="section-heading compact"><div><h2>Tasks by status</h2><p class="muted" id="overview-chart-range">Last 60 minutes</p></div><span class="live-label" id="overview-history-state"><i data-lucide="radio"></i>Live</span></div><div class="status-chart-wrap"><canvas id="overview-status-chart" aria-label="Task counts by status over time" role="img"></canvas></div></section>
+              <section class="panel"><div class="section-heading compact"><div><h2>Active work</h2><p class="muted">Real Symphony workers only</p></div><button class="button secondary" type="button" data-go-page="work">View all</button></div><div id="overview-active" class="compact-list loading-block"></div></section>
+            </div>
+            <section class="panel overview-release"><div class="section-heading compact"><div><h2><i data-lucide="git-merge"></i>Release flow</h2><p class="muted">Active and queued waves when the runtime exposes them</p></div><button class="button secondary" type="button" data-go-page="waves">Open release waves</button></div><div id="overview-waves" class="wave-strip"></div></section>
+            <section class="infrastructure-summary" id="overview-infrastructure"></section>
+          </section>
+
+          <section class="page-panel" id="page-work" data-page="work" hidden>
+            <section class="panel workbench" aria-labelledby="workbench-title"><div class="workbench-heading"><div><p class="section-kicker">Symphony work</p><h2 id="workbench-title">Current work</h2></div><div class="work-chart-wrap"><canvas id="owner-work-chart" aria-label="Owner work by status" role="img"></canvas></div></div><nav class="owner-tabs" id="owner-tabs" role="tablist" aria-label="Work queues"></nav><div class="workbench-body"><section class="issue-table-panel" id="issue-table-panel" role="tabpanel" aria-live="polite"><div class="issue-table-wrap"><table class="issue-table" id="issue-table"><thead><tr><th scope="col">Issue</th><th scope="col">State</th><th scope="col">Progress</th><th scope="col">Delivery / usage</th></tr></thead><tbody id="issue-table-body"><tr><td colspan="4" class="loading-cell">Loading work…</td></tr></tbody></table></div><button class="show-more is-hidden" id="issue-show-more" type="button">Show more</button></section><aside class="issue-drawer" id="issue-drawer" aria-hidden="true" aria-labelledby="issue-drawer-title" inert><div class="drawer-heading"><div><p class="section-kicker" id="issue-drawer-kicker">Select an Issue</p><h2 id="issue-drawer-title">Issue details</h2></div><button class="icon-button" id="issue-drawer-close" type="button" aria-label="Close issue details"><i data-lucide="x"></i></button></div><div id="issue-drawer-content"><p class="muted">Select an Issue to review evidence and available owner actions.</p></div></aside></div></section>
+          </section>
+
+          <section class="page-panel" id="page-review" data-page="review" hidden><div class="page-heading"><div><p class="section-kicker">Owner acceptance</p><h2>Ready for Acceptance</h2></div></div><div class="card-list" id="review-content"></div></section>
+          <section class="page-panel" id="page-waves" data-page="waves" hidden><div class="page-heading"><div><p class="section-kicker">Delivery queue</p><h2>Release waves</h2></div></div><div id="waves-content"></div></section>
+          <section class="page-panel" id="page-infrastructure" data-page="infrastructure" hidden><div class="counter-grid" id="infrastructure-counters"></div><div class="card-list infrastructure-hosts" id="infrastructure-hosts"></div><section class="panel chart-panel"><div class="section-heading compact"><div><h2>Compare all hosts</h2><p class="muted" id="infrastructure-chart-range">Last 60 minutes</p></div></div><div class="infrastructure-chart-wrap"><canvas id="infrastructure-chart" aria-label="Infrastructure load over time" role="img"></canvas></div></section></section>
+          <section class="page-panel" id="page-owner" data-page="owner" hidden><div class="page-heading"><div><p class="section-kicker">Concrete decisions only</p><h2>Needs owner</h2></div></div><div class="card-list" id="needs-owner-content"></div></section>
+          <section class="page-panel" id="page-quarantine" data-page="quarantine" hidden><div class="page-heading"><div><p class="section-kicker">Retry circuit breaker</p><h2>Quarantine</h2></div></div><div class="card-list" id="quarantine-content"></div></section>
+          <section class="page-panel" id="page-runtime" data-page="runtime" hidden><details class="panel diagnostics" id="runtime-diagnostics"><summary>Runtime diagnostics</summary><div id="source-health"></div><div id="diagnostic-work" class="diagnostic-work"></div><pre id="diagnostic-logs">Open to load recent logs.</pre><a class="quiet-link" id="runtime-link" href="{{RUNTIME_DIAGNOSTICS_URL}}">Open native Symphony diagnostics ↗</a></details></section>
+        </main>
+      </div>
     </div>
 
     <div class="toast-region" id="toast-region" aria-live="polite"></div>
-    <dialog id="action-dialog" aria-labelledby="dialog-title"><form method="dialog" id="dialog-form"><div class="dialog-heading"><div><p class="section-kicker" id="dialog-kicker">Confirm action</p><h2 id="dialog-title"></h2></div><button class="icon-button" id="dialog-close" type="button" aria-label="Close dialog">×</button></div><div id="dialog-body"></div><div class="dialog-actions"><button class="button secondary" id="dialog-cancel" type="button">Cancel</button><button class="button primary" id="dialog-confirm" type="submit">Confirm</button></div></form></dialog>
+    <dialog id="action-dialog" aria-labelledby="dialog-title"><form method="dialog" id="dialog-form"><div class="dialog-heading"><div><p class="section-kicker" id="dialog-kicker">Confirm action</p><h2 id="dialog-title"></h2></div><button class="icon-button" id="dialog-close" type="button" aria-label="Close dialog"><i data-lucide="x"></i></button></div><div id="dialog-body"></div><div class="dialog-actions"><button class="button secondary" id="dialog-cancel" type="button">Cancel</button><button class="button primary" id="dialog-confirm" type="submit">Confirm</button></div></form></dialog>
   </body>
 </html>
