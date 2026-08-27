@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -34,6 +35,36 @@ SNAPSHOT = {
         "backlog": 7,
         "done": 18,
     },
+    "history": [
+        {"recorded_at": "2026-08-24T08:30:00Z", "counts": {"ready_for_ai": 6, "running": 1, "blocked": 2, "ready_for_acceptance": 0, "done": 15}, "workers": {"running": 1, "limit": 5}},
+        {"recorded_at": "2026-08-24T08:45:00Z", "counts": {"ready_for_ai": 5, "running": 2, "blocked": 2, "ready_for_acceptance": 0, "done": 15}, "workers": {"running": 2, "limit": 5}},
+        {"recorded_at": "2026-08-24T09:00:00Z", "counts": {"ready_for_ai": 4, "running": 2, "blocked": 1, "ready_for_acceptance": 1, "done": 16}, "workers": {"running": 2, "limit": 5}},
+        {"recorded_at": "2026-08-24T09:15:00Z", "counts": {"ready_for_ai": 3, "running": 2, "blocked": 1, "ready_for_acceptance": 1, "done": 17}, "workers": {"running": 2, "limit": 5}},
+        {"recorded_at": "2026-08-24T09:30:00Z", "counts": {"ready_for_ai": 2, "running": 2, "blocked": 1, "ready_for_acceptance": 1, "done": 18}, "workers": {"running": 2, "limit": 5}},
+    ],
+    "release_waves": {
+        "waves": [
+            {"number": 28, "status": "testing", "ready_prs": 3, "target_prs": 4, "progress_percent": 78, "summary": "Canonical CI is running for the active release wave."},
+            {"number": 29, "status": "queued", "ready_prs": 4, "target_prs": 4, "progress_percent": 100, "summary": "Queued behind wave #28."},
+            {"number": 30, "status": "forming", "ready_prs": 2, "target_prs": 4, "progress_percent": 50, "summary": "Collecting two more compatible PRs."},
+        ]
+    },
+    "infrastructure": {
+        "queued_jobs": 3,
+        "alerts": 0,
+        "hosts": [
+            {"name": "Local Symphony", "kind": "local", "cpu_percent": 31, "memory_percent": 48, "runners_busy": 0, "runners_total": 0, "jobs": [{"issue": 401, "name": "Terra session"}]},
+            {"name": "CI_1", "kind": "ci", "cpu_percent": 57, "memory_percent": 62, "runners_busy": 3, "runners_total": 3, "jobs": [{"issue": 401, "name": "Backend"}, {"issue": 402, "name": "Frontend"}]},
+            {"name": "CI_2", "kind": "ci", "cpu_percent": 84, "memory_percent": 71, "runners_busy": 4, "runners_total": 5, "jobs": [{"issue": 399, "name": "E2E"}]},
+        ],
+        "history": [
+            {"recorded_at": "2026-08-24T08:30:00Z", "hosts": {"Local Symphony": {"cpu_percent": 12, "memory_percent": 41}, "CI_1": {"cpu_percent": 24, "memory_percent": 46}, "CI_2": {"cpu_percent": 38, "memory_percent": 58}}},
+            {"recorded_at": "2026-08-24T08:45:00Z", "hosts": {"Local Symphony": {"cpu_percent": 38, "memory_percent": 44}, "CI_1": {"cpu_percent": 48, "memory_percent": 52}, "CI_2": {"cpu_percent": 74, "memory_percent": 64}}},
+            {"recorded_at": "2026-08-24T09:00:00Z", "hosts": {"Local Symphony": {"cpu_percent": 29, "memory_percent": 47}, "CI_1": {"cpu_percent": 63, "memory_percent": 59}, "CI_2": {"cpu_percent": 88, "memory_percent": 69}}},
+            {"recorded_at": "2026-08-24T09:15:00Z", "hosts": {"Local Symphony": {"cpu_percent": 42, "memory_percent": 49}, "CI_1": {"cpu_percent": 51, "memory_percent": 61}, "CI_2": {"cpu_percent": 79, "memory_percent": 72}}},
+            {"recorded_at": "2026-08-24T09:30:00Z", "hosts": {"Local Symphony": {"cpu_percent": 31, "memory_percent": 48}, "CI_1": {"cpu_percent": 57, "memory_percent": 62}, "CI_2": {"cpu_percent": 84, "memory_percent": 71}}},
+        ],
+    },
     "sources": {
         "supervisor": {"status": "fresh", "confirmed_at": "2026-08-24T09:30:00Z", "error": None},
         "runtime": {"status": "fresh", "confirmed_at": "2026-08-24T09:30:00Z", "error": None},
@@ -61,7 +92,11 @@ SNAPSHOT = {
                 "status": "running",
                 "started_at": "2026-08-24T09:02:00Z",
                 "turn_count": 7,
-                "model": {"selected_tier": "terra", "actual_model": "gpt-5.6-terra"},
+                "model": {
+                    "selected_tier": "terra",
+                    "actual_model": "gpt-5.6-terra",
+                    "escalation_history": [{"from": "luna", "reason": "max turns"}],
+                },
                 "pr": {"number": 421, "url": "https://github.test/pull/421"},
                 "ci": {"status": "pending", "url": "https://github.test/pull/421/checks"},
                 "test": {"status": "waiting", "url": "https://test.example"},
@@ -158,7 +193,26 @@ class FixtureActions:
         return {"status": "accepted", "action": action, "params": copy.deepcopy(params)}
 
 
+def refresh_fixture_clock() -> None:
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+
+    def iso(value: datetime) -> str:
+        return value.isoformat().replace("+00:00", "Z")
+
+    SNAPSHOT["generated_at"] = iso(now)
+    SNAPSHOT["refreshed_at"] = iso(now)
+    for source in SNAPSHOT["sources"].values():
+        source["confirmed_at"] = iso(now)
+    SNAPSHOT["owner_view"]["work_items"][0]["started_at"] = iso(now - timedelta(minutes=28))
+    SNAPSHOT["owner_view"]["work_items"][1]["started_at"] = iso(now - timedelta(minutes=12))
+    for index, sample in enumerate(SNAPSHOT["history"]):
+        sample["recorded_at"] = iso(now - timedelta(minutes=15 * (len(SNAPSHOT["history"]) - index - 1)))
+    for index, sample in enumerate(SNAPSHOT["infrastructure"]["history"]):
+        sample["recorded_at"] = iso(now - timedelta(minutes=15 * (len(SNAPSHOT["infrastructure"]["history"]) - index - 1)))
+
+
 if __name__ == "__main__":
+    refresh_fixture_clock()
     mode = os.environ.get("OWNER_UI_FIXTURE_MODE", "healthy")
     if mode == "stale":
         SNAPSHOT["stale"] = True

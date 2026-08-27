@@ -238,6 +238,22 @@ class SnapshotService:
         snapshot["sources"] = sources
         snapshot["stale"] = any(source.get("status") != "fresh" for source in sources.values())
         snapshot["refreshed_at"] = refreshed_at
+        snapshot["history"] = self._state_store.record_status_sample(
+            {
+                "recorded_at": refreshed_at,
+                "counts": {
+                    key: snapshot["counts"].get(key, 0)
+                    for key in (
+                        "ready_for_ai",
+                        "running",
+                        "blocked",
+                        "ready_for_acceptance",
+                        "done",
+                    )
+                },
+                "workers": snapshot["workers"],
+            }
+        )
         return snapshot
 
     def _github_projection(

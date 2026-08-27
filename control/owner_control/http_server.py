@@ -31,6 +31,7 @@ _ASSETS = {
     "/assets/theme-init.js": ("theme-init.js", "text/javascript; charset=utf-8"),
     "/assets/owner-control.css": ("owner-control.css", "text/css; charset=utf-8"),
     "/assets/chart.umd.min.js": ("chart.umd.min.js", "text/javascript; charset=utf-8"),
+    "/assets/lucide.min.js": ("lucide.min.js", "text/javascript; charset=utf-8"),
     "/assets/owner-control.js": ("owner-control.js", "text/javascript; charset=utf-8"),
 }
 _CSP = (

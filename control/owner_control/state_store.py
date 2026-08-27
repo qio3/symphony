@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,48 @@ class StateStore:
     def quarantines(self) -> dict[str, dict[str, Any]]:
         value = self.read().get("system_quarantines")
         return value if isinstance(value, dict) else {}
+
+    def status_history(self) -> list[dict[str, Any]]:
+        value = self.read().get("status_history")
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, dict)]
+
+    def record_status_sample(
+        self,
+        sample: dict[str, Any],
+        *,
+        minimum_interval_seconds: int = 60,
+        retention_seconds: int = 3 * 24 * 60 * 60,
+    ) -> list[dict[str, Any]]:
+        recorded_at = _timestamp(sample.get("recorded_at"))
+        if recorded_at is None:
+            raise ValueError("status sample requires an ISO recorded_at timestamp")
+        normalized = {
+            "recorded_at": sample["recorded_at"],
+            "counts": dict(sample.get("counts") or {}),
+            "workers": dict(sample.get("workers") or {}),
+        }
+        cutoff = recorded_at - max(int(retention_seconds), 0)
+
+        with self._lock:
+            state = self._read_unlocked()
+            raw_history = state.get("status_history")
+            history = []
+            for item in raw_history if isinstance(raw_history, list) else []:
+                timestamp = _timestamp(item.get("recorded_at")) if isinstance(item, dict) else None
+                if timestamp is not None and cutoff <= timestamp <= recorded_at:
+                    history.append(item)
+            history.sort(key=lambda item: _timestamp(item.get("recorded_at")) or 0)
+
+            previous_at = _timestamp(history[-1].get("recorded_at")) if history else None
+            if previous_at is None or recorded_at - previous_at >= max(int(minimum_interval_seconds), 1):
+                history.append(normalized)
+
+            if history != raw_history:
+                state["status_history"] = history
+                self._write_unlocked(state)
+            return history
 
     def quarantine_for(self, issue: int) -> dict[str, Any] | None:
         if type(issue) is not int or issue <= 0:
@@ -87,3 +130,15 @@ class StateStore:
         temporary = self._path.with_suffix(self._path.suffix + ".tmp")
         temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(temporary, self._path)
+
+
+def _timestamp(value: Any) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
