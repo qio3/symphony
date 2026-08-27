@@ -31,6 +31,7 @@ def main() -> None:
         token=config.github_token,
         repository=config.github_repository,
         project_id=config.github_project_id,
+        mutation_logger=store.append_mutation,
     )
     snapshots = SnapshotService(
         symphony=SymphonyClient(config.symphony_url),
@@ -75,7 +76,7 @@ def main() -> None:
         (config.bind_host, config.bind_port),
         token=config.control_token,
         snapshot_provider=snapshots.snapshot,
-        intake_provider=store.intake_active,
+        intake_provider=lambda: bool(snapshots.snapshot().get("intake", {}).get("active")),
         action_service=actions,
         logs_provider=supervisor.logs,
         runtime_diagnostics_url=config.symphony_url.rstrip("/") + "/",

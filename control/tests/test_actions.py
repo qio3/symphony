@@ -71,6 +71,7 @@ class ActionServiceTest(unittest.TestCase):
         self.lifecycle = FakeLifecycle()
         self.supervisor = FakeSupervisor()
         self.snapshot = {
+            "workers": {"running": 0, "limit": 12, "maximum": 12},
             "test": {"synced": True},
             "sources": {
                 "supervisor": {"status": "fresh"},
@@ -80,7 +81,13 @@ class ActionServiceTest(unittest.TestCase):
             },
             "issues": {
                 "401": {"number": 401, "status": "Backlog", "state": "OPEN", "labels": []},
-                "402": {"number": 402, "status": "Ready for Acceptance", "state": "OPEN", "labels": []},
+                "402": {
+                    "number": 402,
+                    "status": "Ready for Acceptance",
+                    "state": "OPEN",
+                    "labels": [],
+                    "test": {"sha": "deployed", "merge_sha": "merged", "contains_merge": True},
+                },
                 "403": {"number": 403, "status": "Ready for AI", "state": "OPEN", "labels": []},
                 "404": {"number": 404, "status": "In Progress", "state": "OPEN", "labels": []},
                 "405": {"number": 405, "status": "In Progress", "state": "OPEN", "labels": ["symphony"]},
@@ -429,8 +436,7 @@ class ActionServiceTest(unittest.TestCase):
         )
 
         self.snapshot["test"]["synced"] = False
-        with self.assertRaisesRegex(ActionError, "TEST is not synced"):
-            self.actions.execute("accept", {"issue": 402})
+        self.actions.execute("accept", {"issue": 402})
 
         with self.assertRaisesRegex(ActionError, "Ready for Acceptance"):
             self.actions.execute("accept", {"issue": 401})
@@ -438,10 +444,11 @@ class ActionServiceTest(unittest.TestCase):
     def test_accept_rejects_issue_specific_test_drift(self):
         self.snapshot["issues"]["402"]["test"] = {
             "sha": "outdated",
-            "synced": False,
+            "merge_sha": "merged",
+            "contains_merge": False,
         }
 
-        with self.assertRaisesRegex(ActionError, "Issue TEST is not synced"):
+        with self.assertRaisesRegex(ActionError, "does not contain the Issue merge"):
             self.actions.execute("accept", {"issue": 402})
 
         self.assertEqual(self.lifecycle.calls, [])
@@ -453,6 +460,16 @@ class ActionServiceTest(unittest.TestCase):
 
         self.assertEqual(self.lifecycle.calls, [("close_issue", 402)])
 
+    def test_duplicate_owner_action_returns_the_first_result_without_repeating_mutations(self):
+        first = self.actions.execute("accept", {"issue": 402})
+        second = self.actions.execute("accept", {"issue": 402})
+
+        self.assertEqual(second, first)
+        self.assertEqual(
+            self.lifecycle.calls,
+            [("set_status", 402, "Done"), ("close_issue", 402)],
+        )
+
     def test_pause_resume_and_restart_use_control_state_and_fixed_supervisor(self):
         self.assertTrue(self.actions.execute("pause", {})["intake"]["active"] is False)
         self.assertFalse(self.store.intake_active())
@@ -462,6 +479,27 @@ class ActionServiceTest(unittest.TestCase):
         self.actions.execute("restart", {})
         self.assertEqual(self.supervisor.restart_count, 1)
         self.assertGreater(self.store.read()["expected_service_restart_until"], 0)
+
+    def test_owner_can_set_a_bounded_worker_limit(self):
+        result = self.actions.execute("set_workers", {"limit": 8})
+
+        self.assertEqual(result["workers"], {"limit": 8, "maximum": 12})
+        self.assertEqual(self.store.worker_limit(12), 8)
+
+        with self.assertRaisesRegex(ActionError, "between 1 and 12"):
+            self.actions.execute("set_workers", {"limit": 13})
+
+    def test_resume_refuses_red_canonical_ci(self):
+        self.store.set_intake_active(False)
+        self.snapshot["systemic_gate"] = {
+            "blocked": True,
+            "reason": "canonical CI is failing",
+        }
+
+        with self.assertRaisesRegex(ActionError, "canonical CI is failing"):
+            self.actions.execute("resume", {})
+
+        self.assertFalse(self.store.intake_active())
 
     def test_restart_marks_the_fixed_action_in_progress_until_cache_invalidation(self):
         self.supervisor.release_restart.clear()

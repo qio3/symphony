@@ -31,7 +31,13 @@ defmodule SymphonyElixir.AgentRunner do
 
     Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
-    case run_on_worker_host(issue, codex_update_recipient, opts, worker_host, model_route) do
+    case run_with_workspace_recovery(
+           issue,
+           codex_update_recipient,
+           opts,
+           worker_host,
+           model_route
+         ) do
       :ok ->
         :ok
 
@@ -49,6 +55,41 @@ defmodule SymphonyElixir.AgentRunner do
             raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
         end
     end
+  end
+
+  defp run_with_workspace_recovery(issue, recipient, opts, worker_host, model_route) do
+    case run_on_worker_host(issue, recipient, opts, worker_host, model_route) do
+      {:error, {:workspace_hook_failed, "before_run", status, output}}
+      when is_binary(output) ->
+        if corrupt_workspace_output?(output) do
+          Logger.warning(
+            "Rebuilding corrupt workspace once for #{issue_context(issue)} " <>
+              "worker_host=#{worker_host_for_log(worker_host)}"
+          )
+
+          :ok = Workspace.remove_issue_workspaces(issue, worker_host)
+          run_on_worker_host(issue, recipient, opts, worker_host, model_route)
+        else
+          {:error, {:workspace_hook_failed, "before_run", status, output}}
+        end
+
+      result ->
+        result
+    end
+  end
+
+  defp corrupt_workspace_output?(output) do
+    normalized = String.downcase(output)
+
+    Enum.any?(
+      [
+        "not a git repository",
+        "unexpected symphony branch",
+        "invalid gitfile format",
+        "worktree git dir"
+      ],
+      &String.contains?(normalized, &1)
+    )
   end
 
   defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host, model_route) do

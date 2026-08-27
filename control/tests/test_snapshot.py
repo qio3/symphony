@@ -4,6 +4,67 @@ from owner_control.snapshot import SnapshotBuilder
 
 
 class SnapshotBuilderTest(unittest.TestCase):
+    def test_projects_deterministic_release_waves_from_delivery_evidence(self):
+        snapshot = SnapshotBuilder().build(
+            service={"live": True},
+            intake_active=True,
+            worker_limit=4,
+            runtime={
+                "running": [
+                    {
+                        "issue_id": "2",
+                        "issue_identifier": "#2",
+                        "state": "running",
+                    }
+                ],
+                "retrying": [],
+                "blocked": [],
+            },
+            project={
+                "items": [
+                    {
+                        "number": 1,
+                        "title": "Already deployed",
+                        "status": "Ready for Acceptance",
+                        "state": "OPEN",
+                        "pr": {"number": 11, "merged": True, "merge_sha": "a" * 40},
+                        "test": {"sha": "b" * 40, "contains_merge": True},
+                    },
+                    {
+                        "number": 2,
+                        "title": "CI is still running",
+                        "status": "In Progress",
+                        "state": "OPEN",
+                        "pr": {"number": 12, "merged": False},
+                        "ci": {"status": "pending"},
+                    },
+                ]
+            },
+            canonical={"sha": "b" * 40},
+            test={"sha": "b" * 40},
+        )
+
+        waves = snapshot["release_waves"]["waves"]
+        self.assertEqual([wave["status"] for wave in waves], ["on TEST", "waiting CI"])
+        self.assertEqual(waves[0]["issues"][0]["number"], 1)
+        self.assertEqual(waves[1]["issues"][0]["number"], 2)
+
+    def test_red_canonical_ci_blocks_effective_intake_without_losing_owner_intent(self):
+        snapshot = SnapshotBuilder().build(
+            service={"live": True},
+            intake_active=True,
+            worker_limit=8,
+            runtime={"running": [], "retrying": [], "blocked": []},
+            project={"items": []},
+            canonical={"sha": "bad", "ci": {"status": "failure", "failed": 1}},
+            test={"sha": "older"},
+        )
+
+        self.assertFalse(snapshot["intake"]["active"])
+        self.assertTrue(snapshot["intake"]["requested_active"])
+        self.assertEqual(snapshot["intake"]["status"], "blocked-systemic")
+        self.assertTrue(snapshot["systemic_gate"]["blocked"])
+
     def test_projects_conservative_owner_display_phases_from_existing_evidence(self):
         project_items = [
             {
@@ -29,7 +90,7 @@ class SnapshotBuilderTest(unittest.TestCase):
                 "state": "OPEN",
                 "pr": {"number": 93, "url": "https://github.test/pull/93", "state": "MERGED", "merged": True},
                 "ci": {"status": "success"},
-                "test": {"sha": "bbbbbbbb22222222", "synced": False},
+                "test": {"sha": "bbbbbbbb22222222", "merge_sha": "merge603", "contains_merge": False},
             },
             {
                 "number": 604,
@@ -38,7 +99,7 @@ class SnapshotBuilderTest(unittest.TestCase):
                 "state": "OPEN",
                 "pr": {"number": 94, "url": "https://github.test/pull/94", "state": "MERGED", "merged": True},
                 "ci": {"status": "success"},
-                "test": {"sha": "aaaaaaaa11111111", "synced": True},
+                "test": {"sha": "aaaaaaaa11111111", "merge_sha": "merge604", "contains_merge": True},
             },
             {
                 "number": 605,
@@ -314,7 +375,10 @@ class SnapshotBuilderTest(unittest.TestCase):
             test={"sha": "bbbbbbbb22222222", "url": "https://test.example"},
         )
 
-        self.assertEqual(snapshot["intake"], {"active": False, "status": "paused"})
+        self.assertEqual(
+            snapshot["intake"],
+            {"active": False, "requested_active": False, "status": "paused"},
+        )
         self.assertEqual(
             snapshot["codex_totals"],
             {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "seconds_running": 0},
@@ -531,7 +595,7 @@ class SnapshotBuilderTest(unittest.TestCase):
         self.assertEqual(item["usage"]["estimated_credits_micros"], 44000)
         self.assertEqual(item["usage"]["tier"], "terra")
         self.assertEqual(snapshot["issue_usage"]["407"]["cached_input_tokens"], 800)
-        self.assertEqual(snapshot["workers"], {"running": 1, "limit": 5})
+        self.assertEqual(snapshot["workers"], {"running": 1, "limit": 2})
 
 
 if __name__ == "__main__":

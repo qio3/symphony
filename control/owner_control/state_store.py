@@ -13,6 +13,9 @@ class StateStore:
 
     def __init__(self, path: Path):
         self._path = Path(path)
+        self._mutation_path = self._path.with_name(
+            self._path.stem + ".mutations.jsonl"
+        )
         self._lock = threading.Lock()
 
     def intake_active(self) -> bool:
@@ -20,6 +23,15 @@ class StateStore:
 
     def set_intake_active(self, active: bool) -> None:
         self.update({"intake_active": bool(active)})
+
+    def worker_limit(self, default: int) -> int:
+        value = self.read().get("worker_limit")
+        return value if type(value) is int and 0 < value <= default else default
+
+    def set_worker_limit(self, limit: int, *, maximum: int) -> None:
+        if type(limit) is not int or type(maximum) is not int or not 1 <= limit <= maximum:
+            raise ValueError(f"worker limit must be between 1 and {maximum}")
+        self.update({"worker_limit": limit})
 
     def quarantines(self) -> dict[str, dict[str, Any]]:
         value = self.read().get("system_quarantines")
@@ -64,6 +76,38 @@ class StateStore:
 
             if history != raw_history:
                 state["status_history"] = history
+                self._write_unlocked(state)
+            return history
+
+    def record_infrastructure_sample(
+        self,
+        sample: dict[str, Any],
+        *,
+        minimum_interval_seconds: int = 60,
+        retention_seconds: int = 3 * 24 * 60 * 60,
+    ) -> list[dict[str, Any]]:
+        recorded_at = _timestamp(sample.get("recorded_at"))
+        if recorded_at is None:
+            raise ValueError("infrastructure sample requires an ISO recorded_at timestamp")
+        normalized = {
+            "recorded_at": sample["recorded_at"],
+            "hosts": json.loads(json.dumps(sample.get("hosts") or {})),
+        }
+        cutoff = recorded_at - max(int(retention_seconds), 0)
+        with self._lock:
+            state = self._read_unlocked()
+            raw_history = state.get("infrastructure_history")
+            history = []
+            for item in raw_history if isinstance(raw_history, list) else []:
+                timestamp = _timestamp(item.get("recorded_at")) if isinstance(item, dict) else None
+                if timestamp is not None and cutoff <= timestamp <= recorded_at:
+                    history.append(item)
+            history.sort(key=lambda item: _timestamp(item.get("recorded_at")) or 0)
+            previous_at = _timestamp(history[-1].get("recorded_at")) if history else None
+            if previous_at is None or recorded_at - previous_at >= max(int(minimum_interval_seconds), 1):
+                history.append(normalized)
+            if history != raw_history:
+                state["infrastructure_history"] = history
                 self._write_unlocked(state)
             return history
 
@@ -115,6 +159,35 @@ class StateStore:
             state.update(values)
             self._write_unlocked(state)
             return state
+
+    def append_mutation(self, entry: dict[str, Any]) -> None:
+        normalized = {
+            **dict(entry),
+            "timestamp": entry.get("timestamp")
+            or datetime.now(timezone.utc).isoformat(),
+        }
+        with self._lock:
+            self._mutation_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._mutation_path.open("a", encoding="utf-8") as journal:
+                journal.write(json.dumps(normalized, ensure_ascii=False) + "\n")
+                journal.flush()
+                os.fsync(journal.fileno())
+
+    def mutation_journal(self) -> list[dict[str, Any]]:
+        with self._lock:
+            try:
+                lines = self._mutation_path.read_text(encoding="utf-8").splitlines()
+            except FileNotFoundError:
+                return []
+        entries = []
+        for line in lines:
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                entries.append(value)
+        return entries
 
     def _read_unlocked(self) -> dict[str, Any]:
         if not self._path.exists():

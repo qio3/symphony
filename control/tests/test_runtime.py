@@ -51,6 +51,30 @@ class FakeGitHub:
         return {"sha": "abc12345", "url": "https://github.test/commit/abc12345"}
 
 
+class ContainmentGitHub(FakeGitHub):
+    def __init__(self):
+        super().__init__()
+        self.containment_calls = []
+
+    def project_snapshot(self, *, reconcile_intake=False):
+        self.reconcile_requests.append(reconcile_intake)
+        return {
+            "items": [
+                {
+                    "number": 402,
+                    "title": "Merged work",
+                    "status": "Ready for Acceptance",
+                    "state": "OPEN",
+                    "pr": {"merged": True, "merge_sha": "merge402"},
+                }
+            ]
+        }
+
+    def commit_contains(self, deployed_sha, merge_sha):
+        self.containment_calls.append((deployed_sha, merge_sha))
+        return deployed_sha == "abc12345" and merge_sha == "merge402"
+
+
 class ChangingGitHub(FakeGitHub):
     def __init__(self):
         super().__init__()
@@ -243,8 +267,28 @@ class SnapshotServiceTest(unittest.TestCase):
         self.assertEqual(snapshot["service"], {"live": True, "container": "zavod-symphony"})
         self.assertEqual(snapshot["canonical"]["sha"], "abc12345")
         self.assertEqual(snapshot["test"]["sha"], "abc12345")
-        self.assertEqual(snapshot["workers"], {"running": 0, "limit": 2})
+        self.assertEqual(snapshot["workers"], {"running": 0, "limit": 2, "maximum": 2})
         self.assertEqual(github.reconcile_requests, [True])
+
+    def test_ready_issue_is_accepted_by_merge_containment_not_moving_canonical_head(self):
+        github = ContainmentGitHub()
+        service = SnapshotService(
+            symphony=FakeSymphony(),
+            github=github,
+            test_environment=FakeTest(),
+            supervisor=FakeSupervisor(),
+            state_store=self.store,
+            worker_limit=2,
+            canonical_ref="rebrand/stanina",
+        )
+
+        snapshot = service.snapshot(fresh=True)
+        issue = snapshot["issues"]["402"]
+
+        self.assertEqual(issue["test"]["sha"], "abc12345")
+        self.assertEqual(issue["test"]["merge_sha"], "merge402")
+        self.assertTrue(issue["test"]["contains_merge"])
+        self.assertEqual(github.containment_calls, [("abc12345", "merge402")])
 
     def test_snapshot_exposes_persisted_three_day_status_history(self):
         service = SnapshotService(
@@ -500,7 +544,7 @@ class SnapshotServiceTest(unittest.TestCase):
             cache_seconds=60,
         )
         healthy = service.snapshot(fresh=True)
-        self.assertEqual(healthy["workers"], {"running": 1, "limit": 5})
+        self.assertEqual(healthy["workers"], {"running": 1, "limit": 5, "maximum": 5})
         self.assertEqual(healthy["counts"]["queued"], 1)
         self.assertEqual(healthy["quota"]["weekly"]["used_percent"], 21)
 
@@ -884,13 +928,13 @@ class SnapshotServiceTest(unittest.TestCase):
             canonical_ref="rebrand/stanina",
         )
         healthy = service.snapshot(fresh=True)
-        self.assertEqual(healthy["workers"], {"running": 1, "limit": 5})
+        self.assertEqual(healthy["workers"], {"running": 1, "limit": 5, "maximum": 5})
 
         symphony.fail = True
         stale = service.snapshot(fresh=True)
 
         self.assertTrue(stale["service"]["live"])
-        self.assertEqual(stale["workers"], {"running": 1, "limit": 5})
+        self.assertEqual(stale["workers"], {"running": 1, "limit": 5, "maximum": 5})
         self.assertEqual(stale["sources"]["runtime"]["status"], "stale")
         self.assertTrue(stale["stale"])
 
@@ -922,14 +966,44 @@ class SnapshotServiceTest(unittest.TestCase):
         healthy = service.snapshot(fresh=True)
         stale = service.snapshot(fresh=True)
 
-        self.assertEqual(healthy["workers"], {"running": 1, "limit": 5})
-        self.assertEqual(stale["workers"], {"running": 1, "limit": 5})
+        self.assertEqual(healthy["workers"], {"running": 1, "limit": 5, "maximum": 5})
+        self.assertEqual(stale["workers"], {"running": 1, "limit": 5, "maximum": 5})
         self.assertTrue(stale["stale"])
         self.assertEqual(stale["sources"]["runtime"]["status"], "stale")
         self.assertIn("Symphony state response must be a JSON object", stale["sources"]["runtime"]["error"])
 
 
 class DockerComposeSupervisorTest(unittest.TestCase):
+    def test_metrics_return_fixed_container_cpu_and_memory_percentages(self):
+        def runner(command, **kwargs):
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout='{"CPUPerc":"12.50%","MemPerc":"34.25%","MemUsage":"1.2GiB / 4GiB"}\n',
+                stderr="",
+            )
+
+        supervisor = DockerComposeSupervisor(
+            compose_file=Path("C:/control/docker-compose.yml"),
+            container_name="zavod-symphony",
+            service_name="symphony",
+            runner=runner,
+        )
+
+        self.assertEqual(
+            supervisor.metrics(),
+            {
+                "name": "Local Symphony",
+                "kind": "local",
+                "cpu_percent": 12.5,
+                "memory_percent": 34.25,
+                "memory_usage": "1.2GiB / 4GiB",
+                "runners_busy": 0,
+                "runners_total": 0,
+                "jobs": [],
+            },
+        )
+
     def test_status_confirms_a_stopped_container_from_valid_docker_state(self):
         def runner(command, **kwargs):
             return subprocess.CompletedProcess(

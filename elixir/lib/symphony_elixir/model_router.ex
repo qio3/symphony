@@ -100,13 +100,30 @@ defmodule SymphonyElixir.ModelRouter do
       if count >= 2 do
         route
         |> escalate("repeated_root_cause_#{fingerprint}")
-        |> Map.put(:failure_fingerprint, nil)
-        |> Map.put(:same_failure_count, 0)
+        |> Map.put(:failure_fingerprint, fingerprint)
+        |> Map.put(:same_failure_count, count)
       else
         tracked
       end
     end
   end
+
+  @doc "Returns true once one non-transient failure fingerprint has failed three times."
+  @spec terminal_retry?(route()) :: boolean()
+  def terminal_retry?(route) when is_map(route), do: Map.get(route, :same_failure_count, 0) >= 3
+
+  @doc "Returns true when the strongest model has exhausted its reasoning budget."
+  @spec terminal_exhaustion?(route(), term()) :: boolean()
+  def terminal_exhaustion?(%{selected_tier: :sol}, reason) do
+    reason in [
+      :max_turns_exhausted,
+      :session_budget_exceeded,
+      "max_turns_exhausted",
+      "session_budget_exceeded"
+    ]
+  end
+
+  def terminal_exhaustion?(_route, _reason), do: false
 
   @spec exhaustion_reason(term()) :: :max_turns_exhausted | :session_budget_exceeded | nil
   def exhaustion_reason({:max_turns_exhausted, _turns}), do: :max_turns_exhausted

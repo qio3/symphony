@@ -233,6 +233,9 @@ function renderFreshness(snapshot) {
       ? "GitHub request quota is exhausted. Last confirmed data remains visible; retrying automatically."
       : `Last confirmed data remains visible. Waiting for ${names || "a source"}.`;
     globalNotice.className = "notice is-stale-notice";
+  } else if (snapshot.systemic_gate?.blocked) {
+    globalNotice.textContent = snapshot.systemic_gate.reason || "Systemic delivery gate is blocked.";
+    globalNotice.className = "notice is-error-notice";
   } else {
     globalNotice.className = "notice is-hidden";
     globalNotice.textContent = "";
@@ -246,6 +249,7 @@ function renderService(snapshot) {
   const serviceKnown = serviceStatus !== "unknown";
   const isRunning = service.live === true;
   const isTransitioning = ["created", "restarting", "starting", "stopping"].includes(serviceStatus);
+  const systemicBlocked = snapshot.systemic_gate?.blocked === true;
   const transitionLabel = serviceStatus === "stopping" ? "Stopping…" : "Starting…";
   const serviceTitle = document.getElementById("service-title");
   serviceTitle.textContent = isTransitioning ? transitionLabel : serviceKnown ? (isRunning ? "Running" : "Stopped") : "Status unavailable";
@@ -254,7 +258,7 @@ function renderService(snapshot) {
   clear(targets.serviceFacts);
   targets.serviceFacts.append(
     fact("Service", isTransitioning ? transitionLabel : serviceKnown ? (isRunning ? "Running" : "Stopped") : "Unknown", isTransitioning ? "warning" : isRunning ? "good" : "danger"),
-    fact("Intake", snapshot.intake?.active ? "Active" : "Paused", snapshot.intake?.active ? "good" : "warning"),
+    fact("Intake", systemicBlocked ? "Blocked by CI" : snapshot.intake?.active ? "Active" : "Paused", snapshot.intake?.active ? "good" : "warning"),
     fact("Workers", `${number(snapshot.workers?.running)}/${number(snapshot.workers?.limit)}`, "neutral"),
     fact("Runtime API", titleCase(runtimeSource.status || "unknown"), runtimeSource.status === "fresh" ? "good" : "warning"),
   );
@@ -275,9 +279,9 @@ function renderService(snapshot) {
       intakeActive ? "Pause intake" : "Resume intake",
       intakeActive ? "pause" : "resume",
       "primary",
-      !intakeActive && (!runtimeFresh || !githubFresh),
+      !intakeActive && (!runtimeFresh || !githubFresh || systemicBlocked),
     );
-    if (intake.disabled) intake.title = "Resume requires fresh runtime and GitHub state.";
+    if (intake.disabled) intake.title = systemicBlocked ? (snapshot.systemic_gate.reason || "Systemic gate is blocked.") : "Resume requires fresh runtime and GitHub state.";
     const advanced = el("details", "service-advanced");
     advanced.append(el("summary", "button secondary", "Service actions"));
     const advancedActions = el("div", "service-advanced-actions");
@@ -287,7 +291,7 @@ function renderService(snapshot) {
     if (!supervisorFresh || !runtimeFresh) stop.title = "Waiting for fresh supervisor and runtime state.";
     advancedActions.append(restart, stop);
     advanced.append(advancedActions);
-    targets.serviceActions.append(intake, advanced);
+    targets.serviceActions.append(workerLimitControl(snapshot), intake, advanced);
   } else if (serviceKnown) {
     const start = actionButton("Start Symphony", "start_service", "primary", !supervisorFresh);
     if (!supervisorFresh) start.title = "Waiting for fresh supervisor state.";
@@ -302,11 +306,12 @@ function renderDelivery(snapshot) {
   const delivery = el("div", "delivery-stack");
   delivery.append(
     deliveryRow("Canonical", canonical.sha, canonical.url, "Source of truth"),
+    deliveryRow("Canonical CI", null, canonical.url, titleCase(canonical.ci?.status || "unknown"), statusTone(canonical.ci?.status)),
     deliveryRow("TEST", test.sha, test.url, test.synced ? "Synced" : test.drift ? "Drift" : "Unknown", test.synced ? "good" : "warning"),
   );
   if (test.drift) {
     const warning = el("div", "delivery-warning");
-    warning.textContent = "TEST is not on the canonical SHA. Acceptance is disabled.";
+    warning.textContent = "Latest canonical is not on TEST. An Issue remains acceptable when TEST containment of its merge is verified.";
     delivery.append(warning);
   }
   targets.delivery.append(delivery);
@@ -316,6 +321,54 @@ function renderQuota(snapshot) {
   clear(targets.quota);
   const quota = snapshot.quota || {};
   targets.quota.append(quotaWindow("5 hour", quota.five_hour), quotaWindow("Weekly", quota.weekly));
+}
+
+function workerLimitControl(snapshot) {
+  const limit = Math.max(1, number(snapshot.workers?.limit));
+  const maximum = Math.max(limit, number(snapshot.workers?.maximum));
+  const control = el("label", "worker-limit-control");
+  const copy = el("span", "worker-limit-label");
+  copy.append(icon("users"), document.createTextNode("Workers"));
+  const select = el("select", "worker-limit-select");
+  select.setAttribute("aria-label", "Maximum concurrent Symphony workers");
+  for (let value = 1; value <= maximum; value += 1) {
+    const option = document.createElement("option");
+    option.value = String(value);
+    option.textContent = String(value);
+    option.selected = value === limit;
+    select.append(option);
+  }
+  select.disabled = actionInFlight || maximum < 1;
+  select.addEventListener("change", () => setWorkerLimit(Number(select.value)));
+  control.title = `Use up to ${maximum} configured worker slots. Running work is not interrupted when the limit changes.`;
+  control.append(copy, select);
+  return control;
+}
+
+async function setWorkerLimit(limit) {
+  if (actionInFlight || !Number.isInteger(limit)) return;
+  actionErrors.delete("service");
+  actionInFlight = true;
+  app.classList.add("action-busy");
+  render(currentSnapshot, { force: true });
+  try {
+    const response = await fetch("/ui/actions/set_workers", {
+      method: "POST",
+      headers: browserHeaders(true),
+      body: JSON.stringify({ limit }),
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error?.message || `Worker limit rejected (${response.status})`);
+    toast(`Worker limit set to ${limit}.`);
+    await refreshSnapshot({ announce: false });
+  } catch (error) {
+    showInlineActionError(null, error.message);
+    toast(error.message, "error");
+  } finally {
+    actionInFlight = false;
+    app.classList.remove("action-busy");
+    if (currentSnapshot) render(currentSnapshot, { force: true });
+  }
 }
 
 function renderOverview(snapshot) {
@@ -417,7 +470,7 @@ function reviewCard(item) {
   const githubFresh = currentSnapshot?.sources?.github?.status === "fresh";
   const testFresh = currentSnapshot?.sources?.test?.status === "fresh";
   const itemTest = item.test || currentSnapshot?.test || {};
-  const disabled = !githubFresh || !testFresh || currentSnapshot?.test?.synced !== true || itemTest.synced !== true;
+  const disabled = !githubFresh || !testFresh || itemTest.contains_merge !== true;
   actions.append(
     externalLink(itemTest.url, "Open TEST", "button secondary"),
     actionButton("Accept", "accept", "primary", disabled, item.number),
@@ -451,6 +504,17 @@ function waveCard(wave) {
   fill.style.width = `${Math.min(100, number(wave.progress_percent))}%`;
   progress.append(fill);
   card.append(progress);
+  const issues = Array.isArray(wave.issues) ? wave.issues : [];
+  if (issues.length) {
+    const issueList = el("div", "wave-issues");
+    for (const item of issues.slice(0, 6)) {
+      const link = externalLink(item.url, `#${item.number}`, "wave-issue-link");
+      link.title = item.title || `Issue #${item.number}`;
+      issueList.append(link);
+    }
+    if (issues.length > 6) issueList.append(el("span", "muted", `+${issues.length - 6}`));
+    card.append(issueList);
+  }
   return card;
 }
 
@@ -550,7 +614,7 @@ function escalationChain(model) {
 
 function taskProgress(item) {
   const phase = String(item.display_phase || item.stage || item.status || "").toLowerCase();
-  if (item.pr?.merged === true && item.test?.synced === true) return 100;
+  if (item.pr?.merged === true && item.test?.contains_merge === true) return 100;
   if (phase.includes("test")) return 92;
   if (phase.includes("merge") || item.ci?.status === "success") return 84;
   if (phase.includes("ci") || item.pr) return 72;
@@ -1019,7 +1083,7 @@ function openActionDialog(action, issue) {
     stop_service: ["Stop Symphony", workers > 0 ? `This will interrupt ${workers} running worker${workers === 1 ? "" : "s"}. Pause intake is the safe alternative.` : "No running workers will be interrupted.", workers > 0 ? `Stop and interrupt ${workers}` : "Stop Symphony", "danger"],
     restart: ["Restart Symphony", workers > 0 ? `${workers} running worker${workers === 1 ? "" : "s"} may be interrupted.` : "The runtime will briefly become unavailable; Owner Control remains online.", "Restart Symphony", "danger"],
     run: [`Start #${issue}`, `${item?.title || "This Issue"} will move to Ready for AI and receive the Symphony lease.`, "Start Issue", "primary"],
-    accept: [`Accept #${issue}`, `Close the Issue as Done after verifying TEST ${shortSha(testEvidence.sha)} matches canonical.`, "Accept as Done", "primary"],
+    accept: [`Accept #${issue}`, `Close the Issue as Done after verifying TEST ${shortSha(testEvidence.sha)} contains merge ${shortSha(testEvidence.merge_sha)}.`, "Accept as Done", "primary"],
     rework: [`Rework #${issue}`, "Add a short owner reason. The Issue returns to Ready for AI with the Symphony lease.", "Send to rework", "primary"],
   };
   const definition = definitions[action];
@@ -1028,7 +1092,7 @@ function openActionDialog(action, issue) {
   dialogTitle.textContent = definition[0];
   clear(dialogBody);
   dialogBody.append(el("p", "dialog-copy", definition[1]));
-  if (action === "accept") dialogBody.append(deliveryRow("TEST SHA", testEvidence.sha, testEvidence.url, testEvidence.synced ? "Synced" : testEvidence.drift ? "Drift" : "Ready", testEvidence.synced ? "good" : testEvidence.drift ? "warning" : "neutral"));
+  if (action === "accept") dialogBody.append(deliveryRow("TEST contains", testEvidence.merge_sha, testEvidence.url, testEvidence.contains_merge ? "Verified" : "Unavailable", testEvidence.contains_merge ? "good" : "warning"));
   if (action === "rework") {
     const label = el("label", "field-label", "Reason");
     const textarea = el("textarea", "reason-field");

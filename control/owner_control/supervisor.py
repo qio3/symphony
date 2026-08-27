@@ -82,6 +82,35 @@ class DockerComposeSupervisor:
         )
         return completed.stdout.splitlines()[-safe_tail:]
 
+    def metrics(self) -> dict[str, Any]:
+        completed = self._run(
+            [
+                "docker",
+                "stats",
+                "--no-stream",
+                "--format",
+                "{{json .}}",
+                self._container_name,
+            ],
+            timeout=10,
+        )
+        try:
+            value = json.loads(completed.stdout.splitlines()[0])
+            cpu = _docker_percent(value.get("CPUPerc"))
+            memory = _docker_percent(value.get("MemPerc"))
+        except (IndexError, json.JSONDecodeError, AttributeError, TypeError, ValueError) as error:
+            raise RuntimeError("invalid container metrics") from error
+        return {
+            "name": "Local Symphony",
+            "kind": "local",
+            "cpu_percent": cpu,
+            "memory_percent": memory,
+            "memory_usage": value.get("MemUsage"),
+            "runners_busy": 0,
+            "runners_total": 0,
+            "jobs": [],
+        }
+
     def _compose_command(self, *arguments: str) -> list[str]:
         return ["docker", "compose", "-f", self._compose_file, *arguments]
 
@@ -105,3 +134,9 @@ class DockerComposeSupervisor:
         if completed.returncode != 0 and not tolerate_failure:
             raise RuntimeError(f"fixed service command failed with exit code {completed.returncode}")
         return completed
+
+
+def _docker_percent(value: Any) -> float:
+    if not isinstance(value, str) or not value.endswith("%"):
+        raise ValueError("docker percentage is unavailable")
+    return float(value[:-1])

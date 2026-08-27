@@ -23,6 +23,7 @@ class SnapshotBuilder:
         canonical: dict[str, Any],
         test: dict[str, Any],
         quarantines: dict[str, Any] | None = None,
+        worker_max: int | None = None,
     ) -> dict[str, Any]:
         items = {
             str(item["number"]): self._project_item(item)
@@ -72,6 +73,21 @@ class SnapshotBuilder:
             "synced": synced,
             "drift": bool(canonical_sha and test_sha and canonical_sha != test_sha),
         }
+        canonical_ci = canonical.get("ci") if isinstance(canonical, dict) else None
+        canonical_ci_status = (
+            str(canonical_ci.get("status") or "unknown").casefold()
+            if isinstance(canonical_ci, dict)
+            else "unknown"
+        )
+        systemic_gate = {
+            "blocked": canonical_ci_status == "failure",
+            "reason": (
+                "canonical CI is failing"
+                if canonical_ci_status == "failure"
+                else None
+            ),
+        }
+        effective_intake_active = bool(intake_active) and not systemic_gate["blocked"]
         codex_totals = {
             "input_tokens": 0,
             "output_tokens": 0,
@@ -79,12 +95,7 @@ class SnapshotBuilder:
             "seconds_running": 0,
             **(runtime.get("codex_totals") or {}),
         }
-        runtime_worker_limit = runtime.get("max_concurrent_agents")
-        effective_worker_limit = (
-            runtime_worker_limit
-            if isinstance(runtime_worker_limit, int) and not isinstance(runtime_worker_limit, bool) and runtime_worker_limit > 0
-            else worker_limit
-        )
+        effective_worker_limit = worker_limit
 
         for issue_key in sorted(items, key=self._issue_sort_key):
             item = items[issue_key]
@@ -157,12 +168,32 @@ class SnapshotBuilder:
                 "done": counts["done"],
             },
         }
+        release_waves = self._release_waves(lanes)
         return {
             "version": 1,
             "generated_at": runtime.get("generated_at") or datetime.now(timezone.utc).isoformat(),
             "service": service,
-            "intake": {"active": bool(intake_active), "status": "active" if intake_active else "paused"},
-            "workers": {"running": counts["running"], "limit": max(int(effective_worker_limit), 0)},
+            "intake": {
+                "active": effective_intake_active,
+                "requested_active": bool(intake_active),
+                "status": (
+                    "blocked-systemic"
+                    if systemic_gate["blocked"]
+                    else "active"
+                    if intake_active
+                    else "paused"
+                ),
+            },
+            "systemic_gate": systemic_gate,
+            "workers": {
+                "running": counts["running"],
+                "limit": max(int(effective_worker_limit), 0),
+                **(
+                    {"maximum": max(int(worker_max), 0)}
+                    if worker_max is not None
+                    else {}
+                ),
+            },
             "models": deepcopy(runtime.get("models") or {}),
             "quota": _quota_windows(runtime.get("rate_limits")),
             "counts": counts,
@@ -170,6 +201,7 @@ class SnapshotBuilder:
             "test": normalized_test,
             "issues": items,
             "owner_view": owner_view,
+            "release_waves": release_waves,
             "running": runtime.get("running", []),
             "retrying": runtime.get("retrying", []),
             "blocked": runtime.get("blocked", []),
@@ -181,6 +213,54 @@ class SnapshotBuilder:
             "issue_usage": issue_usage,
             "rate_limits": runtime.get("rate_limits"),
         }
+
+    @staticmethod
+    def _release_waves(lanes: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+        buckets: list[tuple[str, int, str, list[dict[str, Any]]]] = []
+        ready = lanes.get("ready_for_acceptance") or []
+        on_test = [item for item in ready if (item.get("test") or {}).get("contains_merge") is True]
+        waiting_test = [item for item in ready if item not in on_test]
+        delivery = [*(lanes.get("work_items") or []), *(lanes.get("follow_ups") or [])]
+        ready_to_land = [
+            item
+            for item in delivery
+            if item.get("pr") and str((item.get("ci") or {}).get("status") or "").casefold() == "success"
+        ]
+        waiting_ci = [item for item in delivery if item.get("pr") and item not in ready_to_land]
+        buckets.extend(
+            (
+                ("on TEST", 100, "Deployed and ready for owner acceptance.", on_test),
+                ("waiting TEST", 82, "Merged work is waiting for deterministic TEST containment.", waiting_test),
+                ("ready to land", 68, "Green pull requests are queued for the next small landing wave.", ready_to_land),
+                ("waiting CI", 42, "Pull requests are waiting for required CI evidence.", waiting_ci),
+            )
+        )
+        waves = []
+        for status, progress, summary, items in buckets:
+            if not items:
+                continue
+            wave_items = [
+                {
+                    "number": item.get("number"),
+                    "title": item.get("title"),
+                    "url": item.get("issue_url") or item.get("url"),
+                    "pr": deepcopy(item.get("pr")),
+                    "ci": deepcopy(item.get("ci")),
+                }
+                for item in items
+            ]
+            waves.append(
+                {
+                    "number": len(waves) + 1,
+                    "status": status,
+                    "ready_prs": sum(1 for item in items if item.get("pr")),
+                    "target_prs": 4,
+                    "progress_percent": progress,
+                    "summary": summary,
+                    "issues": wave_items,
+                }
+            )
+        return {"mode": "small-waves", "waves": waves}
 
     @staticmethod
     def _project_item(item: dict[str, Any]) -> dict[str, Any]:
@@ -236,7 +316,7 @@ class SnapshotBuilder:
 
         if pr.get("merged") is True:
             test = item.get("test")
-            if not isinstance(test, dict) or test.get("synced") is not True:
+            if not isinstance(test, dict) or test.get("contains_merge") is not True:
                 return "Waiting TEST"
             return "Agent active"
 

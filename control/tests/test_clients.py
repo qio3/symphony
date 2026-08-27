@@ -72,6 +72,7 @@ def project_response():
                                             "url": "https://github.test/pull/99",
                                             "state": "MERGED",
                                             "merged": True,
+                                            "mergeCommit": {"oid": "merge999"},
                                             "commits": {
                                                 "nodes": [
                                                     {
@@ -95,6 +96,30 @@ def project_response():
 
 
 class GitHubClientTest(unittest.TestCase):
+    def test_canonical_includes_deterministic_check_run_health(self):
+        transport = FakeTransport([
+            {"object": {"sha": "canonical-sha"}},
+            {
+                "total_count": 2,
+                "check_runs": [
+                    {"status": "completed", "conclusion": "success", "html_url": "https://ci/1"},
+                    {"status": "completed", "conclusion": "failure", "html_url": "https://ci/2"},
+                ],
+            },
+        ])
+        client = GitHubClient(
+            token="token",
+            repository="qio3/zavod",
+            project_id="project-id",
+            transport=transport,
+        )
+
+        canonical = client.canonical("main")
+
+        self.assertEqual(canonical["sha"], "canonical-sha")
+        self.assertEqual(canonical["ci"]["status"], "failure")
+        self.assertEqual(canonical["ci"]["failed"], 1)
+
     def test_normalizes_project_issue_pr_ci_and_owner_question(self):
         transport = FakeTransport([project_response()])
         client = GitHubClient(
@@ -125,9 +150,25 @@ class GitHubClientTest(unittest.TestCase):
                     "state": "MERGED",
                     "merged": True,
                     "sha": "abc123",
+                    "merge_sha": "merge999",
                 },
                 "ci": {"status": "success", "url": "https://github.test/pull/99/checks"},
             },
+        )
+
+    def test_commit_containment_uses_github_compare(self):
+        transport = FakeTransport([{"status": "ahead", "ahead_by": 4}])
+        client = GitHubClient(
+            token="token",
+            repository="qio3/zavod",
+            project_id="project-id",
+            transport=transport,
+        )
+
+        self.assertTrue(client.commit_contains("deployed-sha", "merge-sha"))
+        self.assertIn(
+            "/repos/qio3/zavod/compare/merge-sha...deployed-sha",
+            transport.calls[0][1],
         )
 
     def test_set_status_uses_cached_project_item_and_named_option(self):
@@ -152,6 +193,29 @@ class GitHubClientTest(unittest.TestCase):
                 "optionId": "done",
             },
         )
+
+    def test_set_status_records_actor_old_new_and_reason(self):
+        journal = []
+        transport = FakeTransport([
+            project_response(),
+            {"data": {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "project-item-401"}}}},
+        ])
+        client = GitHubClient(
+            token="token",
+            repository="qio3/zavod",
+            project_id="project-id",
+            transport=transport,
+            mutation_logger=journal.append,
+        )
+        client.project_snapshot()
+
+        client.set_status(401, "Done")
+
+        self.assertEqual(journal[0]["actor"], "owner-control")
+        self.assertEqual(journal[0]["issue"], 401)
+        self.assertEqual(journal[0]["old"], "Ready for Acceptance")
+        self.assertEqual(journal[0]["new"], "Done")
+        self.assertEqual(journal[0]["reason"], "set_status")
 
     def test_reconciled_snapshot_adds_every_missing_open_issue_with_a_deterministic_status(self):
         ordinary = {

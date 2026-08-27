@@ -1,11 +1,24 @@
 defmodule SymphonyElixir.OrchestratorStatusTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.ModelRouter
+
   defmodule BeforeRunQuarantineControl do
     def quarantine_before_run(issue_number, reason) do
       send(
         Application.fetch_env!(:symphony_elixir, :before_run_quarantine_test_pid),
         {:before_run_quarantine, issue_number, reason}
+      )
+
+      {:ok, %{status: "accepted"}}
+    end
+  end
+
+  defmodule FailureQuarantineControl do
+    def quarantine_before_run(issue_number, reason) do
+      send(
+        Application.fetch_env!(:symphony_elixir, :failure_quarantine_test_pid),
+        {:failure_quarantine, issue_number, reason}
       )
 
       {:ok, %{status: "accepted"}}
@@ -1854,6 +1867,178 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     refute Map.has_key?(state.retry_attempts, issue_id)
   end
 
+  test "issue usage exposes approximate weekly impact from exact account window and task credits" do
+    path = Path.join(System.tmp_dir!(), "symphony-orchestrator-week-impact-#{System.unique_integer([:positive])}.jsonl")
+    now = DateTime.utc_now()
+    usage = %{input_tokens: 100, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 10, reasoning_output_tokens: 2, total_tokens: 110}
+    {:ok, ledger} = SymphonyElixir.UsageLedger.load(path)
+
+    {:ok, ledger} =
+      SymphonyElixir.UsageLedger.record(ledger, %{
+        issue_id: "401",
+        issue_identifier: "GH-401",
+        thread_id: "thread-401",
+        model: "gpt-5.6-terra",
+        started_at: DateTime.add(now, -3_600),
+        token_usage: usage,
+        estimated_usage_credits_micros: 250
+      })
+
+    {:ok, _ledger} =
+      SymphonyElixir.UsageLedger.record(ledger, %{
+        issue_id: "402",
+        issue_identifier: "GH-402",
+        thread_id: "thread-402",
+        model: "gpt-5.6-sol",
+        started_at: DateTime.add(now, -1_800),
+        token_usage: usage,
+        estimated_usage_credits_micros: 750
+      })
+
+    orchestrator_name = Module.concat(__MODULE__, :WeeklyImpactOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name, usage_ledger_path: path)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm(path)
+    end)
+
+    :sys.replace_state(pid, fn state ->
+      %{
+        state
+        | codex_rate_limits: %{"weekly" => %{"windowDurationMins" => 10_080, "usedPercent" => 20}},
+          weekly_quota_observation: %{
+            reset_at: nil,
+            observed_since: DateTime.add(now, -7_200),
+            baseline_used_percent: 0,
+            current_used_percent: 20,
+            movement_percent: 20
+          }
+      }
+    end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert snapshot.issue_usage["401"].aggregate.week_impact_percent == 5.0
+    assert snapshot.issue_usage["402"].aggregate.week_impact_percent == 15.0
+  end
+
+  test "weekly impact remains unavailable until account movement is observed" do
+    path = Path.join(System.tmp_dir!(), "symphony-orchestrator-week-impact-unavailable-#{System.unique_integer([:positive])}.jsonl")
+    {:ok, ledger} = SymphonyElixir.UsageLedger.load(path)
+
+    {:ok, _ledger} =
+      SymphonyElixir.UsageLedger.record(ledger, %{
+        issue_id: "403",
+        issue_identifier: "GH-403",
+        thread_id: "thread-403",
+        model: "gpt-5.6-luna",
+        started_at: DateTime.utc_now(),
+        token_usage: %{total_tokens: 10},
+        estimated_usage_credits_micros: 10
+      })
+
+    orchestrator_name = Module.concat(__MODULE__, :WeeklyImpactUnavailableOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name, usage_ledger_path: path)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm(path)
+    end)
+
+    :sys.replace_state(pid, fn state ->
+      %{state | codex_rate_limits: %{"weekly" => %{"windowDurationMins" => 10_080, "usedPercent" => 20}}}
+    end)
+
+    assert GenServer.call(pid, :snapshot).issue_usage["403"].aggregate.week_impact_percent == nil
+  end
+
+  test "orchestrator quarantines Sol exhaustion instead of retrying Sol again" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    previous_client = Application.get_env(:symphony_elixir, :owner_control_client_module)
+    previous_pid = Application.get_env(:symphony_elixir, :failure_quarantine_test_pid)
+    Application.put_env(:symphony_elixir, :owner_control_client_module, FailureQuarantineControl)
+    Application.put_env(:symphony_elixir, :failure_quarantine_test_pid, self())
+
+    on_exit(fn ->
+      restore_application_env(:owner_control_client_module, previous_client)
+      restore_application_env(:failure_quarantine_test_pid, previous_pid)
+    end)
+
+    issue = %Issue{id: "405", identifier: "GH-405", state: "In Progress", labels: ["symphony"], dispatchable: true}
+    orchestrator_name = Module.concat(__MODULE__, :SolTerminalOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
+
+    ref = make_ref()
+    route = %{selected_tier: :sol, actual_model: "gpt-5.6-sol", routing_reason: "label_override:model:sol", escalation_history: []}
+    initial_state = :sys.get_state(pid)
+
+    :sys.replace_state(pid, fn _ ->
+      %{initial_state | running: %{issue.id => running_entry(issue, ref, route)}, claimed: MapSet.new([issue.id])}
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), {:model_exhausted, route, :max_turns_exhausted}})
+
+    assert_receive {:failure_quarantine, 405, reason}, 1_000
+    assert reason =~ "model ceiling exhausted"
+    state = :sys.get_state(pid)
+    refute Map.has_key?(state.retry_attempts, issue.id)
+    refute MapSet.member?(state.claimed, issue.id)
+  end
+
+  test "orchestrator quarantines a third identical root-cause failure" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    previous_client = Application.get_env(:symphony_elixir, :owner_control_client_module)
+    previous_pid = Application.get_env(:symphony_elixir, :failure_quarantine_test_pid)
+    Application.put_env(:symphony_elixir, :owner_control_client_module, FailureQuarantineControl)
+    Application.put_env(:symphony_elixir, :failure_quarantine_test_pid, self())
+
+    on_exit(fn ->
+      restore_application_env(:owner_control_client_module, previous_client)
+      restore_application_env(:failure_quarantine_test_pid, previous_pid)
+    end)
+
+    issue = %Issue{id: "406", identifier: "GH-406", state: "In Progress", labels: ["symphony"], dispatchable: true}
+    orchestrator_name = Module.concat(__MODULE__, :RepeatedFailureTerminalOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
+
+    failure = {:worker_failed, :same_root_cause}
+
+    route =
+      %{
+        selected_tier: :terra,
+        actual_model: "gpt-5.6-terra",
+        routing_reason: "classifier:test",
+        escalation_history: [],
+        escalated_from: nil,
+        models: %{
+          "luna" => "gpt-5.6-luna",
+          "terra" => "gpt-5.6-terra",
+          "sol" => "gpt-5.6-sol"
+        }
+      }
+      |> ModelRouter.retry_route(failure)
+      |> ModelRouter.retry_route(failure)
+
+    ref = make_ref()
+    initial_state = :sys.get_state(pid)
+
+    :sys.replace_state(pid, fn _ ->
+      %{initial_state | running: %{issue.id => running_entry(issue, ref, route)}, claimed: MapSet.new([issue.id])}
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), failure})
+
+    assert_receive {:failure_quarantine, 406, reason}, 1_000
+    assert reason =~ "repeated failure"
+    state = :sys.get_state(pid)
+    refute Map.has_key?(state.retry_attempts, issue.id)
+    refute MapSet.member?(state.claimed, issue.id)
+  end
+
   test "orchestrator blocks a real before_run task failure without retrying" do
     test_root = Path.join(System.tmp_dir!(), "symphony-before-run-task-#{System.unique_integer([:positive])}")
     workspace_root = Path.join(test_root, "workspaces")
@@ -2642,6 +2827,24 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_for_snapshot(pid, predicate, deadline_ms)
   end
+
+  defp running_entry(issue, ref, route) do
+    %{
+      pid: self(),
+      ref: ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: "thread-#{issue.id}",
+      model_route: route,
+      selected_model_tier: route.selected_tier,
+      actual_model: route.actual_model,
+      retry_attempt: 2,
+      started_at: DateTime.utc_now()
+    }
+  end
+
+  defp restore_application_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
+  defp restore_application_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
 
   defp wait_until(predicate, timeout_ms) when is_function(predicate, 0) do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms

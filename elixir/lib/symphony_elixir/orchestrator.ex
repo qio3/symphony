@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, ModelRouter, StatusDashboard, Tracker, UsageLedger, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, ModelRouter, SourceCircuit, StatusDashboard, Tracker, UsageCost, UsageLedger, Workspace}
   alias SymphonyElixir.Codex.AppServer
   alias SymphonyElixir.OwnerControl.Client, as: OwnerControlClient
   alias SymphonyElixir.Tracker.Issue
@@ -48,9 +48,11 @@ defmodule SymphonyElixir.Orchestrator do
       claimed: MapSet.new(),
       blocked: %{},
       retry_attempts: %{},
+      source_circuit: SourceCircuit.new(),
       model_completed_counts: %{luna: 0, terra: 0, sol: 0},
       codex_totals: nil,
       codex_rate_limits: nil,
+      weekly_quota_observation: nil,
       usage_ledger: nil
     ]
   end
@@ -275,19 +277,28 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_agent_down({:model_exhausted, route, reason}, state, issue_id, running_entry, session_id) do
-    escalated_route = ModelRouter.maybe_escalate(route, reason)
+    if ModelRouter.terminal_exhaustion?(route, reason) do
+      quarantine_running_failure(
+        state,
+        issue_id,
+        running_entry,
+        "model ceiling exhausted on Sol: #{reason}"
+      )
+    else
+      escalated_route = ModelRouter.maybe_escalate(route, reason)
 
-    Logger.warning("Agent model exhausted for issue_id=#{issue_id} session_id=#{session_id} from=#{route.selected_tier} to=#{escalated_route.selected_tier} reason=#{reason}; scheduling retry")
+      Logger.warning("Agent model exhausted for issue_id=#{issue_id} session_id=#{session_id} from=#{route.selected_tier} to=#{escalated_route.selected_tier} reason=#{reason}; scheduling retry")
 
-    schedule_issue_retry(state, issue_id, next_retry_attempt_from_running(running_entry), %{
-      identifier: running_entry.identifier,
-      issue_url: running_entry.issue.url,
-      error: "model exhausted: #{reason}",
-      worker_host: Map.get(running_entry, :worker_host),
-      workspace_path: Map.get(running_entry, :workspace_path),
-      model_route: escalated_route,
-      escalation_reason: reason
-    })
+      schedule_issue_retry(state, issue_id, next_retry_attempt_from_running(running_entry), %{
+        identifier: running_entry.identifier,
+        issue_url: running_entry.issue.url,
+        error: "model exhausted: #{reason}",
+        worker_host: Map.get(running_entry, :worker_host),
+        workspace_path: Map.get(running_entry, :workspace_path),
+        model_route: escalated_route,
+        escalation_reason: reason
+      })
+    end
   end
 
   defp handle_agent_down(:normal, state, issue_id, running_entry, session_id) do
@@ -445,15 +456,36 @@ defmodule SymphonyElixir.Orchestrator do
     next_attempt = next_retry_attempt_from_running(running_entry)
     model_route = retry_model_route(running_entry, reason)
 
-    schedule_issue_retry(state, issue_id, next_attempt, %{
-      identifier: running_entry.identifier,
-      issue_url: running_entry.issue.url,
-      error: "agent exited: #{inspect(reason)}",
-      worker_host: Map.get(running_entry, :worker_host),
-      workspace_path: Map.get(running_entry, :workspace_path),
-      model_route: model_route,
-      escalation_reason: repeated_failure_escalation_reason(running_entry, model_route)
-    })
+    if is_map(model_route) and ModelRouter.terminal_retry?(model_route) do
+      quarantine_running_failure(
+        state,
+        issue_id,
+        running_entry,
+        "repeated failure reached retry limit: #{inspect(reason, limit: 20, printable_limit: 512)}"
+      )
+    else
+      schedule_issue_retry(state, issue_id, next_attempt, %{
+        identifier: running_entry.identifier,
+        issue_url: running_entry.issue.url,
+        error: "agent exited: #{inspect(reason)}",
+        worker_host: Map.get(running_entry, :worker_host),
+        workspace_path: Map.get(running_entry, :workspace_path),
+        model_route: model_route,
+        escalation_reason: repeated_failure_escalation_reason(running_entry, model_route)
+      })
+    end
+  end
+
+  defp quarantine_running_failure(state, issue_id, running_entry, reason) do
+    Logger.error(
+      "Agent task entered system quarantine for issue_id=#{issue_id} " <>
+        "issue_identifier=#{running_entry.identifier}: #{reason}"
+    )
+
+    case quarantine_before_run_hook_failure(running_entry, reason) do
+      :ok -> release_issue_claim(state, issue_id)
+      {:error, _persistence_reason} -> block_issue_from_entry(state, issue_id, running_entry, reason)
+    end
   end
 
   defp retry_model_route(running_entry, reason) do
@@ -483,7 +515,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> wake_paused_retries()
 
     with :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_issues_by_states(Config.settings!().tracker.active_states),
+         {:ok, issues, state} <- fetch_dispatch_issues(state),
          true <- fresh_dispatch_slots_available?(state) do
       choose_issues(issues, state)
     else
@@ -521,12 +553,33 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.error("Failed to parse WORKFLOW.md: #{inspect(reason)}")
         state
 
+      {:source_circuit_open, state} ->
+        state
+
+      {:source_error, state} ->
+        state
+
       {:error, reason} ->
         Logger.error("Failed to fetch from issue tracker: #{inspect(reason)}")
         state
 
       false ->
         state
+    end
+  end
+
+  defp fetch_dispatch_issues(state) do
+    if source_circuit_open?(state) do
+      {:source_circuit_open, state}
+    else
+      case Tracker.fetch_issues_by_states(Config.settings!().tracker.active_states) do
+        {:ok, issues} ->
+          {:ok, issues, source_circuit_success(state)}
+
+        {:error, reason} ->
+          Logger.error("Failed to fetch from issue tracker: #{inspect(reason)}")
+          {:source_error, source_circuit_failure(state, reason)}
+      end
     end
   end
 
@@ -1033,6 +1086,7 @@ defmodule SymphonyElixir.Orchestrator do
     active_states = active_state_set()
     terminal_states = terminal_state_set()
     owner_control = owner_control_dispatch_context()
+    state = apply_owner_worker_limit(state, owner_control)
 
     issues
     |> sort_issues_for_dispatch(owner_control.resumable_issue_numbers)
@@ -1468,7 +1522,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp retry_attempt_number(_attempt, previous_retry), do: previous_retry.attempt + 1
 
   defp retry_deferred_reason(delay_type, metadata, previous_retry)
-       when delay_type in [:capacity, :paused] do
+       when delay_type in [:capacity, :paused, :source_circuit] do
     Map.get(metadata, :deferred_reason) || Map.get(previous_retry, :deferred_reason)
   end
 
@@ -1500,7 +1554,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp log_retry_message(message, delay_type, deferred_reason)
-       when delay_type in [:capacity, :paused] do
+       when delay_type in [:capacity, :paused, :source_circuit] do
     Logger.debug("#{message} deferred=#{deferred_reason}")
   end
 
@@ -1529,27 +1583,46 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_retry_issue(%State{} = state, issue_id, attempt, metadata) do
-    case Tracker.fetch_issues_by_ids([issue_id]) do
-      {:ok, issues} ->
-        issues
-        |> find_issue_by_id(issue_id)
-        |> handle_retry_issue_lookup(state, issue_id, attempt, metadata)
+    if source_circuit_open?(state) do
+      {:noreply, defer_retry_for_source_circuit(state, issue_id, attempt, metadata)}
+    else
+      case Tracker.fetch_issues_by_ids([issue_id]) do
+        {:ok, issues} ->
+          state = source_circuit_success(state)
 
-      {:error, reason} ->
-        Logger.warning("Retry poll failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}: #{inspect(reason)}")
+          issues
+          |> find_issue_by_id(issue_id)
+          |> handle_retry_issue_lookup(state, issue_id, attempt, metadata)
 
-        {:noreply,
-         schedule_issue_retry(
-           state,
-           issue_id,
-           attempt + 1,
-           Map.merge(metadata, %{
-             error: "retry poll failed: #{inspect(reason)}",
-             delay_type: :failure,
-             deferred_reason: nil
-           })
-         )}
+        {:error, reason} ->
+          Logger.warning("Retry poll failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}: #{inspect(reason)}")
+          state = source_circuit_failure(state, reason)
+
+          {:noreply,
+           schedule_issue_retry(
+             state,
+             issue_id,
+             attempt,
+             Map.merge(metadata, %{
+               error: "shared source unavailable: #{inspect(reason)}",
+               delay_type: :source_circuit,
+               deferred_reason: "shared issue source unavailable"
+             })
+           )}
+      end
     end
+  end
+
+  defp defer_retry_for_source_circuit(state, issue_id, attempt, metadata) do
+    schedule_issue_retry(
+      state,
+      issue_id,
+      attempt,
+      Map.merge(metadata, %{
+        delay_type: :source_circuit,
+        deferred_reason: "shared issue source circuit is open"
+      })
+    )
   end
 
   defp handle_retry_issue_lookup(%Issue{} = issue, state, issue_id, attempt, metadata) do
@@ -1846,7 +1919,8 @@ defmodule SymphonyElixir.Orchestrator do
         %{
           intake_active: true,
           ready_issue_numbers: fresh_ready_issue_numbers(snapshot),
-          resumable_issue_numbers: fresh_resumable_issue_numbers(snapshot)
+          resumable_issue_numbers: fresh_resumable_issue_numbers(snapshot),
+          worker_limit: fresh_owner_worker_limit(snapshot)
         }
 
       _disabled_or_unavailable ->
@@ -1858,7 +1932,8 @@ defmodule SymphonyElixir.Orchestrator do
     %{
       intake_active: intake_active,
       ready_issue_numbers: %{},
-      resumable_issue_numbers: %{}
+      resumable_issue_numbers: %{},
+      worker_limit: nil
     }
   end
 
@@ -1866,9 +1941,25 @@ defmodule SymphonyElixir.Orchestrator do
     %{
       intake_active: true,
       ready_issue_numbers: :owner_control_disabled,
-      resumable_issue_numbers: :owner_control_disabled
+      resumable_issue_numbers: :owner_control_disabled,
+      worker_limit: nil
     }
   end
+
+  defp fresh_owner_worker_limit(snapshot) do
+    limit = get_in(snapshot, [:workers, :limit])
+    configured_max = Config.settings!().agent.max_concurrent_agents
+
+    if fresh_owner_control_snapshot?(snapshot) and is_integer(limit) and limit in 1..configured_max,
+      do: limit,
+      else: nil
+  end
+
+  defp apply_owner_worker_limit(%State{} = state, %{worker_limit: limit})
+       when is_integer(limit) and limit > 0,
+       do: %{state | max_concurrent_agents: limit}
+
+  defp apply_owner_worker_limit(%State{} = state, _owner_control), do: state
 
   defp owner_control_enabled? do
     not is_nil(Application.get_env(:symphony_elixir, :owner_control_client_module)) or
@@ -2019,6 +2110,7 @@ defmodule SymphonyElixir.Orchestrator do
       :continuation when attempt == 1 -> @continuation_retry_delay_ms
       :capacity -> @capacity_retry_delay_ms
       :paused -> @paused_retry_delay_ms
+      :source_circuit -> @paused_retry_delay_ms
       _failure -> failure_retry_delay(attempt)
     end
   end
@@ -2060,6 +2152,25 @@ defmodule SymphonyElixir.Orchestrator do
   defp failure_retry_delay(attempt) do
     max_delay_power = min(attempt - 1, 10)
     min(@failure_retry_base_ms * (1 <<< max_delay_power), Config.settings!().agent.max_retry_backoff_ms)
+  end
+
+  defp source_circuit_open?(%State{source_circuit: circuit}) do
+    SourceCircuit.open?(circuit, System.monotonic_time(:millisecond))
+  end
+
+  defp source_circuit_success(%State{} = state) do
+    %{state | source_circuit: SourceCircuit.success(state.source_circuit)}
+  end
+
+  defp source_circuit_failure(%State{} = state, reason) do
+    circuit =
+      SourceCircuit.failure(
+        state.source_circuit,
+        reason,
+        System.monotonic_time(:millisecond)
+      )
+
+    %{state | source_circuit: circuit}
   end
 
   defp normalize_retry_attempt(attempt) when is_integer(attempt) and attempt > 0, do: attempt
@@ -2334,8 +2445,18 @@ defmodule SymphonyElixir.Orchestrator do
        max_concurrent_agents: state.max_concurrent_agents,
        model_counts: model_counts(state),
        rate_limits: Map.get(state, :codex_rate_limits),
-       issue_usage: issue_usage_snapshot(Map.get(state, :usage_ledger)),
-       usage_aggregate: usage_aggregate_snapshot(Map.get(state, :usage_ledger)),
+       issue_usage:
+         issue_usage_snapshot(
+           Map.get(state, :usage_ledger),
+           Map.get(state, :codex_rate_limits),
+           Map.get(state, :weekly_quota_observation)
+         ),
+       usage_aggregate:
+         usage_aggregate_snapshot(
+           Map.get(state, :usage_ledger),
+           Map.get(state, :codex_rate_limits)
+         ),
+       source_circuit: SourceCircuit.snapshot(state.source_circuit, now_ms),
        polling: %{
          checking?: state.poll_check_in_progress == true,
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
@@ -2588,17 +2709,33 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
-  defp issue_usage_snapshot(nil), do: %{}
+  defp issue_usage_snapshot(nil, _rate_limits, _observation), do: %{}
 
-  defp issue_usage_snapshot(ledger) do
-    ledger
-    |> UsageLedger.snapshot()
-    |> Map.fetch!(:current)
+  defp issue_usage_snapshot(ledger, rate_limits, observation) do
+    entries = weekly_usage_entries(ledger, rate_limits)
+    impacts = observed_week_impacts(entries, observation)
+
+    entries
     |> Enum.group_by(& &1.issue_id)
-    |> Map.new(&issue_usage_entry/1)
+    |> Map.new(&issue_usage_entry(&1, impacts))
   end
 
-  defp issue_usage_entry({issue_id, entries}) do
+  defp observed_week_impacts(entries, %{observed_since: %DateTime{} = since, movement_percent: movement})
+       when is_number(movement) and movement > 0 do
+    observed_entries =
+      Enum.filter(entries, fn entry ->
+        case Map.get(entry, :started_at) do
+          %DateTime{} = started -> DateTime.compare(started, since) in [:eq, :gt]
+          _ -> false
+        end
+      end)
+
+    UsageCost.approximate_week_impact(observed_entries, movement)
+  end
+
+  defp observed_week_impacts(_entries, _observation), do: %{}
+
+  defp issue_usage_entry({issue_id, entries}, impacts) do
     current = Enum.max_by(entries, &usage_entry_recency/1)
     key = issue_usage_key(current.issue_identifier, issue_id)
 
@@ -2609,7 +2746,8 @@ defmodule SymphonyElixir.Orchestrator do
        current: current,
        aggregate: %{
          token_usage: aggregate_token_usage(entries),
-         estimated_usage_credits_micros: aggregate_usage_credits(entries)
+         estimated_usage_credits_micros: aggregate_usage_credits(entries),
+         week_impact_percent: Map.get(impacts, issue_id)
        }
      }}
   end
@@ -2622,9 +2760,107 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp aggregate_usage_credits(entries), do: Enum.reduce(entries, 0, &(&1.estimated_usage_credits_micros + &2))
 
-  defp usage_aggregate_snapshot(nil), do: %{token_usage: empty_usage_tokens(), estimated_usage_credits_micros: 0}
+  defp usage_aggregate_snapshot(nil, _rate_limits),
+    do: %{token_usage: empty_usage_tokens(), estimated_usage_credits_micros: 0}
 
-  defp usage_aggregate_snapshot(ledger), do: UsageLedger.snapshot(ledger).aggregate
+  defp usage_aggregate_snapshot(ledger, rate_limits) do
+    entries = weekly_usage_entries(ledger, rate_limits)
+
+    %{
+      token_usage: aggregate_token_usage(entries),
+      estimated_usage_credits_micros: aggregate_usage_credits(entries)
+    }
+  end
+
+  defp weekly_usage_entries(ledger, rate_limits) do
+    cutoff = weekly_window_start(rate_limits)
+
+    ledger
+    |> UsageLedger.snapshot()
+    |> Map.fetch!(:current)
+    |> Enum.filter(&usage_entry_in_window?(&1, cutoff))
+  end
+
+  defp usage_entry_in_window?(%{completed_at: nil}, _cutoff), do: true
+
+  defp usage_entry_in_window?(entry, %DateTime{} = cutoff) do
+    timestamp = Map.get(entry, :completed_at) || Map.get(entry, :started_at)
+
+    case timestamp do
+      %DateTime{} = value -> DateTime.compare(value, cutoff) in [:eq, :gt]
+      _ -> true
+    end
+  end
+
+  defp usage_entry_in_window?(_entry, _cutoff), do: true
+
+  defp weekly_window_start(rate_limits) do
+    bucket = weekly_rate_limit_bucket(rate_limits)
+    reset_at = rate_limit_reset_at(bucket)
+    duration_seconds = 10_080 * 60
+
+    case reset_at do
+      %DateTime{} = reset -> DateTime.add(reset, -duration_seconds)
+      _ -> DateTime.add(DateTime.utc_now(), -duration_seconds)
+    end
+  end
+
+  defp weekly_used_percent(rate_limits) do
+    bucket = weekly_rate_limit_bucket(rate_limits)
+
+    case map_numeric_value(bucket || %{}, ["usedPercent", :usedPercent, "used_percent", :used_percent]) do
+      value when is_number(value) -> value
+      _ -> nil
+    end
+  end
+
+  defp weekly_rate_limit_bucket(value) when is_map(value) do
+    duration =
+      map_integer_value(value, "windowDurationMins") || map_integer_value(value, :windowDurationMins) ||
+        map_integer_value(value, "window_duration_mins") || map_integer_value(value, :window_duration_mins)
+
+    if duration == 10_080 do
+      value
+    else
+      Enum.find_value(Map.values(value), &weekly_rate_limit_bucket/1)
+    end
+  end
+
+  defp weekly_rate_limit_bucket(value) when is_list(value),
+    do: Enum.find_value(value, &weekly_rate_limit_bucket/1)
+
+  defp weekly_rate_limit_bucket(_value), do: nil
+
+  defp rate_limit_reset_at(bucket) when is_map(bucket) do
+    value =
+      Map.get(bucket, "resetsAt") || Map.get(bucket, :resetsAt) ||
+        Map.get(bucket, "resets_at") || Map.get(bucket, :resets_at)
+
+    cond do
+      is_integer(value) ->
+        DateTime.from_unix!(value)
+
+      is_binary(value) ->
+        case DateTime.from_iso8601(value) do
+          {:ok, datetime, _offset} -> datetime
+          _ -> nil
+        end
+
+      true ->
+        nil
+    end
+  end
+
+  defp rate_limit_reset_at(_bucket), do: nil
+
+  defp map_numeric_value(map, keys) when is_map(map) and is_list(keys) do
+    Enum.find_value(keys, fn key ->
+      case Map.get(map, key) do
+        value when is_number(value) -> value
+        _ -> nil
+      end
+    end)
+  end
 
   defp empty_usage_tokens do
     %{
@@ -2829,7 +3065,13 @@ defmodule SymphonyElixir.Orchestrator do
   defp apply_codex_rate_limits(%State{} = state, update) when is_map(update) do
     case extract_rate_limits(update) do
       %{} = rate_limits ->
-        %{state | codex_rate_limits: merge_rate_limits(state.codex_rate_limits, rate_limits)}
+        merged = merge_rate_limits(state.codex_rate_limits, rate_limits)
+
+        %{
+          state
+          | codex_rate_limits: merged,
+            weekly_quota_observation: update_weekly_quota_observation(state, merged, update)
+        }
 
       _ ->
         state
@@ -2837,6 +3079,37 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp apply_codex_rate_limits(state, _update), do: state
+
+  defp update_weekly_quota_observation(state, rate_limits, update) do
+    used = weekly_used_percent(rate_limits)
+    reset_at = rate_limits |> weekly_rate_limit_bucket() |> rate_limit_reset_at()
+    observed_at = Map.get(update, :timestamp) || Map.get(update, "timestamp") || DateTime.utc_now()
+    current = Map.get(state, :weekly_quota_observation)
+
+    cond do
+      not is_number(used) ->
+        current
+
+      not match?(%DateTime{}, observed_at) ->
+        current
+
+      not is_map(current) or current.reset_at != reset_at or used < current.baseline_used_percent ->
+        %{
+          reset_at: reset_at,
+          observed_since: observed_at,
+          baseline_used_percent: used,
+          current_used_percent: used,
+          movement_percent: 0.0
+        }
+
+      true ->
+        %{
+          current
+          | current_used_percent: used,
+            movement_percent: max(used - current.baseline_used_percent, 0.0)
+        }
+    end
+  end
 
   defp merge_rate_limits(nil, rate_limits), do: rate_limits
 

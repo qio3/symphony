@@ -88,10 +88,12 @@ class GitHubClient:
         repository: str,
         project_id: str,
         transport: JsonTransport = request_json,
+        mutation_logger: Callable[[dict[str, Any]], None] | None = None,
     ):
         self._repository = repository
         self._project_id = project_id
         self._transport = transport
+        self._mutation_logger = mutation_logger or (lambda _entry: None)
         self._headers = {
             "Authorization": f"Bearer {token}",
             "X-GitHub-Api-Version": "2022-11-28",
@@ -100,6 +102,7 @@ class GitHubClient:
         self._status_field_id: str | None = None
         self._status_options: dict[str, str] = {}
         self._project_items: dict[int, str] = {}
+        self._project_statuses: dict[int, str] = {}
         self._lock = threading.RLock()
 
     def project_snapshot(self, *, reconcile_intake: bool = False) -> dict[str, Any]:
@@ -109,6 +112,7 @@ class GitHubClient:
     def _project_snapshot(self, *, reconcile_intake: bool) -> dict[str, Any]:
         items = []
         self._project_items = {}
+        self._project_statuses = {}
         cursor = None
         while True:
             response = self._graphql(
@@ -124,6 +128,7 @@ class GitHubClient:
                 if item is not None:
                     items.append(item)
                     self._project_items[item["number"]] = item["project_item_id"]
+                    self._project_statuses[item["number"]] = str(item.get("status") or "")
             page = connection.get("pageInfo") or {}
             if not page.get("hasNextPage"):
                 break
@@ -139,10 +144,30 @@ class GitHubClient:
         encoded_ref = urllib.parse.quote(ref, safe="")
         value = self._rest("GET", f"/repos/{self._repository}/git/ref/heads/{encoded_ref}")
         sha = (value.get("object") or {}).get("sha")
+        check_runs = (
+            self._rest("GET", f"/repos/{self._repository}/commits/{sha}/check-runs")
+            if sha
+            else {}
+        )
         return {
             "sha": sha,
             "url": f"https://github.com/{self._repository}/commit/{sha}" if sha else None,
             "ref": ref,
+            "ci": _canonical_ci(check_runs),
+        }
+
+    def commit_contains(self, deployed_sha: str, merge_sha: str) -> bool:
+        if not deployed_sha or not merge_sha:
+            return False
+        deployed = urllib.parse.quote(deployed_sha, safe="")
+        merged = urllib.parse.quote(merge_sha, safe="")
+        comparison = self._rest(
+            "GET",
+            f"/repos/{self._repository}/compare/{merged}...{deployed}",
+        )
+        return str(comparison.get("status") or "").casefold() in {
+            "ahead",
+            "identical",
         }
 
     def set_status(self, issue: int, status: str) -> None:
@@ -155,6 +180,7 @@ class GitHubClient:
                 raise RuntimeError(f"issue #{issue} is not in the configured GitHub project")
             if not self._status_field_id or not option_id:
                 raise RuntimeError(f"GitHub project status option is unavailable: {status}")
+            old_status = self._project_statuses.get(issue)
             self._graphql(
                 _STATUS_MUTATION,
                 {
@@ -164,6 +190,16 @@ class GitHubClient:
                     "optionId": option_id,
                 },
                 operation_name="OwnerControlSetStatus",
+            )
+            self._project_statuses[issue] = status
+            self._mutation_logger(
+                {
+                    "actor": "owner-control",
+                    "issue": issue,
+                    "old": old_status,
+                    "new": status,
+                    "reason": "set_status",
+                }
             )
 
     def add_label(self, issue: int, label: str) -> None:
@@ -480,9 +516,33 @@ def _normalize_pull_request(pull_request: dict[str, Any] | None) -> tuple[dict[s
         "state": pull_request.get("state"),
         "merged": bool(pull_request.get("merged")),
         "sha": commit.get("oid"),
+        "merge_sha": (pull_request.get("mergeCommit") or {}).get("oid"),
     }
     ci = {"status": state, "url": f"{pull_request.get('url')}/checks" if pull_request.get("url") else None}
     return pr, ci
+
+
+def _canonical_ci(value: dict[str, Any]) -> dict[str, Any]:
+    runs = value.get("check_runs") or [] if isinstance(value, dict) else []
+    failed_conclusions = {"failure", "cancelled", "timed_out", "action_required", "startup_failure"}
+    failed = sum(
+        1
+        for run in runs
+        if str(run.get("conclusion") or "").casefold() in failed_conclusions
+    )
+    pending = sum(
+        1 for run in runs if str(run.get("status") or "").casefold() != "completed"
+    )
+    total = len(runs)
+    if failed:
+        status = "failure"
+    elif pending:
+        status = "pending"
+    elif total:
+        status = "success"
+    else:
+        status = "unknown"
+    return {"status": status, "total": total, "failed": failed, "pending": pending}
 
 
 _PROJECT_QUERY = """
@@ -513,6 +573,7 @@ query OwnerControlProject($projectId: ID!, $cursor: String) {
               closedByPullRequestsReferences(first: 10) {
                 nodes {
                   number url state merged
+                  mergeCommit { oid }
                   commits(last: 1) {
                     nodes { commit { oid statusCheckRollup { state } } }
                   }
