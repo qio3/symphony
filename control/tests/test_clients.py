@@ -309,7 +309,7 @@ class GitHubClientTest(unittest.TestCase):
         self.assertEqual(project["items"][0]["status"], "Blocked")
         self.assertEqual(len(transport.calls), 2)
 
-    def test_reconciled_snapshot_sets_an_existing_blank_status_once(self):
+    def test_reconciled_snapshot_leaves_an_existing_blank_status_unchanged(self):
         response = project_response()
         item = response["data"]["node"]["items"]["nodes"][0]
         item["fieldValues"]["nodes"] = []
@@ -326,7 +326,6 @@ class GitHubClientTest(unittest.TestCase):
             [
                 response,
                 [ordinary],
-                {"data": {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "project-item-401"}}}},
             ]
         )
         client = GitHubClient(
@@ -338,9 +337,9 @@ class GitHubClientTest(unittest.TestCase):
 
         project = client.project_snapshot(reconcile_intake=True)
 
-        self.assertEqual(project["items"][0]["status"], "Ready for AI")
-        self.assertFalse(project["items"][0]["status_missing"])
-        self.assertEqual(len(transport.calls), 3)
+        self.assertEqual(project["items"][0]["status"], "Backlog")
+        self.assertTrue(project["items"][0]["status_missing"])
+        self.assertEqual(len(transport.calls), 2)
 
     def test_red_owner_gate_text_is_valid_only_inside_the_exact_issue_form_field(self):
         quoted_elsewhere = (
