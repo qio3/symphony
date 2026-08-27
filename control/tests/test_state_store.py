@@ -6,6 +6,20 @@ from owner_control.state_store import StateStore
 
 
 class StateStoreHistoryTest(unittest.TestCase):
+    def test_persisted_action_steps_and_result_survive_a_new_store_instance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "owner-control.json"
+            store = StateStore(path)
+            store.record_action_step("rework:402", "comment")
+
+            reopened = StateStore(path)
+            self.assertTrue(reopened.action_step_completed("rework:402", "comment"))
+            self.assertIsNone(reopened.action_result("rework:402"))
+
+            result = {"status": "accepted", "action": "rework", "issue": 402}
+            reopened.complete_action("rework:402", result)
+            self.assertEqual(StateStore(path).action_result("rework:402"), result)
+
     def test_worker_limit_override_is_bounded_by_the_configured_maximum(self):
         with tempfile.TemporaryDirectory() as directory:
             store = StateStore(Path(directory) / "owner-control.json")

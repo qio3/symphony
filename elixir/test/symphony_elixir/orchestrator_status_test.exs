@@ -2001,6 +2001,41 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     refute MapSet.member?(state.claimed, issue.id)
   end
 
+  test "orchestrator never retries a failed Sol attempt as Sol" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    previous_client = Application.get_env(:symphony_elixir, :owner_control_client_module)
+    previous_pid = Application.get_env(:symphony_elixir, :failure_quarantine_test_pid)
+    Application.put_env(:symphony_elixir, :owner_control_client_module, FailureQuarantineControl)
+    Application.put_env(:symphony_elixir, :failure_quarantine_test_pid, self())
+
+    on_exit(fn ->
+      restore_application_env(:owner_control_client_module, previous_client)
+      restore_application_env(:failure_quarantine_test_pid, previous_pid)
+    end)
+
+    issue = %Issue{id: "407", identifier: "GH-407", state: "In Progress", labels: ["symphony"], dispatchable: true}
+    orchestrator_name = Module.concat(__MODULE__, :SolNoRepeatOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
+
+    ref = make_ref()
+    route = %{selected_tier: :sol, actual_model: "gpt-5.6-sol", routing_reason: "label_override:model:sol", escalation_history: []}
+    initial_state = :sys.get_state(pid)
+
+    :sys.replace_state(pid, fn _ ->
+      %{initial_state | running: %{issue.id => running_entry(issue, ref, route)}, claimed: MapSet.new([issue.id])}
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), {:worker_failed, :same_root_cause}})
+
+    assert_receive {:failure_quarantine, 407, reason}, 1_000
+    assert reason =~ "Sol attempt failed"
+    state = :sys.get_state(pid)
+    refute Map.has_key?(state.retry_attempts, issue.id)
+    refute MapSet.member?(state.claimed, issue.id)
+  end
+
   test "orchestrator quarantines a third identical root-cause failure" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
 
@@ -2047,7 +2082,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     send(pid, {:DOWN, ref, :process, self(), failure})
 
     assert_receive {:failure_quarantine, 406, reason}, 1_000
-    assert reason =~ "repeated failure"
+    assert reason =~ "Sol attempt failed"
     state = :sys.get_state(pid)
     refute Map.has_key?(state.retry_attempts, issue.id)
     refute MapSet.member?(state.claimed, issue.id)

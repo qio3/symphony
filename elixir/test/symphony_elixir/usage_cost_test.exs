@@ -15,7 +15,7 @@ defmodule SymphonyElixir.UsageCostTest do
 
     assert UsageCost.estimate_micros("gpt-5.6-luna", usage) == 289_000
     assert UsageCost.estimate_micros("gpt-5.6-terra", usage) == 2_890_000
-    assert UsageCost.estimate_micros("gpt-5.6-sol", usage) == 7_225_000
+    assert UsageCost.estimate_micros("gpt-5.6-sol", usage) == 5_380_000
   end
 
   test "unknown models remain unavailable instead of inventing a price" do

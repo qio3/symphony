@@ -470,6 +470,39 @@ class ActionServiceTest(unittest.TestCase):
             [("set_status", 402, "Done"), ("close_issue", 402)],
         )
 
+    def test_rework_resumes_after_restart_without_duplicate_owner_comment(self):
+        params = {"issue": 402, "reason": "Keep legacy IDs"}
+        self.lifecycle.fail_on = "set_status"
+
+        with self.assertRaisesRegex(RuntimeError, "status unavailable"):
+            self.actions.execute("rework", params)
+
+        self.lifecycle.fail_on = None
+        restarted = ActionService(
+            snapshot_provider=lambda: self.snapshot,
+            lifecycle=self.lifecycle,
+            supervisor=self.supervisor,
+            state_store=StateStore(self.state_path),
+        )
+        result = restarted.execute("rework", params)
+
+        self.assertEqual(result["status"], "accepted")
+        comments = [call for call in self.lifecycle.calls if call[0] == "comment"]
+        self.assertEqual(
+            comments,
+            [("comment", 402, "Owner requested rework: Keep legacy IDs")],
+        )
+
+        self.lifecycle.calls.clear()
+        duplicate = ActionService(
+            snapshot_provider=lambda: self.snapshot,
+            lifecycle=self.lifecycle,
+            supervisor=self.supervisor,
+            state_store=StateStore(self.state_path),
+        ).execute("rework", params)
+        self.assertEqual(duplicate, result)
+        self.assertEqual(self.lifecycle.calls, [])
+
     def test_pause_resume_and_restart_use_control_state_and_fixed_supervisor(self):
         self.assertTrue(self.actions.execute("pause", {})["intake"]["active"] is False)
         self.assertFalse(self.store.intake_active())

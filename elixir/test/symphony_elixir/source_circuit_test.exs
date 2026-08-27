@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.SourceCircuitTest do
   use ExUnit.Case, async: true
 
-  alias SymphonyElixir.SourceCircuit
+  alias SymphonyElixir.{Orchestrator, SourceCircuit}
 
   test "opens after three consecutive source failures and closes on success" do
     circuit = SourceCircuit.new(threshold: 3, cooldown_ms: 60_000)
@@ -26,5 +26,17 @@ defmodule SymphonyElixir.SourceCircuitTest do
 
     assert SourceCircuit.open?(circuit, 1_000)
     assert SourceCircuit.snapshot(circuit, 1_000).failure_count == 1
+  end
+
+  test "an open shared-source circuit gates the whole polling pass" do
+    now_ms = System.monotonic_time(:millisecond)
+
+    circuit =
+      SourceCircuit.new(threshold: 1, cooldown_ms: 60_000)
+      |> SourceCircuit.failure(:rate_limited, now_ms)
+
+    state = %Orchestrator.State{source_circuit: circuit}
+
+    assert Orchestrator.maybe_dispatch_for_test(state) == state
   end
 end

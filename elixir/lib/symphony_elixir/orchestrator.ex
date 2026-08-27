@@ -288,7 +288,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_agent_down({:model_exhausted, route, reason}, state, issue_id, running_entry, session_id) do
-    if ModelRouter.terminal_exhaustion?(route, reason) do
+    if Map.get(route, :selected_tier) == :sol or ModelRouter.terminal_exhaustion?(route, reason) do
       quarantine_running_failure(
         state,
         issue_id,
@@ -467,6 +467,26 @@ defmodule SymphonyElixir.Orchestrator do
     next_attempt = next_retry_attempt_from_running(running_entry)
     model_route = retry_model_route(running_entry, reason)
 
+    if same_sol_retry?(running_entry, model_route) do
+      quarantine_running_failure(
+        state,
+        issue_id,
+        running_entry,
+        "Sol attempt failed and cannot be retried as Sol: #{inspect(reason, limit: 20, printable_limit: 512)}"
+      )
+    else
+      maybe_schedule_bounded_retry(
+        state,
+        issue_id,
+        running_entry,
+        reason,
+        next_attempt,
+        model_route
+      )
+    end
+  end
+
+  defp maybe_schedule_bounded_retry(state, issue_id, running_entry, reason, next_attempt, model_route) do
     if is_map(model_route) and ModelRouter.terminal_retry?(model_route) do
       quarantine_running_failure(
         state,
@@ -486,6 +506,13 @@ defmodule SymphonyElixir.Orchestrator do
       })
     end
   end
+
+  defp same_sol_retry?(running_entry, retry_route) when is_map(retry_route) do
+    get_in(running_entry, [:model_route, :selected_tier]) == :sol and
+      Map.get(retry_route, :selected_tier) == :sol
+  end
+
+  defp same_sol_retry?(_running_entry, _retry_route), do: false
 
   defp quarantine_running_failure(state, issue_id, running_entry, reason) do
     Logger.error(
@@ -518,12 +545,18 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp repeated_failure_escalation_reason(_running_entry, _retry_route), do: nil
 
+  @doc false
+  @spec maybe_dispatch_for_test(term()) :: term()
+  def maybe_dispatch_for_test(%State{} = state), do: maybe_dispatch(state)
+
   defp maybe_dispatch(%State{} = state) do
-    state =
-      state
-      |> reconcile_running_issues()
-      |> reconcile_blocked_issues()
-      |> wake_paused_retries()
+    if source_circuit_open?(state), do: state, else: do_maybe_dispatch(state)
+  end
+
+  defp do_maybe_dispatch(%State{} = state) do
+    state = reconcile_running_issues(state)
+    state = if source_circuit_open?(state), do: state, else: reconcile_blocked_issues(state)
+    state = wake_paused_retries(state)
 
     with :ok <- Config.validate!(),
          {:ok, issues, state} <- fetch_dispatch_issues(state),
@@ -605,7 +638,7 @@ defmodule SymphonyElixir.Orchestrator do
         {:ok, issues} ->
           issues
           |> reconcile_running_issue_states(
-            state,
+            source_circuit_success(state),
             active_state_set(),
             terminal_state_set()
           )
@@ -614,7 +647,7 @@ defmodule SymphonyElixir.Orchestrator do
         {:error, reason} ->
           Logger.debug("Failed to refresh running issue states: #{inspect(reason)}; keeping active workers")
 
-          state
+          source_circuit_failure(state, reason)
       end
     end
   end
@@ -629,7 +662,7 @@ defmodule SymphonyElixir.Orchestrator do
         {:ok, issues} ->
           issues
           |> reconcile_blocked_issue_states(
-            state,
+            source_circuit_success(state),
             active_state_set(),
             terminal_state_set()
           )
@@ -638,7 +671,7 @@ defmodule SymphonyElixir.Orchestrator do
         {:error, reason} ->
           Logger.debug("Failed to refresh blocked issue states: #{inspect(reason)}; keeping blocked issues")
 
-          state
+          source_circuit_failure(state, reason)
       end
     end
   end

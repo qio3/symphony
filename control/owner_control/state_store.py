@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,78 @@ class StateStore:
         if type(limit) is not int or type(maximum) is not int or not 1 <= limit <= maximum:
             raise ValueError(f"worker limit must be between 1 and {maximum}")
         self.update({"worker_limit": limit})
+
+    def action_step_completed(
+        self, action_key: str, step: str, *, ttl_seconds: int = 600
+    ) -> bool:
+        operation = self._action_operation(action_key, ttl_seconds=ttl_seconds)
+        steps = operation.get("steps") if isinstance(operation, dict) else None
+        return isinstance(steps, list) and step in steps
+
+    def record_action_step(self, action_key: str, step: str) -> None:
+        if not action_key or not step:
+            raise ValueError("action key and step are required")
+        with self._lock:
+            state = self._read_unlocked()
+            operations = self._pruned_action_operations(state)
+            operation = dict(operations.get(action_key) or {})
+            steps = list(operation.get("steps") or [])
+            if step not in steps:
+                steps.append(step)
+            operation.update({"steps": steps, "updated_at": time.time()})
+            operations[action_key] = operation
+            state["action_operations"] = operations
+            self._write_unlocked(state)
+
+    def action_result(
+        self, action_key: str, *, ttl_seconds: int = 600
+    ) -> dict[str, Any] | None:
+        operation = self._action_operation(action_key, ttl_seconds=ttl_seconds)
+        result = operation.get("result") if isinstance(operation, dict) else None
+        return dict(result) if isinstance(result, dict) else None
+
+    def complete_action(self, action_key: str, result: dict[str, Any]) -> None:
+        if not action_key or not isinstance(result, dict):
+            raise ValueError("action key and result are required")
+        with self._lock:
+            state = self._read_unlocked()
+            operations = self._pruned_action_operations(state)
+            operation = dict(operations.get(action_key) or {})
+            operation.update({"result": dict(result), "updated_at": time.time()})
+            operations[action_key] = operation
+            state["action_operations"] = operations
+            self._write_unlocked(state)
+
+    def _action_operation(
+        self, action_key: str, *, ttl_seconds: int
+    ) -> dict[str, Any] | None:
+        if not action_key:
+            return None
+        with self._lock:
+            state = self._read_unlocked()
+            operations = self._pruned_action_operations(state, ttl_seconds=ttl_seconds)
+            if operations != state.get("action_operations"):
+                state["action_operations"] = operations
+                self._write_unlocked(state)
+            operation = operations.get(action_key)
+            return dict(operation) if isinstance(operation, dict) else None
+
+    @staticmethod
+    def _pruned_action_operations(
+        state: dict[str, Any], *, ttl_seconds: int = 600
+    ) -> dict[str, dict[str, Any]]:
+        raw = state.get("action_operations")
+        if not isinstance(raw, dict):
+            return {}
+        cutoff = time.time() - max(int(ttl_seconds), 1)
+        return {
+            key: dict(operation)
+            for key, operation in raw.items()
+            if isinstance(key, str)
+            and isinstance(operation, dict)
+            and isinstance(operation.get("updated_at"), (int, float))
+            and operation["updated_at"] >= cutoff
+        }
 
     def quarantines(self) -> dict[str, dict[str, Any]]:
         value = self.read().get("system_quarantines")
