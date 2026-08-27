@@ -486,9 +486,18 @@ class SnapshotService:
         refreshed_at: str,
     ) -> dict[str, Any]:
         snapshot = deepcopy(cached)
+        systemic_gate = snapshot.get("systemic_gate") or {}
+        systemic_blocked = bool(systemic_gate.get("blocked"))
         snapshot["intake"] = {
-            "active": intake_active,
-            "status": "active" if intake_active else "paused",
+            "active": intake_active and not systemic_blocked,
+            "requested_active": intake_active,
+            "status": (
+                "blocked-systemic"
+                if systemic_blocked
+                else "active"
+                if intake_active
+                else "paused"
+            ),
         }
         snapshot["service"] = deepcopy(service)
         sources = snapshot.setdefault("sources", {})

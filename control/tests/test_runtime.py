@@ -127,6 +127,15 @@ class BlockingGitHub(ChangingGitHub):
         return super().project_snapshot(reconcile_intake=reconcile_intake)
 
 
+class RedBlockingGitHub(BlockingGitHub):
+    def canonical(self, _ref):
+        return {
+            "sha": self.sha,
+            "url": None,
+            "ci": {"status": "failure", "failed": 1},
+        }
+
+
 class AuthFailingGitHub(FakeGitHub):
     def project_snapshot(self, *, reconcile_intake=False):
         raise RuntimeError("HTTP 401 from api.github.com")
@@ -561,7 +570,10 @@ class SnapshotServiceTest(unittest.TestCase):
         self.assertLess(elapsed, 0.2)
         self.assertFalse(patched["service"]["live"])
         self.assertEqual(patched["service"]["status"], "exited")
-        self.assertEqual(patched["intake"], {"active": False, "status": "paused"})
+        self.assertEqual(
+            patched["intake"],
+            {"active": False, "requested_active": False, "status": "paused"},
+        )
         self.assertEqual(patched["sources"]["runtime"]["status"], "stale")
         self.assertEqual(patched["workers"]["running"], 0)
         self.assertEqual(patched["counts"]["running"], 0)
@@ -582,6 +594,34 @@ class SnapshotServiceTest(unittest.TestCase):
         self.assertEqual(refreshed["counts"]["queued"], 1)
         self.assertEqual(refreshed["quota"]["weekly"]["used_percent"], 21)
         self.assertEqual(refreshed["issue_usage"]["402"]["total_tokens"], 1234)
+
+    def test_invalidate_preserves_a_systemic_intake_gate_while_refresh_is_running(self):
+        github = RedBlockingGitHub()
+        service = SnapshotService(
+            symphony=FakeSymphony(),
+            github=github,
+            test_environment=FakeTest(),
+            supervisor=FakeSupervisor(),
+            state_store=self.store,
+            worker_limit=5,
+            canonical_ref="rebrand/stanina",
+            cache_seconds=60,
+        )
+        blocked = service.snapshot(fresh=True)
+        self.assertEqual(blocked["intake"]["status"], "blocked-systemic")
+        self.assertTrue(blocked["intake"]["requested_active"])
+
+        github.block = True
+        service.invalidate()
+        patched = service.snapshot()
+
+        self.assertFalse(patched["intake"]["active"])
+        self.assertTrue(patched["intake"]["requested_active"])
+        self.assertEqual(patched["intake"]["status"], "blocked-systemic")
+        self.assertTrue(patched["systemic_gate"]["blocked"])
+        self.assertTrue(github.refresh_started.wait(timeout=1))
+        github.release_refresh.set()
+        service.snapshot(fresh=True)
 
     def test_inflight_running_refresh_cannot_overwrite_a_new_stop(self):
         github = BlockingGitHub()
