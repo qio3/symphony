@@ -20,6 +20,9 @@ defmodule SymphonyElixir.UsageCostTest do
 
   test "unknown models remain unavailable instead of inventing a price" do
     assert UsageCost.estimate_micros("gpt-unknown", %{total_tokens: 10}) == nil
+    assert UsageCost.estimate_micros(nil, %{total_tokens: 10}) == nil
+    assert UsageCost.estimate_micros("gpt-5.6-luna", :invalid) == nil
+    assert UsageCost.estimate_micros("gpt-5.6-luna", %{input_tokens: "invalid"}) == 0
   end
 
   test "attributes observed weekly movement proportionally and explicitly approximately" do
@@ -34,5 +37,7 @@ defmodule SymphonyElixir.UsageCostTest do
            }
 
     assert UsageCost.approximate_week_impact(entries, nil) == %{}
+    assert UsageCost.approximate_week_impact([%{issue_id: nil, estimated_usage_credits_micros: 50}], 20) == %{}
+    assert UsageCost.approximate_week_impact([], 20) == %{}
   end
 end

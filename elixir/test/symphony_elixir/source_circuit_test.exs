@@ -4,6 +4,7 @@ defmodule SymphonyElixir.SourceCircuitTest do
   alias SymphonyElixir.{Orchestrator, SourceCircuit}
 
   test "opens after three consecutive source failures and closes on success" do
+    assert SourceCircuit.snapshot(SourceCircuit.new(), 0).retry_in_ms == 0
     circuit = SourceCircuit.new(threshold: 3, cooldown_ms: 60_000)
 
     circuit = SourceCircuit.failure(circuit, :timeout, 1_000)
