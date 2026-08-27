@@ -236,9 +236,6 @@ class GitHubClient:
                 current = self._add_project_issue(issue, labels, items, items_by_number)
                 self.set_status(number, "Ready for AI")
                 _project_status(current, "Ready for AI")
-            elif current.get("status_missing"):
-                self.set_status(number, "Ready for AI")
-                _project_status(current, "Ready for AI")
 
         if newly_blocked:
             self._reassert_new_blocked(newly_blocked)
