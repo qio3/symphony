@@ -236,9 +236,11 @@ class ControlHttpServerTest(unittest.TestCase):
         self.assertIn('"Waiting delivery"', javascript)
         self.assertIn('event.target.closest("button[data-page]")', javascript)
         self.assertNotIn('event.target.closest("[data-page]")', javascript)
-        self.assertIn("item.pr?.merged === true && item.test?.synced === true", javascript)
+        self.assertIn("item.pr?.merged === true && item.test?.contains_merge === true", javascript)
         self.assertIn("function optionalNumber", javascript)
         self.assertIn("overviewHistoryState.textContent", javascript)
+        self.assertIn("function workerLimitControl", javascript)
+        self.assertIn('fetch("/ui/actions/set_workers"', javascript)
 
     def test_service_action_menu_stacks_above_service_facts(self):
         with self.request("/assets/owner-control.css", authorized=False) as response:

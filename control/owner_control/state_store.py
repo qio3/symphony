@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,9 @@ class StateStore:
 
     def __init__(self, path: Path):
         self._path = Path(path)
+        self._mutation_path = self._path.with_name(
+            self._path.stem + ".mutations.jsonl"
+        )
         self._lock = threading.Lock()
 
     def intake_active(self) -> bool:
@@ -20,6 +24,87 @@ class StateStore:
 
     def set_intake_active(self, active: bool) -> None:
         self.update({"intake_active": bool(active)})
+
+    def worker_limit(self, default: int) -> int:
+        value = self.read().get("worker_limit")
+        return value if type(value) is int and 0 < value <= default else default
+
+    def set_worker_limit(self, limit: int, *, maximum: int) -> None:
+        if type(limit) is not int or type(maximum) is not int or not 1 <= limit <= maximum:
+            raise ValueError(f"worker limit must be between 1 and {maximum}")
+        self.update({"worker_limit": limit})
+
+    def action_step_completed(
+        self, action_key: str, step: str, *, ttl_seconds: int = 600
+    ) -> bool:
+        operation = self._action_operation(action_key, ttl_seconds=ttl_seconds)
+        steps = operation.get("steps") if isinstance(operation, dict) else None
+        return isinstance(steps, list) and step in steps
+
+    def record_action_step(self, action_key: str, step: str) -> None:
+        if not action_key or not step:
+            raise ValueError("action key and step are required")
+        with self._lock:
+            state = self._read_unlocked()
+            operations = self._pruned_action_operations(state)
+            operation = dict(operations.get(action_key) or {})
+            steps = list(operation.get("steps") or [])
+            if step not in steps:
+                steps.append(step)
+            operation.update({"steps": steps, "updated_at": time.time()})
+            operations[action_key] = operation
+            state["action_operations"] = operations
+            self._write_unlocked(state)
+
+    def action_result(
+        self, action_key: str, *, ttl_seconds: int = 600
+    ) -> dict[str, Any] | None:
+        operation = self._action_operation(action_key, ttl_seconds=ttl_seconds)
+        result = operation.get("result") if isinstance(operation, dict) else None
+        return dict(result) if isinstance(result, dict) else None
+
+    def complete_action(self, action_key: str, result: dict[str, Any]) -> None:
+        if not action_key or not isinstance(result, dict):
+            raise ValueError("action key and result are required")
+        with self._lock:
+            state = self._read_unlocked()
+            operations = self._pruned_action_operations(state)
+            operation = dict(operations.get(action_key) or {})
+            operation.update({"result": dict(result), "updated_at": time.time()})
+            operations[action_key] = operation
+            state["action_operations"] = operations
+            self._write_unlocked(state)
+
+    def _action_operation(
+        self, action_key: str, *, ttl_seconds: int
+    ) -> dict[str, Any] | None:
+        if not action_key:
+            return None
+        with self._lock:
+            state = self._read_unlocked()
+            operations = self._pruned_action_operations(state, ttl_seconds=ttl_seconds)
+            if operations != state.get("action_operations"):
+                state["action_operations"] = operations
+                self._write_unlocked(state)
+            operation = operations.get(action_key)
+            return dict(operation) if isinstance(operation, dict) else None
+
+    @staticmethod
+    def _pruned_action_operations(
+        state: dict[str, Any], *, ttl_seconds: int = 600
+    ) -> dict[str, dict[str, Any]]:
+        raw = state.get("action_operations")
+        if not isinstance(raw, dict):
+            return {}
+        cutoff = time.time() - max(int(ttl_seconds), 1)
+        return {
+            key: dict(operation)
+            for key, operation in raw.items()
+            if isinstance(key, str)
+            and isinstance(operation, dict)
+            and isinstance(operation.get("updated_at"), (int, float))
+            and operation["updated_at"] >= cutoff
+        }
 
     def quarantines(self) -> dict[str, dict[str, Any]]:
         value = self.read().get("system_quarantines")
@@ -64,6 +149,38 @@ class StateStore:
 
             if history != raw_history:
                 state["status_history"] = history
+                self._write_unlocked(state)
+            return history
+
+    def record_infrastructure_sample(
+        self,
+        sample: dict[str, Any],
+        *,
+        minimum_interval_seconds: int = 60,
+        retention_seconds: int = 3 * 24 * 60 * 60,
+    ) -> list[dict[str, Any]]:
+        recorded_at = _timestamp(sample.get("recorded_at"))
+        if recorded_at is None:
+            raise ValueError("infrastructure sample requires an ISO recorded_at timestamp")
+        normalized = {
+            "recorded_at": sample["recorded_at"],
+            "hosts": json.loads(json.dumps(sample.get("hosts") or {})),
+        }
+        cutoff = recorded_at - max(int(retention_seconds), 0)
+        with self._lock:
+            state = self._read_unlocked()
+            raw_history = state.get("infrastructure_history")
+            history = []
+            for item in raw_history if isinstance(raw_history, list) else []:
+                timestamp = _timestamp(item.get("recorded_at")) if isinstance(item, dict) else None
+                if timestamp is not None and cutoff <= timestamp <= recorded_at:
+                    history.append(item)
+            history.sort(key=lambda item: _timestamp(item.get("recorded_at")) or 0)
+            previous_at = _timestamp(history[-1].get("recorded_at")) if history else None
+            if previous_at is None or recorded_at - previous_at >= max(int(minimum_interval_seconds), 1):
+                history.append(normalized)
+            if history != raw_history:
+                state["infrastructure_history"] = history
                 self._write_unlocked(state)
             return history
 
@@ -115,6 +232,35 @@ class StateStore:
             state.update(values)
             self._write_unlocked(state)
             return state
+
+    def append_mutation(self, entry: dict[str, Any]) -> None:
+        normalized = {
+            **dict(entry),
+            "timestamp": entry.get("timestamp")
+            or datetime.now(timezone.utc).isoformat(),
+        }
+        with self._lock:
+            self._mutation_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._mutation_path.open("a", encoding="utf-8") as journal:
+                journal.write(json.dumps(normalized, ensure_ascii=False) + "\n")
+                journal.flush()
+                os.fsync(journal.fileno())
+
+    def mutation_journal(self) -> list[dict[str, Any]]:
+        with self._lock:
+            try:
+                lines = self._mutation_path.read_text(encoding="utf-8").splitlines()
+            except FileNotFoundError:
+                return []
+        entries = []
+        for line in lines:
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                entries.append(value)
+        return entries
 
     def _read_unlocked(self) -> dict[str, Any]:
         if not self._path.exists():

@@ -136,6 +136,25 @@ defmodule SymphonyElixir.ModelRouterTest do
     assert List.last(second_retry.escalation_history).reason =~ "repeated_root_cause_"
   end
 
+  test "three identical non-transient failures are terminal across an escalation" do
+    luna = ModelRouter.route(%{issue("small") | labels: ["model:luna"]}, config: @config)
+    first_retry = ModelRouter.retry_route(luna, {:worker_failed, :same_root_cause})
+    second_retry = ModelRouter.retry_route(first_retry, {:worker_failed, :same_root_cause})
+    third_retry = ModelRouter.retry_route(second_retry, {:worker_failed, :same_root_cause})
+
+    assert second_retry.selected_tier == :terra
+    assert second_retry.same_failure_count == 2
+    assert third_retry.same_failure_count == 3
+    assert ModelRouter.terminal_retry?(third_retry)
+  end
+
+  test "reasoning exhaustion at Sol is terminal" do
+    sol = ModelRouter.route(%{issue("hard") | labels: ["model:sol"]}, config: @config)
+
+    assert ModelRouter.terminal_exhaustion?(sol, :max_turns_exhausted)
+    refute ModelRouter.terminal_exhaustion?(sol, :ci_retry)
+  end
+
   test "only the exact app-server budget code is reasoning exhaustion" do
     assert ModelRouter.exhaustion_reason({:turn_failed, %{"turn" => %{"error" => %{"code" => "sessionBudgetExceeded"}}}}) == :session_budget_exceeded
 

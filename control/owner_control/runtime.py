@@ -45,6 +45,7 @@ class SnapshotService:
         self._github_cached_at = 0.0
         self._github_retry_at = 0.0
         self._github_last_error: Exception | None = None
+        self._containment_cache: dict[tuple[str, str], bool] = {}
         self._control_generation = 0
         stored_sources = self._state_store.read().get("last_good_sources")
         self._last_good_sources = deepcopy(stored_sources) if isinstance(stored_sources, dict) else {}
@@ -221,13 +222,16 @@ class SnapshotService:
             )
             failures.append(_source_failure("test", error))
 
+        project = self._with_test_containment(project, test)
+
         if changed:
             self._persist_last_good_sources()
 
         snapshot = self._builder.build(
             service=service,
             intake_active=self._state_store.intake_active(),
-            worker_limit=self._worker_limit,
+            worker_limit=self._state_store.worker_limit(self._worker_limit),
+            worker_max=self._worker_limit,
             runtime=runtime,
             project=project,
             canonical=canonical,
@@ -251,10 +255,105 @@ class SnapshotService:
                         "done",
                     )
                 },
-                "workers": snapshot["workers"],
+                "workers": {
+                    key: snapshot["workers"].get(key, 0)
+                    for key in ("running", "limit")
+                },
             }
         )
+        snapshot["infrastructure"] = self._infrastructure_projection(
+            service=service,
+            refreshed_at=refreshed_at,
+        )
         return snapshot
+
+    def _infrastructure_projection(
+        self,
+        *,
+        service: dict[str, Any],
+        refreshed_at: str,
+    ) -> dict[str, Any]:
+        hosts: list[dict[str, Any]] = []
+        stale = False
+        if service.get("live") is False and service.get("status") not in {"unknown", None}:
+            hosts = [
+                {
+                    "name": "Local Symphony",
+                    "kind": "local",
+                    "status": "stopped",
+                    "cpu_percent": 0.0,
+                    "memory_percent": 0.0,
+                    "memory_usage": None,
+                    "runners_busy": 0,
+                    "runners_total": 0,
+                    "jobs": [],
+                }
+            ]
+        else:
+            metrics = getattr(self._supervisor, "metrics", None)
+            if callable(metrics):
+                try:
+                    hosts = [metrics()]
+                    self._state_store.update({"last_infrastructure_hosts": hosts})
+                except Exception:
+                    stored = self._state_store.read().get("last_infrastructure_hosts")
+                    hosts = deepcopy(stored) if isinstance(stored, list) else []
+                    stale = bool(hosts)
+        history = self._state_store.record_infrastructure_sample(
+            {
+                "recorded_at": refreshed_at,
+                "hosts": {
+                    str(host.get("name") or "Host"): {
+                        "cpu_percent": host.get("cpu_percent"),
+                        "memory_percent": host.get("memory_percent"),
+                    }
+                    for host in hosts
+                },
+            }
+        )
+        return {
+            "hosts": hosts,
+            "queued_jobs": 0,
+            "alerts": 1 if stale else 0,
+            "stale": stale,
+            "history": history,
+        }
+
+    def _with_test_containment(
+        self, project: dict[str, Any], test: dict[str, Any]
+    ) -> dict[str, Any]:
+        enriched = deepcopy(project)
+        deployed_sha = test.get("sha") if isinstance(test, dict) else None
+        for item in enriched.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("status") or "").casefold() != "ready for acceptance":
+                continue
+            pull_request = item.get("pr")
+            merge_sha = (
+                pull_request.get("merge_sha")
+                if isinstance(pull_request, dict)
+                else None
+            )
+            issue_test = {
+                **(test if isinstance(test, dict) else {}),
+                "merge_sha": merge_sha,
+                "contains_merge": None,
+            }
+            if deployed_sha and merge_sha:
+                cache_key = (str(deployed_sha), str(merge_sha))
+                try:
+                    contains = self._containment_cache.get(cache_key)
+                    if contains is None:
+                        contains = bool(
+                            self._github.commit_contains(deployed_sha, merge_sha)
+                        )
+                        self._containment_cache[cache_key] = contains
+                    issue_test["contains_merge"] = contains
+                except Exception as error:
+                    issue_test["containment_error"] = str(error)
+            item["test"] = issue_test
+        return enriched
 
     def _github_projection(
         self,

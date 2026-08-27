@@ -19,7 +19,7 @@ SNAPSHOT = {
     "stale": False,
     "service": {"live": True, "status": "running", "container": "zavod-symphony"},
     "intake": {"active": True, "status": "active"},
-    "workers": {"running": 2, "limit": 5},
+    "workers": {"running": 2, "limit": 5, "maximum": 12},
     "canonical": {"sha": "be44cf15a1234567", "url": "https://github.test/commit/be44cf15"},
     "test": {"sha": "be44cf15a1234567", "url": "https://test.example", "synced": True, "drift": False},
     "quota": {
@@ -183,6 +183,8 @@ class FixtureActions:
             raise ActionError("State changed while reviewing. Refresh and verify the latest evidence.")
         if action == "pause":
             SNAPSHOT["intake"] = {"active": False, "status": "paused"}
+        elif action == "set_workers":
+            SNAPSHOT["workers"]["limit"] = int(params["limit"])
         elif action == "resume":
             SNAPSHOT["intake"] = {"active": True, "status": "active"}
         elif action == "stop_service":

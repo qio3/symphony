@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import threading
 import time
@@ -13,6 +14,7 @@ _SERVICE_ACTION_TIMEOUT_SECONDS = 120
 _SYSTEM_QUARANTINE_LABEL = "symphony:quarantined"
 _OWNER_WAITING_LABEL = "ждёт-владельца"
 _QUARANTINE_REASON_MAX_BYTES = 512
+_ACTION_IDEMPOTENCY_SECONDS = 10
 _ANSI_ESCAPE_SEQUENCE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
@@ -29,6 +31,7 @@ class Lifecycle(Protocol):
     def add_label(self, issue: int, label: str) -> None: ...
     def remove_label(self, issue: int, label: str) -> None: ...
     def comment(self, issue: int, body: str) -> None: ...
+    def comment_once(self, issue: int, body: str, action_key: str) -> None: ...
     def close_issue(self, issue: int) -> None: ...
 
 
@@ -58,12 +61,47 @@ class ActionService:
         self._state_store = state_store
         self._after_action = after_action
         self._lock = threading.Lock()
+        self._recent_results: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._active_operation_key: str | None = None
 
     def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
         if not self._lock.acquire(blocking=False):
             raise ActionError("another action is already in progress")
         try:
-            result = self._execute_locked(action, params)
+            idempotent_action = action in {
+                "run",
+                "accept",
+                "rework",
+                "start_service",
+                "stop_service",
+                "restart",
+            }
+            action_key = (
+                json.dumps([action, params], sort_keys=True, ensure_ascii=False)
+                if idempotent_action
+                else None
+            )
+            recent = self._recent_results.get(action_key) if action_key else None
+            if recent is not None and time.monotonic() - recent[0] < _ACTION_IDEMPOTENCY_SECONDS:
+                return dict(recent[1])
+            persistent_key = action_key if action in {"run", "accept", "rework"} else None
+            persisted = self._state_store.action_result(persistent_key) if persistent_key else None
+            if persisted is not None:
+                return persisted
+            self._active_operation_key = persistent_key
+            try:
+                result = self._execute_locked(action, params)
+                if persistent_key:
+                    self._state_store.complete_action(persistent_key, result)
+            finally:
+                self._active_operation_key = None
+            if action_key:
+                self._recent_results[action_key] = (time.monotonic(), dict(result))
+            self._recent_results = {
+                key: value
+                for key, value in self._recent_results.items()
+                if time.monotonic() - value[0] < _ACTION_IDEMPOTENCY_SECONDS
+            }
             try:
                 self._after_action()
             finally:
@@ -96,8 +134,27 @@ class ActionService:
         if action == "resume":
             snapshot = self._fresh_snapshot_provider()
             self._require_fresh_sources(snapshot, "runtime", "github")
+            systemic_gate = snapshot.get("systemic_gate")
+            if isinstance(systemic_gate, dict) and systemic_gate.get("blocked"):
+                raise ActionError(
+                    str(systemic_gate.get("reason") or "systemic delivery gate is blocked")
+                )
             self._state_store.set_intake_active(True)
             return {"status": "accepted", "intake": {"active": True}}
+        if action == "set_workers":
+            snapshot = self._snapshot_provider()
+            workers = snapshot.get("workers") if isinstance(snapshot, dict) else None
+            maximum = workers.get("maximum") if isinstance(workers, dict) else None
+            limit = params.get("limit")
+            if type(maximum) is not int or maximum <= 0:
+                raise ActionError("worker maximum is unavailable")
+            if type(limit) is not int or not 1 <= limit <= maximum:
+                raise ActionError(f"worker limit must be between 1 and {maximum}")
+            self._state_store.set_worker_limit(limit, maximum=maximum)
+            return {
+                "status": "accepted",
+                "workers": {"limit": limit, "maximum": maximum},
+            }
         if action in {"start_service", "restart"}:
             snapshot = self._fresh_snapshot_provider()
             self._require_fresh_sources(snapshot, "supervisor")
@@ -221,13 +278,22 @@ class ActionService:
         ):
             raise ActionError("run requires Backlog or Ready for AI")
         if fixed_quarantine_marker:
-            self._lifecycle.remove_label(issue_number, _SYSTEM_QUARANTINE_LABEL)
+            self._action_step(
+                "remove_quarantine_label",
+                lambda: self._lifecycle.remove_label(issue_number, _SYSTEM_QUARANTINE_LABEL),
+            )
         if persisted_quarantine is not None:
             # An explicit owner Start clears the durable guard once GitHub accepted the marker removal.
-            self._state_store.clear_quarantine(issue_number)
-        self._lifecycle.set_status(issue_number, "Ready for AI")
+            self._action_step(
+                "clear_quarantine", lambda: self._state_store.clear_quarantine(issue_number)
+            )
+        self._action_step(
+            "ready_for_ai", lambda: self._lifecycle.set_status(issue_number, "Ready for AI")
+        )
         if not self._has_label(issue, "symphony"):
-            self._lifecycle.add_label(issue_number, "symphony")
+            self._action_step(
+                "add_lease", lambda: self._lifecycle.add_label(issue_number, "symphony")
+            )
         return {"status": "accepted", "action": "run", "issue": issue_number}
 
     def _lease(self, issue_number: int, issue: dict[str, Any]) -> dict[str, Any]:
@@ -263,19 +329,18 @@ class ActionService:
         status = str(issue.get("status", "")).casefold()
         if status not in {"ready for acceptance", "done"}:
             raise ActionError("accept requires Ready for Acceptance")
-        if status == "ready for acceptance" and not snapshot.get("test", {}).get("synced"):
-            raise ActionError("accept refused because TEST is not synced to canonical")
         issue_test = issue.get("test")
-        if (
-            status == "ready for acceptance"
-            and isinstance(issue_test, dict)
-            and issue_test.get("synced") is not True
-        ):
-            raise ActionError("accept refused because Issue TEST is not synced")
         if status == "ready for acceptance":
-            self._lifecycle.set_status(issue_number, "Done")
+            if not isinstance(issue_test, dict) or not issue_test.get("merge_sha"):
+                raise ActionError("accept refused because Issue merge SHA is unavailable")
+            if issue_test.get("contains_merge") is not True:
+                raise ActionError("accept refused because TEST does not contain the Issue merge")
+        if status == "ready for acceptance":
+            self._action_step(
+                "done", lambda: self._lifecycle.set_status(issue_number, "Done")
+            )
         if str(issue.get("state", "OPEN")).upper() != "CLOSED":
-            self._lifecycle.close_issue(issue_number)
+            self._action_step("close", lambda: self._lifecycle.close_issue(issue_number))
         return {"status": "accepted", "action": "accept", "issue": issue_number}
 
     def _rework(self, issue_number: int, issue: dict[str, Any], reason: Any) -> dict[str, Any]:
@@ -284,11 +349,30 @@ class ActionService:
         normalized_reason = str(reason or "").strip()
         if not normalized_reason:
             raise ActionError("rework reason is required")
-        self._lifecycle.comment(issue_number, f"Owner requested rework: {normalized_reason}")
-        self._lifecycle.set_status(issue_number, "Ready for AI")
+        self._action_step(
+            "comment",
+            lambda: self._lifecycle.comment_once(
+                issue_number,
+                f"Owner requested rework: {normalized_reason}",
+                self._active_operation_key or f"rework:{issue_number}:{normalized_reason}",
+            ),
+        )
+        self._action_step(
+            "ready_for_ai", lambda: self._lifecycle.set_status(issue_number, "Ready for AI")
+        )
         if "symphony" not in {str(label).casefold() for label in issue.get("labels", [])}:
-            self._lifecycle.add_label(issue_number, "symphony")
+            self._action_step(
+                "add_lease", lambda: self._lifecycle.add_label(issue_number, "symphony")
+            )
         return {"status": "accepted", "action": "rework", "issue": issue_number}
+
+    def _action_step(self, step: str, callback: Callable[[], None]) -> None:
+        action_key = self._active_operation_key
+        if action_key and self._state_store.action_step_completed(action_key, step):
+            return
+        callback()
+        if action_key:
+            self._state_store.record_action_step(action_key, step)
 
     def _complete_run(
         self, issue_number: int, issue: Any, snapshot: dict[str, Any]

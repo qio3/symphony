@@ -23,6 +23,7 @@ _ACTIONS = {
     "start_service",
     "stop_service",
     "restart",
+    "set_workers",
 }
 _INTERNAL_ACTIONS = {"complete_run", "quarantine_before_run"}
 _MAX_BODY_BYTES = 16_384

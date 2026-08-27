@@ -15,6 +15,8 @@ defmodule SymphonyElixir.UsageLedger do
     :total_tokens
   ]
 
+  alias SymphonyElixir.UsageCost
+
   @type token_usage :: %{required(atom()) => non_neg_integer()}
   @type entry :: %{required(:issue_id) => String.t(), required(:thread_id) => String.t()}
   @type t :: %{path: Path.t(), entries: %{optional({String.t(), String.t()}) => map()}}
@@ -86,19 +88,24 @@ defmodule SymphonyElixir.UsageLedger do
     thread_id = value(entry, :thread_id)
 
     if is_binary(issue_id) and issue_id != "" and is_binary(thread_id) and thread_id != "" do
+      model = value(entry, :model)
+      token_usage = normalize_usage(value(entry, :token_usage))
+      reported_credits = non_negative(value(entry, :estimated_usage_credits_micros))
+      estimated_credits = UsageCost.estimate_micros(model, token_usage) || 0
+
       {:ok,
        %{
          issue_id: issue_id,
          issue_identifier: value(entry, :issue_identifier),
          thread_id: thread_id,
          session_id: value(entry, :session_id),
-         model: value(entry, :model),
+         model: model,
          tier: normalize_tier(value(entry, :tier)),
          started_at: normalize_datetime(value(entry, :started_at)),
          completed_at: normalize_datetime(value(entry, :completed_at)),
-         estimated_usage_credits_micros: non_negative(value(entry, :estimated_usage_credits_micros)),
+         estimated_usage_credits_micros: if(reported_credits > 0, do: reported_credits, else: estimated_credits),
          estimated_usage_groups: value(entry, :estimated_usage_groups),
-         token_usage: normalize_usage(value(entry, :token_usage))
+         token_usage: token_usage
        }}
     else
       {:error, :invalid_usage_entry}
