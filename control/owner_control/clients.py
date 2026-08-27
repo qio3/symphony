@@ -547,6 +547,12 @@ def _normalize_pull_request(pull_request: dict[str, Any] | None) -> tuple[dict[s
 
 def _canonical_ci(value: dict[str, Any]) -> dict[str, Any]:
     runs = value.get("check_runs") or [] if isinstance(value, dict) else []
+    non_canonical_checks = {"assign", "land", "queue-dispatch", "reconcile"}
+    runs = [
+        run
+        for run in runs
+        if str(run.get("name") or "").casefold() not in non_canonical_checks
+    ]
     failed_conclusions = {"failure", "cancelled", "timed_out", "action_required", "startup_failure"}
     failed = sum(
         1

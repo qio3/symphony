@@ -120,6 +120,44 @@ class GitHubClientTest(unittest.TestCase):
         self.assertEqual(canonical["ci"]["status"], "failure")
         self.assertEqual(canonical["ci"]["failed"], 1)
 
+    def test_canonical_ignores_landing_valve_checks_when_evaluating_code_health(self):
+        transport = FakeTransport([
+            {"object": {"sha": "canonical-sha"}},
+            {
+                "total_count": 3,
+                "check_runs": [
+                    {
+                        "name": "queue-dispatch",
+                        "status": "completed",
+                        "conclusion": "failure",
+                    },
+                    {
+                        "name": "land",
+                        "status": "completed",
+                        "conclusion": "skipped",
+                    },
+                    {
+                        "name": "pytest shard a (2 workers)",
+                        "status": "in_progress",
+                        "conclusion": None,
+                    },
+                ],
+            },
+        ])
+        client = GitHubClient(
+            token="token",
+            repository="qio3/zavod",
+            project_id="project-id",
+            transport=transport,
+        )
+
+        canonical = client.canonical("main")
+
+        self.assertEqual(canonical["ci"]["status"], "pending")
+        self.assertEqual(canonical["ci"]["total"], 1)
+        self.assertEqual(canonical["ci"]["failed"], 0)
+        self.assertEqual(canonical["ci"]["pending"], 1)
+
     def test_normalizes_project_issue_pr_ci_and_owner_question(self):
         transport = FakeTransport([project_response()])
         client = GitHubClient(
