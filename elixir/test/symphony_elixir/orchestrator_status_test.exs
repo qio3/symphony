@@ -1868,9 +1868,23 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "issue usage exposes approximate weekly impact from exact account window and task credits" do
-    path = Path.join(System.tmp_dir!(), "symphony-orchestrator-week-impact-#{System.unique_integer([:positive])}.jsonl")
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-orchestrator-week-impact-#{System.unique_integer([:positive])}.jsonl"
+      )
+
     now = DateTime.utc_now()
-    usage = %{input_tokens: 100, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 10, reasoning_output_tokens: 2, total_tokens: 110}
+
+    usage = %{
+      input_tokens: 100,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: 10,
+      reasoning_output_tokens: 2,
+      total_tokens: 110
+    }
+
     {:ok, ledger} = SymphonyElixir.UsageLedger.load(path)
 
     {:ok, ledger} =

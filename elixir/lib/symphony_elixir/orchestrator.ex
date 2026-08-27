@@ -7,7 +7,18 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, ModelRouter, SourceCircuit, StatusDashboard, Tracker, UsageCost, UsageLedger, Workspace}
+  alias SymphonyElixir.{
+    AgentRunner,
+    Config,
+    ModelRouter,
+    SourceCircuit,
+    StatusDashboard,
+    Tracker,
+    UsageCost,
+    UsageLedger,
+    Workspace
+  }
+
   alias SymphonyElixir.Codex.AppServer
   alias SymphonyElixir.OwnerControl.Client, as: OwnerControlClient
   alias SymphonyElixir.Tracker.Issue
