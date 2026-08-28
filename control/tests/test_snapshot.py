@@ -92,6 +92,46 @@ class SnapshotBuilderTest(unittest.TestCase):
         self.assertEqual([item["number"] for item in waves[0]["issues"]], [2])
         self.assertNotIn(1, [item["number"] for item in waves[0]["issues"]])
 
+    def test_splits_landing_queue_into_the_valves_fixed_size_waves(self):
+        queued = [
+            {
+                "number": 700 + issue,
+                "title": f"PR for issue {issue}",
+                "url": f"https://github.test/pull/{700 + issue}",
+                "issue_numbers": [issue],
+                "intent": "ready",
+            }
+            for issue in (5, 1, 4, 2, 3)
+        ]
+        snapshot = SnapshotBuilder().build(
+            service={"live": True},
+            intake_active=True,
+            worker_limit=2,
+            runtime={"running": [], "retrying": [], "blocked": []},
+            project={
+                "items": [
+                    {"number": issue, "title": f"Issue {issue}", "status": "In Progress"}
+                    for issue in range(1, 6)
+                ]
+            },
+            landing={
+                "limit": 2,
+                "queued": queued,
+                "runs": [{"run_number": 31, "status": "in_progress"}],
+            },
+            canonical={"sha": "a" * 40, "ci": {"status": "pending"}},
+            test={"sha": "b" * 40},
+        )
+
+        waves = snapshot["release_waves"]["waves"]
+        self.assertEqual(
+            [[item["number"] for item in wave["issues"]] for wave in waves],
+            [[1, 2], [3, 4], [5]],
+        )
+        self.assertEqual([wave["ready_prs"] for wave in waves], [2, 2, 1])
+        self.assertEqual(waves[0]["number"], 31)
+        self.assertEqual([wave["status"] for wave in waves], ["landing", "queued", "queued"])
+
     def test_allocates_weekly_percent_by_recorded_task_credits_as_an_approximation(self):
         snapshot = SnapshotBuilder().build(
             service={"live": True},
