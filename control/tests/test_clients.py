@@ -629,6 +629,10 @@ class GitHubClientTest(unittest.TestCase):
 
     def test_extract_owner_question_requires_explicit_marker(self):
         self.assertEqual(extract_owner_question([{"body": "Вопрос владельцу: какой вариант?"}]), "какой вариант?")
+        self.assertEqual(
+            extract_owner_question([{"body": "Нужен выбор владельца: закрываем задачу?"}]),
+            "закрываем задачу?",
+        )
         self.assertIsNone(extract_owner_question([{"body": "ordinary progress"}]))
 
 
