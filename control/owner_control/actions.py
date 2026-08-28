@@ -16,6 +16,7 @@ _OWNER_WAITING_LABEL = "ждёт-владельца"
 _QUARANTINE_REASON_MAX_BYTES = 512
 _ACTION_IDEMPOTENCY_SECONDS = 10
 _INTERNAL_ACTION_WAIT_SECONDS = 5.0
+_OWNER_ACTION_WAIT_SECONDS = 30.0
 _ANSI_ESCAPE_SEQUENCE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
@@ -62,12 +63,19 @@ class ActionService:
         self._state_store = state_store
         self._after_action = after_action
         self._lock = threading.Lock()
+        self._active_action_kind: str | None = None
         self._recent_results: dict[str, tuple[float, dict[str, Any]]] = {}
         self._active_operation_key: str | None = None
 
     def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
-        if not self._lock.acquire(blocking=False):
+        acquired = self._lock.acquire(blocking=False)
+        if not acquired and self._active_action_kind == "internal":
+            acquired = self._lock.acquire(timeout=_OWNER_ACTION_WAIT_SECONDS)
+        elif not acquired and self._active_action_kind is None:
+            acquired = self._lock.acquire(blocking=False)
+        if not acquired:
             raise ActionError("another action is already in progress")
+        self._active_action_kind = "owner"
         try:
             idempotent_action = action in {
                 "run",
@@ -115,17 +123,20 @@ class ActionService:
                     )
             return result
         finally:
+            self._active_action_kind = None
             self._lock.release()
 
     def execute_internal(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
         """Run one fixed runtime-only action; it is not exposed to owner adapters."""
         if not self._lock.acquire(timeout=_INTERNAL_ACTION_WAIT_SECONDS):
             raise RetryableActionError("owner action is still in progress")
+        self._active_action_kind = "internal"
         try:
             result = self._execute_internal_locked(action, params)
             self._after_action()
             return result
         finally:
+            self._active_action_kind = None
             self._lock.release()
 
     def _execute_locked(self, action: str, params: dict[str, Any]) -> dict[str, Any]:

@@ -697,6 +697,44 @@ class ActionServiceTest(unittest.TestCase):
         self.assertEqual(internal_errors, [])
         self.assertEqual(internal_completed[0]["status"], "accepted")
 
+    def test_owner_action_waits_for_an_internal_completion_snapshot(self):
+        internal_started = threading.Event()
+        release_internal = threading.Event()
+
+        def slow_fresh_snapshot():
+            internal_started.set()
+            self.assertTrue(release_internal.wait(timeout=1))
+            return self.snapshot
+
+        actions = ActionService(
+            snapshot_provider=lambda: self.snapshot,
+            fresh_snapshot_provider=slow_fresh_snapshot,
+            lifecycle=self.lifecycle,
+            supervisor=self.supervisor,
+            state_store=self.store,
+        )
+        internal_thread = threading.Thread(
+            target=lambda: actions.execute_internal("complete_run", {"issue": 404})
+        )
+        internal_thread.start()
+        self.assertTrue(internal_started.wait(timeout=1))
+
+        owner_results = []
+        owner_thread = threading.Thread(
+            target=lambda: owner_results.append(actions.execute("pause", {}))
+        )
+        owner_thread.start()
+        owner_thread.join(timeout=0.05)
+        self.assertTrue(owner_thread.is_alive())
+
+        release_internal.set()
+        internal_thread.join(timeout=1)
+        owner_thread.join(timeout=1)
+
+        self.assertFalse(internal_thread.is_alive())
+        self.assertFalse(owner_thread.is_alive())
+        self.assertEqual(owner_results[0]["intake"], {"active": False})
+
     def test_rejects_unknown_action(self):
         with self.assertRaisesRegex(ActionError, "unsupported action"):
             self.actions.execute("shell", {"command": "whoami"})
