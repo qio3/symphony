@@ -15,6 +15,7 @@ _SYSTEM_QUARANTINE_LABEL = "symphony:quarantined"
 _OWNER_WAITING_LABEL = "ждёт-владельца"
 _QUARANTINE_REASON_MAX_BYTES = 512
 _ACTION_IDEMPOTENCY_SECONDS = 10
+_INTERNAL_ACTION_WAIT_SECONDS = 5.0
 _ANSI_ESCAPE_SEQUENCE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
@@ -118,8 +119,8 @@ class ActionService:
 
     def execute_internal(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
         """Run one fixed runtime-only action; it is not exposed to owner adapters."""
-        if not self._lock.acquire(blocking=False):
-            raise ActionError("another action is already in progress")
+        if not self._lock.acquire(timeout=_INTERNAL_ACTION_WAIT_SECONDS):
+            raise RetryableActionError("owner action is still in progress")
         try:
             result = self._execute_internal_locked(action, params)
             self._after_action()

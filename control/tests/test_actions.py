@@ -662,6 +662,41 @@ class ActionServiceTest(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(completed[0]["status"], "accepted")
 
+    def test_internal_completion_waits_for_a_short_owner_action(self):
+        owner_completed = []
+        owner_thread = threading.Thread(
+            target=lambda: owner_completed.append(
+                self.actions.execute("stop_service", {"confirm_running_workers": 0})
+            )
+        )
+        owner_thread.start()
+        self.assertTrue(self.supervisor.stop_started.wait(timeout=1))
+
+        internal_completed = []
+        internal_errors = []
+
+        def complete_run():
+            try:
+                internal_completed.append(
+                    self.actions.execute_internal("complete_run", {"issue": 404})
+                )
+            except Exception as error:
+                internal_errors.append(error)
+
+        internal_thread = threading.Thread(target=complete_run)
+        internal_thread.start()
+        internal_thread.join(timeout=0.05)
+        self.assertTrue(internal_thread.is_alive())
+
+        self.supervisor.release_stop.set()
+        owner_thread.join(timeout=1)
+        internal_thread.join(timeout=1)
+
+        self.assertFalse(owner_thread.is_alive())
+        self.assertFalse(internal_thread.is_alive())
+        self.assertEqual(internal_errors, [])
+        self.assertEqual(internal_completed[0]["status"], "accepted")
+
     def test_rejects_unknown_action(self):
         with self.assertRaisesRegex(ActionError, "unsupported action"):
             self.actions.execute("shell", {"command": "whoami"})

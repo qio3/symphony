@@ -2,7 +2,7 @@
 
 (() => {
   try {
-    const theme = localStorage.getItem("owner-control-theme");
+    const theme = localStorage.getItem("owner-control-v5-theme");
     if (theme === "light" || theme === "dark") {
       document.documentElement.dataset.theme = theme;
     }

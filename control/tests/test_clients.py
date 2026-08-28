@@ -158,6 +158,48 @@ class GitHubClientTest(unittest.TestCase):
         self.assertEqual(canonical["ci"]["failed"], 0)
         self.assertEqual(canonical["ci"]["pending"], 1)
 
+    def test_canonical_ignores_delivery_checks_when_evaluating_code_health(self):
+        transport = FakeTransport([
+            {"object": {"sha": "canonical-sha"}},
+            {
+                "total_count": 4,
+                "check_runs": [
+                    {
+                        "name": "exact-SHA TEST deploy и smoke",
+                        "status": "completed",
+                        "conclusion": "failure",
+                    },
+                    {
+                        "name": "Запустить exact-SHA TEST после dispatched canonical CI",
+                        "status": "completed",
+                        "conclusion": "cancelled",
+                    },
+                    {
+                        "name": "pytest shard a (2 workers)",
+                        "status": "completed",
+                        "conclusion": "success",
+                    },
+                    {
+                        "name": "vitest + tsc + build",
+                        "status": "completed",
+                        "conclusion": "success",
+                    },
+                ],
+            },
+        ])
+        client = GitHubClient(
+            token="token",
+            repository="qio3/zavod",
+            project_id="project-id",
+            transport=transport,
+        )
+
+        canonical = client.canonical("main")
+
+        self.assertEqual(canonical["ci"]["status"], "success")
+        self.assertEqual(canonical["ci"]["total"], 2)
+        self.assertEqual(canonical["ci"]["failed"], 0)
+
     def test_normalizes_project_issue_pr_ci_and_owner_question(self):
         transport = FakeTransport([project_response()])
         client = GitHubClient(

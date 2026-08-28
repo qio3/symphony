@@ -170,6 +170,18 @@ SNAPSHOT = {
             {"number": 405, "title": "Clarify deploy evidence", "issue_url": "https://github.test/issues/405", "status": "Ready for AI", "stage": "Ready for AI"},
             {"number": 406, "title": "Improve empty states", "issue_url": "https://github.test/issues/406", "status": "Backlog", "stage": "Backlog"},
         ],
+        "done": [
+            {
+                "number": 398,
+                "title": "Persist task usage across service restarts",
+                "issue_url": "https://github.test/issues/398",
+                "status": "Done",
+                "stage": "Done",
+                "completed_at": "2026-08-24T08:48:00Z",
+                "model": {"selected_tier": "terra", "actual_model": "gpt-5.6-terra"},
+                "usage": {"total_tokens": 18400, "estimated_credits_micros": 940000, "week_impact_percent": 0.8},
+            }
+        ],
     },
 }
 
