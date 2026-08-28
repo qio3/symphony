@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
@@ -41,6 +41,7 @@ class SnapshotBuilder:
             for issue_key, value in (runtime.get("issue_usage") or {}).items()
             if isinstance(value, dict)
         }
+        self._classify_done_usage(issue_usage, items, quota.get("weekly"))
         self._allocate_week_impacts(issue_usage, quota.get("weekly"))
 
         for issue_key, entry in {**running, **retrying, **blocked}.items():
@@ -149,6 +150,12 @@ class SnapshotBuilder:
             elif status.casefold() == "in progress":
                 project_only_in_progress.append(deepcopy(item))
             elif status.casefold() == "done" or str(item.get("state", "")).casefold() == "closed":
+                item.setdefault("completed_at", item.get("closed_at"))
+                if not isinstance(item.get("usage"), dict):
+                    item["usage"] = {
+                        "week_impact_percent": None,
+                        "week_impact_availability": "not-recorded",
+                    }
                 lanes["done"].append(item)
                 counts["done"] += 1
             else:
@@ -377,6 +384,68 @@ class SnapshotBuilder:
         }
 
     @staticmethod
+    def _classify_done_usage(
+        issue_usage: dict[str, dict[str, Any]],
+        project_items: dict[str, dict[str, Any]],
+        weekly: dict[str, Any] | None,
+    ) -> None:
+        window_start = SnapshotBuilder._weekly_window_start(weekly)
+        for issue_key, item in project_items.items():
+            status = str(item.get("status") or "").casefold()
+            state = str(item.get("state") or "").casefold()
+            if status != "done" and state != "closed":
+                continue
+            usage = issue_usage.get(issue_key)
+            if not isinstance(usage, dict):
+                continue
+
+            completed_at = SnapshotBuilder._parse_datetime(usage.get("completed_at"))
+            closed_at = SnapshotBuilder._parse_datetime(item.get("closed_at"))
+            if completed_at is None and closed_at is not None:
+                usage["completed_at"] = item.get("closed_at")
+                usage["completion_basis"] = "github-closed-at"
+                completed_at = closed_at
+
+            if completed_at is None:
+                usage["week_impact_percent"] = None
+                usage.pop("week_impact_basis", None)
+                usage["week_impact_availability"] = "completion-time-unavailable"
+            elif window_start is not None and completed_at < window_start:
+                usage["week_impact_percent"] = None
+                usage.pop("week_impact_basis", None)
+                usage["week_impact_availability"] = "outside-current-week"
+
+    @staticmethod
+    def _weekly_window_start(weekly: dict[str, Any] | None) -> datetime | None:
+        if not isinstance(weekly, dict):
+            return None
+        duration = weekly.get("window_duration_mins")
+        reset = SnapshotBuilder._parse_datetime(weekly.get("resets_at"))
+        if not isinstance(duration, int) or duration <= 0 or reset is None:
+            return None
+        return reset - timedelta(minutes=duration)
+
+    @staticmethod
+    def _parse_datetime(value: Any) -> datetime | None:
+        if isinstance(value, bool) or value is None:
+            return None
+        if isinstance(value, (int, float)):
+            try:
+                return datetime.fromtimestamp(value, timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                return None
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                parsed = datetime.fromtimestamp(float(value), timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                return None
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+    @staticmethod
     def _allocate_week_impacts(
         issue_usage: dict[str, dict[str, Any]], weekly: dict[str, Any] | None
     ) -> None:
@@ -388,6 +457,8 @@ class SnapshotBuilder:
             for key, value in issue_usage.items()
             if isinstance(value.get("estimated_credits_micros"), int)
             and value.get("estimated_credits_micros") > 0
+            and value.get("week_impact_availability")
+            not in {"completion-time-unavailable", "outside-current-week"}
         }
         total = sum(credits.values())
         if total <= 0:

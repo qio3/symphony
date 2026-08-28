@@ -58,6 +58,7 @@ def project_response():
                                 "title": "Ready on TEST",
                                 "url": "https://github.test/issues/401",
                                 "state": "OPEN",
+                                "closedAt": None,
                                 "labels": {"nodes": [{"name": "backend"}]},
                                 "comments": {
                                     "nodes": [
@@ -322,6 +323,7 @@ class GitHubClientTest(unittest.TestCase):
                 "status": "Ready for Acceptance",
                 "status_missing": False,
                 "state": "OPEN",
+                "closed_at": None,
                 "labels": ["backend"],
                 "owner_question": "choose A or B?",
                 "project_item_id": "project-item-401",

@@ -145,6 +145,7 @@ class SnapshotBuilderTest(unittest.TestCase):
                     "weekly": {
                         "usedPercent": 20,
                         "windowDurationMins": 10080,
+                        "resetsAt": 1788458378,
                     }
                 },
                 "issue_usage": {
@@ -166,7 +167,12 @@ class SnapshotBuilderTest(unittest.TestCase):
             },
             project={
                 "items": [
-                    {"number": 1, "status": "Done", "state": "CLOSED"},
+                    {
+                        "number": 1,
+                        "status": "Done",
+                        "state": "CLOSED",
+                        "closed_at": "2026-08-28T10:00:00Z",
+                    },
                     {"number": 2, "status": "Ready for Acceptance", "state": "OPEN"},
                 ]
             },
@@ -178,6 +184,98 @@ class SnapshotBuilderTest(unittest.TestCase):
         self.assertEqual(snapshot["issue_usage"]["2"]["week_impact_percent"], 5.0)
         self.assertEqual(snapshot["issue_usage"]["1"]["week_impact_basis"], "recorded-credit-share")
         self.assertEqual(snapshot["owner_view"]["done"][0]["usage"]["week_impact_percent"], 15.0)
+
+    def test_excludes_done_usage_closed_before_the_current_week(self):
+        snapshot = SnapshotBuilder().build(
+            service={"live": True},
+            intake_active=True,
+            worker_limit=2,
+            runtime={
+                "running": [],
+                "retrying": [],
+                "blocked": [],
+                "rate_limits": {
+                    "weekly": {
+                        "usedPercent": 20,
+                        "windowDurationMins": 10080,
+                        "resetsAt": 1788458378,
+                    }
+                },
+                "issue_usage": {
+                    "28": {
+                        "aggregate": {
+                            "token_usage": {"total_tokens": 90_182_954},
+                            "estimated_usage_credits_micros": 40_026_354,
+                            "week_impact_percent": 0.42,
+                        },
+                        "current": {
+                            "started_at": "2026-08-24T18:50:24Z",
+                            "completed_at": None,
+                        },
+                    },
+                    "538": {
+                        "aggregate": {
+                            "token_usage": {"total_tokens": 53_605_769},
+                            "estimated_usage_credits_micros": 25_699_104,
+                            "week_impact_percent": None,
+                        },
+                        "current": {
+                            "started_at": "2026-08-28T15:07:31Z",
+                            "completed_at": "2026-08-28T15:17:43Z",
+                        },
+                    },
+                },
+            },
+            project={
+                "items": [
+                    {
+                        "number": 28,
+                        "status": "Done",
+                        "state": "CLOSED",
+                        "closed_at": "2026-08-25T07:41:12Z",
+                    },
+                    {
+                        "number": 538,
+                        "status": "Done",
+                        "state": "CLOSED",
+                        "closed_at": "2026-08-28T18:11:38Z",
+                    },
+                ]
+            },
+            canonical={"sha": "a" * 40},
+            test={"sha": "a" * 40},
+        )
+
+        old_usage = snapshot["issue_usage"]["28"]
+        current_usage = snapshot["issue_usage"]["538"]
+        self.assertIsNone(old_usage["week_impact_percent"])
+        self.assertEqual(old_usage["week_impact_availability"], "outside-current-week")
+        self.assertEqual(current_usage["week_impact_percent"], 20.0)
+        self.assertEqual(current_usage["week_impact_basis"], "recorded-credit-share")
+
+    def test_done_without_a_ledger_has_an_explicit_owner_facing_reason(self):
+        snapshot = SnapshotBuilder().build(
+            service={"live": True},
+            intake_active=True,
+            worker_limit=2,
+            runtime={"running": [], "retrying": [], "blocked": [], "issue_usage": {}},
+            project={
+                "items": [
+                    {
+                        "number": 1,
+                        "status": "Done",
+                        "state": "CLOSED",
+                        "closed_at": "2026-08-18T19:08:38Z",
+                    }
+                ]
+            },
+            canonical={"sha": "a" * 40},
+            test={"sha": "a" * 40},
+        )
+
+        usage = snapshot["owner_view"]["done"][0]["usage"]
+        self.assertEqual(usage["week_impact_availability"], "not-recorded")
+        self.assertIsNone(usage["week_impact_percent"])
 
     def test_red_canonical_ci_blocks_effective_intake_without_losing_owner_intent(self):
         snapshot = SnapshotBuilder().build(
