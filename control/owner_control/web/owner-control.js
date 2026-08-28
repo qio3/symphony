@@ -609,14 +609,25 @@ function waveCard(wave) {
   if (issues.length) {
     const issueList = el("div", "wave-issues");
     for (const item of issues.slice(0, 6)) {
-      const link = externalLink(item.url, `#${item.number}`, "wave-issue-link");
-      link.title = item.title || `Issue #${item.number}`;
-      issueList.append(link);
+      issueList.append(waveIssueLink(item));
     }
     if (issues.length > 6) issueList.append(el("span", "muted", `+${issues.length - 6}`));
     card.append(issueList);
   }
   return card;
+}
+
+function waveIssueLink(item) {
+  const issueNumber = optionalNumber(item?.number);
+  const prNumber = optionalNumber(item?.pr?.number);
+  const label = issueNumber !== null
+    ? `#${issueNumber}`
+    : prNumber !== null
+      ? `PR #${prNumber}`
+      : "Unlinked PR";
+  const link = externalLink(item?.url || item?.pr?.url, label, "wave-issue-link");
+  link.title = item?.title || label;
+  return link;
 }
 
 function waveStageRail(wave) {
