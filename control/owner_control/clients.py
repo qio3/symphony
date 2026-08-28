@@ -518,7 +518,10 @@ def _is_graphql_rate_limit(error: Any) -> bool:
 
 
 def extract_owner_question(comments: list[dict[str, Any]]) -> str | None:
-    marker = re.compile(r"(?:owner\s+question|вопрос\s+владельцу)\s*:\s*(.+)", re.IGNORECASE | re.DOTALL)
+    marker = re.compile(
+        r"(?:owner\s+question|вопрос\s+владельцу|нужен\s+выбор\s+владельца|нужно\s+решение\s+владельца)\s*:\s*(.+)",
+        re.IGNORECASE | re.DOTALL,
+    )
     for comment in reversed(comments or []):
         match = marker.search(str(comment.get("body") or ""))
         if match:
