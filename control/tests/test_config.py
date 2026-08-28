@@ -18,13 +18,26 @@ class ConfigTest(unittest.TestCase):
             Config.from_env(env)
 
     def test_secrets_and_state_are_external_configuration(self):
-        config = Config.from_env(valid_env())
+        env = valid_env()
+        env["SYMPHONY_INFRASTRUCTURE_CONFIG_PATH"] = str(
+            Path(tempfile.gettempdir()).resolve() / "symphony-infrastructure.json"
+        )
+        config = Config.from_env(env)
 
         self.assertEqual(config.owner_chat_id, 10)
         self.assertEqual(config.owner_user_id, 20)
         self.assertTrue(config.state_path.is_absolute())
         self.assertEqual(config.bind_host, "127.0.0.1")
         self.assertEqual(config.bind_port, 4080)
+        self.assertTrue(config.infrastructure_config_path.is_absolute())
+
+    def test_infrastructure_configuration_is_optional_and_must_be_absolute(self):
+        self.assertIsNone(Config.from_env(valid_env()).infrastructure_config_path)
+
+        env = valid_env()
+        env["SYMPHONY_INFRASTRUCTURE_CONFIG_PATH"] = "relative.json"
+        with self.assertRaisesRegex(ConfigError, "must be an absolute path"):
+            Config.from_env(env)
 
 
 def valid_env():

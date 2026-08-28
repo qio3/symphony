@@ -18,6 +18,7 @@ class SnapshotService:
         github: Any,
         test_environment: Any,
         supervisor: Any,
+        infrastructure: Any | None = None,
         state_store: StateStore,
         worker_limit: int,
         canonical_ref: str,
@@ -29,6 +30,7 @@ class SnapshotService:
         self._github = github
         self._test_environment = test_environment
         self._supervisor = supervisor
+        self._infrastructure = infrastructure
         self._state_store = state_store
         self._worker_limit = worker_limit
         self._canonical_ref = canonical_ref
@@ -299,6 +301,36 @@ class SnapshotService:
                     stored = self._state_store.read().get("last_infrastructure_hosts")
                     hosts = deepcopy(stored) if isinstance(stored, list) else []
                     stale = bool(hosts)
+        queued_jobs = 0
+        alerts = 1 if stale else 0
+        if self._infrastructure is not None:
+            try:
+                remote = self._infrastructure.snapshot()
+                remote_hosts = remote.get("hosts") if isinstance(remote, dict) else None
+                if not isinstance(remote_hosts, list):
+                    raise RuntimeError("infrastructure hosts must be a list")
+                hosts.extend(remote_hosts)
+                queued_jobs = int(remote.get("queued_jobs") or 0)
+                alerts += int(remote.get("alerts") or 0)
+                self._state_store.update(
+                    {
+                        "last_remote_infrastructure": {
+                            "hosts": remote_hosts,
+                            "queued_jobs": queued_jobs,
+                            "alerts": int(remote.get("alerts") or 0),
+                        }
+                    }
+                )
+            except Exception:
+                stored_remote = self._state_store.read().get("last_remote_infrastructure")
+                if isinstance(stored_remote, dict):
+                    stored_hosts = stored_remote.get("hosts")
+                    if isinstance(stored_hosts, list):
+                        hosts.extend(deepcopy(stored_hosts))
+                    queued_jobs = int(stored_remote.get("queued_jobs") or 0)
+                    alerts += int(stored_remote.get("alerts") or 0)
+                alerts += 1
+                stale = True
         history = self._state_store.record_infrastructure_sample(
             {
                 "recorded_at": refreshed_at,
@@ -313,8 +345,8 @@ class SnapshotService:
         )
         return {
             "hosts": hosts,
-            "queued_jobs": 0,
-            "alerts": 1 if stale else 0,
+            "queued_jobs": queued_jobs,
+            "alerts": alerts,
             "stale": stale,
             "history": history,
         }

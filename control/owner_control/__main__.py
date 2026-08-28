@@ -9,6 +9,7 @@ from .bot import NotificationPublisher, TelegramApi, TelegramBot
 from .clients import GitHubClient, SymphonyClient, TestEnvironmentClient
 from .config import Config
 from .http_server import create_server
+from .infrastructure import InfrastructureClient
 from .runtime import SnapshotService
 from .state_store import StateStore
 from .supervisor import DockerComposeSupervisor
@@ -33,11 +34,20 @@ def main() -> None:
         project_id=config.github_project_id,
         mutation_logger=store.append_mutation,
     )
+    infrastructure = (
+        InfrastructureClient(
+            config_path=config.infrastructure_config_path,
+            repository=config.github_repository,
+        )
+        if config.infrastructure_config_path is not None
+        else None
+    )
     snapshots = SnapshotService(
         symphony=SymphonyClient(config.symphony_url),
         github=github,
         test_environment=TestEnvironmentClient(config.test_health_url, config.test_url),
         supervisor=supervisor,
+        infrastructure=infrastructure,
         state_store=store,
         worker_limit=config.worker_limit,
         canonical_ref=config.canonical_ref,
