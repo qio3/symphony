@@ -1,10 +1,12 @@
 import importlib
 import json
+import os
 import subprocess
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 def wait_snapshot(client, predicate=lambda _snapshot: True):
@@ -238,7 +240,11 @@ class InfrastructureClientTest(unittest.TestCase):
                 cache_seconds=60,
             )
 
-            snapshot = wait_snapshot(client)
+            with patch.dict(
+                os.environ,
+                {"GITHUB_TOKEN": "must-not-leak", "GH_TOKEN": "must-not-leak"},
+            ):
+                snapshot = wait_snapshot(client)
 
         self.assertEqual(snapshot["queued_jobs"], 2)
         self.assertEqual(snapshot["alerts"], 0)
