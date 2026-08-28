@@ -33,6 +33,7 @@ class Config:
     owner_user_id: int
     codex_home: Path
     codex_executable: str
+    infrastructure_config_path: Path | None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> "Config":
@@ -73,6 +74,9 @@ class Config:
             owner_user_id=_integer(env, "TELEGRAM_OWNER_USER_ID"),
             codex_home=codex_home,
             codex_executable=env.get("CODEX_EXECUTABLE", "codex"),
+            infrastructure_config_path=_optional_absolute_path(
+                env, "SYMPHONY_INFRASTRUCTURE_CONFIG_PATH"
+            ),
         )
 
 
@@ -85,6 +89,16 @@ def _required(env: Mapping[str, str], name: str) -> str:
 
 def _absolute_path(env: Mapping[str, str], name: str) -> Path:
     path = Path(_required(env, name))
+    if not path.is_absolute():
+        raise ConfigError(f"{name} must be an absolute path")
+    return path
+
+
+def _optional_absolute_path(env: Mapping[str, str], name: str) -> Path | None:
+    value = str(env.get(name) or "").strip()
+    if not value:
+        return None
+    path = Path(value)
     if not path.is_absolute():
         raise ConfigError(f"{name} must be an absolute path")
     return path

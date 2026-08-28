@@ -542,9 +542,13 @@ function renderInfrastructure(snapshot) {
 
 function serverCard(host) {
   const card = el("article", "owner-card server-card");
+  const status = String(host.status || "online").toLowerCase();
+  const header = el("div", "owner-card-header");
   const heading = el("h3");
   heading.append(icon(host.kind === "local" ? "monitor" : "server"), document.createTextNode(host.name || "Host"));
-  card.append(heading, metricBar("CPU", host.cpu_percent), metricBar("RAM", host.memory_percent), el("p", "", `Runners ${number(host.runners_busy)}/${number(host.runners_total)}`));
+  header.append(heading, badge(titleCase(status), status === "online" ? "success" : status === "stale" ? "warning" : "danger"));
+  card.append(header, metricBar("CPU", host.cpu_percent), metricBar("RAM", host.memory_percent), el("p", "", `Runners ${number(host.runners_busy)}/${number(host.runners_total)}`));
+  if (status === "stale") card.append(el("p", "muted", "Last confirmed metrics · refresh in progress"));
   if (Array.isArray(host.jobs) && host.jobs.length) card.append(el("p", "", host.jobs.map((job) => job.issue ? `#${job.issue} ${job.name || "CI"}` : job.name || "CI job").join(" · ")));
   return card;
 }

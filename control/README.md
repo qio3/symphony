@@ -61,8 +61,13 @@ Optional environment variables:
 ```text
 SYMPHONY_CONTROL_BIND=127.0.0.1
 SYMPHONY_CONTROL_PORT=4080
+SYMPHONY_INFRASTRUCTURE_CONFIG_PATH=C:\absolute\path\to\infrastructure.json
 CODEX_EXECUTABLE=codex
 ```
+
+The optional infrastructure file stays outside the repository and contains only fixed SSH host,
+key-path, and runner-name mappings. Owner Control uses it for read-only CPU/RAM samples and joins
+those hosts to GitHub Actions runner/job state; it does not expose an SSH or shell action.
 
 Non-loopback binding is rejected unless `SYMPHONY_CONTROL_ALLOW_NON_LOOPBACK=1` is explicit. If the
 Symphony container later needs a Docker-host binding, restrict that interface with the host firewall

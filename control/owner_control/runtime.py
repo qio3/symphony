@@ -18,6 +18,7 @@ class SnapshotService:
         github: Any,
         test_environment: Any,
         supervisor: Any,
+        infrastructure: Any | None = None,
         state_store: StateStore,
         worker_limit: int,
         canonical_ref: str,
@@ -29,6 +30,7 @@ class SnapshotService:
         self._github = github
         self._test_environment = test_environment
         self._supervisor = supervisor
+        self._infrastructure = infrastructure
         self._state_store = state_store
         self._worker_limit = worker_limit
         self._canonical_ref = canonical_ref
@@ -240,7 +242,6 @@ class SnapshotService:
         )
         snapshot["failures"] = failures
         snapshot["sources"] = sources
-        snapshot["stale"] = any(source.get("status") != "fresh" for source in sources.values())
         snapshot["refreshed_at"] = refreshed_at
         snapshot["history"] = self._state_store.record_status_sample(
             {
@@ -261,9 +262,22 @@ class SnapshotService:
                 },
             }
         )
-        snapshot["infrastructure"] = self._infrastructure_projection(
+        infrastructure = self._infrastructure_projection(
             service=service,
             refreshed_at=refreshed_at,
+        )
+        snapshot["infrastructure"] = infrastructure
+        sources["infrastructure"] = (
+            {
+                "status": "stale",
+                "confirmed_at": None,
+                "error": "using last confirmed infrastructure metrics",
+            }
+            if infrastructure.get("stale")
+            else _fresh_source(refreshed_at)
+        )
+        snapshot["stale"] = any(
+            source.get("status") != "fresh" for source in sources.values()
         )
         return snapshot
 
@@ -299,6 +313,47 @@ class SnapshotService:
                     stored = self._state_store.read().get("last_infrastructure_hosts")
                     hosts = deepcopy(stored) if isinstance(stored, list) else []
                     stale = bool(hosts)
+        queued_jobs = 0
+        alerts = 1 if stale else 0
+        if self._infrastructure is not None:
+            try:
+                remote = self._infrastructure.snapshot()
+                remote_hosts = remote.get("hosts") if isinstance(remote, dict) else None
+                if not isinstance(remote_hosts, list):
+                    raise RuntimeError("infrastructure hosts must be a list")
+                stored_remote = self._state_store.read().get("last_remote_infrastructure")
+                stored_hosts = (
+                    stored_remote.get("hosts")
+                    if isinstance(stored_remote, dict)
+                    else None
+                )
+                remote_hosts, merged_stale = _merge_last_good_host_metrics(
+                    remote_hosts,
+                    stored_hosts if isinstance(stored_hosts, list) else [],
+                )
+                hosts.extend(remote_hosts)
+                queued_jobs = int(remote.get("queued_jobs") or 0)
+                alerts += int(remote.get("alerts") or 0)
+                stale = stale or bool(remote.get("stale")) or merged_stale
+                self._state_store.update(
+                    {
+                        "last_remote_infrastructure": {
+                            "hosts": remote_hosts,
+                            "queued_jobs": queued_jobs,
+                            "alerts": int(remote.get("alerts") or 0),
+                        }
+                    }
+                )
+            except Exception:
+                stored_remote = self._state_store.read().get("last_remote_infrastructure")
+                if isinstance(stored_remote, dict):
+                    stored_hosts = stored_remote.get("hosts")
+                    if isinstance(stored_hosts, list):
+                        hosts.extend(deepcopy(stored_hosts))
+                    queued_jobs = int(stored_remote.get("queued_jobs") or 0)
+                    alerts += int(stored_remote.get("alerts") or 0)
+                alerts += 1
+                stale = True
         history = self._state_store.record_infrastructure_sample(
             {
                 "recorded_at": refreshed_at,
@@ -313,12 +368,11 @@ class SnapshotService:
         )
         return {
             "hosts": hosts,
-            "queued_jobs": 0,
-            "alerts": 1 if stale else 0,
+            "queued_jobs": queued_jobs,
+            "alerts": alerts,
             "stale": stale,
             "history": history,
         }
-
     def _with_test_containment(
         self, project: dict[str, Any], test: dict[str, Any]
     ) -> dict[str, Any]:
@@ -569,6 +623,35 @@ class SnapshotService:
                 "error": str(error),
             }
         return deepcopy(empty_value), _unavailable_source(error)
+
+
+def _merge_last_good_host_metrics(
+    current: list[dict[str, Any]],
+    stored: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], bool]:
+    previous = {
+        str(host.get("name")): host
+        for host in stored
+        if isinstance(host, dict) and host.get("name")
+    }
+    merged: list[dict[str, Any]] = []
+    stale = False
+    for host in current:
+        if not isinstance(host, dict):
+            continue
+        value = deepcopy(host)
+        old = previous.get(str(value.get("name")))
+        unavailable = value.get("cpu_percent") is None or str(
+            value.get("status") or ""
+        ).casefold() in {"stale", "degraded", "unavailable"}
+        if unavailable:
+            stale = True
+            if isinstance(old, dict) and old.get("cpu_percent") is not None:
+                for key in ("cpu_percent", "memory_percent", "memory_usage"):
+                    value[key] = old.get(key)
+                value["status"] = "stale"
+        merged.append(value)
+    return merged, stale
 
 
 def _empty_runtime() -> dict[str, Any]:

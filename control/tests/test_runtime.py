@@ -225,6 +225,21 @@ class FakeSupervisor:
         return {"live": True, "container": "zavod-symphony"}
 
 
+class MetricsSupervisor(FakeSupervisor):
+    def metrics(self):
+        return {
+            "name": "Local Symphony",
+            "kind": "local",
+            "status": "online",
+            "cpu_percent": 12.0,
+            "memory_percent": 24.0,
+            "memory_usage": "1.0 / 4.0 GiB",
+            "runners_busy": 0,
+            "runners_total": 0,
+            "jobs": [],
+        }
+
+
 class FailingSupervisor:
     def status(self):
         raise OSError("docker socket unavailable")
@@ -278,6 +293,144 @@ class SnapshotServiceTest(unittest.TestCase):
         self.assertEqual(snapshot["test"]["sha"], "abc12345")
         self.assertEqual(snapshot["workers"], {"running": 0, "limit": 2, "maximum": 2})
         self.assertEqual(github.reconcile_requests, [True])
+
+    def test_combines_local_and_remote_infrastructure_without_losing_history(self):
+        class RemoteInfrastructure:
+            def snapshot(self):
+                return {
+                    "hosts": [
+                        {
+                            "name": "CI_1",
+                            "kind": "ci",
+                            "status": "online",
+                            "cpu_percent": 58.0,
+                            "memory_percent": 63.0,
+                            "memory_usage": "10.1 / 16.0 GiB",
+                            "runners_busy": 2,
+                            "runners_total": 3,
+                            "jobs": [{"issue": 401, "name": "Backend", "url": "https://ci/1"}],
+                        }
+                    ],
+                    "queued_jobs": 4,
+                    "alerts": 0,
+                }
+
+        service = SnapshotService(
+            symphony=FakeSymphony(),
+            github=FakeGitHub(),
+            test_environment=FakeTest(),
+            supervisor=MetricsSupervisor(),
+            infrastructure=RemoteInfrastructure(),
+            state_store=self.store,
+            worker_limit=2,
+            canonical_ref="rebrand/stanina",
+        )
+
+        snapshot = service.snapshot()
+
+        self.assertEqual([host["name"] for host in snapshot["infrastructure"]["hosts"]], ["Local Symphony", "CI_1"])
+        self.assertEqual(snapshot["infrastructure"]["queued_jobs"], 4)
+        self.assertEqual(snapshot["infrastructure"]["alerts"], 0)
+        self.assertEqual(snapshot["infrastructure"]["history"][-1]["hosts"]["CI_1"]["cpu_percent"], 58.0)
+
+    def test_remote_infrastructure_failure_keeps_last_good_hosts_as_stale(self):
+        class FlakyInfrastructure:
+            fail = False
+
+            def snapshot(self):
+                if self.fail:
+                    raise OSError("ci metrics unavailable")
+                return {
+                    "hosts": [{"name": "CI_1", "kind": "ci", "status": "online", "cpu_percent": 22.0, "memory_percent": 41.0, "jobs": []}],
+                    "queued_jobs": 1,
+                    "alerts": 0,
+                }
+
+        infrastructure = FlakyInfrastructure()
+        service = SnapshotService(
+            symphony=FakeSymphony(),
+            github=FakeGitHub(),
+            test_environment=FakeTest(),
+            supervisor=MetricsSupervisor(),
+            infrastructure=infrastructure,
+            state_store=self.store,
+            worker_limit=2,
+            canonical_ref="rebrand/stanina",
+        )
+        service.snapshot(fresh=True)
+        infrastructure.fail = True
+
+        stale = service.snapshot(fresh=True)
+
+        self.assertTrue(stale["infrastructure"]["stale"])
+        self.assertEqual(stale["infrastructure"]["hosts"][1]["name"], "CI_1")
+        self.assertGreaterEqual(stale["infrastructure"]["alerts"], 1)
+        self.assertTrue(stale["stale"])
+        self.assertEqual(stale["sources"]["infrastructure"]["status"], "stale")
+
+    def test_restart_merges_persisted_host_metrics_into_a_partial_stale_sample(self):
+        self.store.update(
+            {
+                "last_remote_infrastructure": {
+                    "hosts": [
+                        {
+                            "name": "CI_1",
+                            "kind": "ci",
+                            "status": "online",
+                            "cpu_percent": 55.0,
+                            "memory_percent": 66.0,
+                            "memory_usage": "10.6 / 16.0 GiB",
+                            "runners_busy": 2,
+                            "runners_total": 3,
+                            "jobs": [],
+                        }
+                    ],
+                    "queued_jobs": 2,
+                    "alerts": 0,
+                }
+            }
+        )
+
+        class RestartedInfrastructure:
+            def snapshot(self):
+                return {
+                    "hosts": [
+                        {
+                            "name": "CI_1",
+                            "kind": "ci",
+                            "status": "unavailable",
+                            "cpu_percent": None,
+                            "memory_percent": None,
+                            "memory_usage": None,
+                            "runners_busy": 3,
+                            "runners_total": 3,
+                            "jobs": [{"issue": 402, "name": "Frontend"}],
+                        }
+                    ],
+                    "queued_jobs": 1,
+                    "alerts": 1,
+                    "stale": True,
+                }
+
+        service = SnapshotService(
+            symphony=FakeSymphony(),
+            github=FakeGitHub(),
+            test_environment=FakeTest(),
+            supervisor=FakeSupervisor(),
+            infrastructure=RestartedInfrastructure(),
+            state_store=self.store,
+            worker_limit=2,
+            canonical_ref="rebrand/stanina",
+        )
+
+        snapshot = service.snapshot(fresh=True)
+        host = snapshot["infrastructure"]["hosts"][0]
+
+        self.assertEqual(host["status"], "stale")
+        self.assertEqual(host["cpu_percent"], 55.0)
+        self.assertEqual(host["memory_percent"], 66.0)
+        self.assertEqual(host["runners_busy"], 3)
+        self.assertTrue(snapshot["stale"])
 
     def test_ready_issue_is_accepted_by_merge_containment_not_moving_canonical_head(self):
         github = ContainmentGitHub()

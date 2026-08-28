@@ -262,6 +262,13 @@ class ControlHttpServerTest(unittest.TestCase):
         self.assertRegex(css, r"\.source-row\s*\{[^}]*flex-wrap:\s*wrap")
         self.assertRegex(css, r"\.source-error\s*\{[^}]*overflow-wrap:\s*anywhere")
 
+    def test_infrastructure_cards_visibly_mark_last_confirmed_metrics(self):
+        with self.request("/assets/owner-control.js", authorized=False) as response:
+            javascript = response.read().decode("utf-8")
+
+        self.assertIn('host.status || "online"', javascript)
+        self.assertIn("Last confirmed metrics", javascript)
+
     def test_workbench_has_a_bounded_expandable_table(self):
         with self.request("/assets/owner-control.js", authorized=False) as response:
             javascript = response.read().decode("utf-8")
