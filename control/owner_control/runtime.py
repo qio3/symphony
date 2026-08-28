@@ -540,6 +540,8 @@ class SnapshotService:
                 error,
             )
             stale["landing"] = landing
+            if self._remember_github_landing(landing):
+                self._persist_last_good_sources()
             return stale, source, error
 
         changed = self._remember_source("github", value, refreshed_at)
@@ -625,6 +627,17 @@ class SnapshotService:
         with self._source_lock:
             stored = self._last_good_sources.get(name)
             return deepcopy(stored) if isinstance(stored, dict) else None
+
+    def _remember_github_landing(self, landing: dict[str, Any]) -> bool:
+        """Refresh the REST valve projection without claiming Project GraphQL is fresh."""
+        with self._source_lock:
+            stored = self._last_good_sources.get("github")
+            value = stored.get("value") if isinstance(stored, dict) else None
+            if not isinstance(value, dict):
+                return False
+            changed = value.get("landing") != landing
+            value["landing"] = deepcopy(landing)
+            return changed
 
     def _remember_source(self, name: str, value: Any, confirmed_at: str) -> bool:
         stored = {"confirmed_at": confirmed_at, "value": deepcopy(value)}

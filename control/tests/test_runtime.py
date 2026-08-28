@@ -1181,11 +1181,16 @@ class SnapshotServiceTest(unittest.TestCase):
             github.landing_ready = True
 
             stale = service.snapshot(fresh=True)
+            cached_github, _source, _error = service._github_projection(
+                force=False,
+                refreshed_at="2026-08-28T10:00:00Z",
+            )
 
         self.assertEqual(stale["sources"]["github"]["status"], "stale")
         self.assertTrue(stale["release_waves"]["available"])
         self.assertEqual(stale["release_waves"]["limit"], 2)
         self.assertEqual(stale["release_waves"]["waves"][0]["issues"][0]["number"], 401)
+        self.assertEqual(cached_github["landing"]["queued"][0]["number"], 700)
 
     def test_runtime_restart_does_not_turn_a_running_container_or_counters_into_down_zeroes(self):
         symphony = ToggleSymphony()
