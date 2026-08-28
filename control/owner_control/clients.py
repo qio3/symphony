@@ -550,6 +550,22 @@ def _normalize_pull_request(pull_request: dict[str, Any] | None) -> tuple[dict[s
 
 def _canonical_ci(value: dict[str, Any]) -> dict[str, Any]:
     runs = value.get("check_runs") or [] if isinstance(value, dict) else []
+    latest_by_name: dict[str, dict[str, Any]] = {}
+    unnamed: list[dict[str, Any]] = []
+    for run in runs:
+        name = str(run.get("name") or "").strip().casefold()
+        if not name:
+            unnamed.append(run)
+            continue
+        previous = latest_by_name.get(name)
+        run_id = run.get("id")
+        previous_id = previous.get("id") if previous else None
+        if previous is None or (
+            isinstance(run_id, int)
+            and (not isinstance(previous_id, int) or run_id > previous_id)
+        ):
+            latest_by_name[name] = run
+    runs = unnamed + list(latest_by_name.values())
     non_canonical_checks = {
         "assign",
         "exact-sha test deploy и smoke",
