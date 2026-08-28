@@ -1745,7 +1745,7 @@ defmodule SymphonyElixir.Orchestrator do
      schedule_issue_retry(
        state,
        issue.id,
-       attempt + 1,
+       attempt,
        Map.merge(metadata, %{
          identifier: issue.identifier,
          issue_url: issue.url,

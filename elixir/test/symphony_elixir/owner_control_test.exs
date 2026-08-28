@@ -847,7 +847,7 @@ defmodule SymphonyElixir.OwnerControlTest do
     refute Map.has_key?(updated_state.retry_attempts, issue.id)
   end
 
-  test "failed normal-completion postcondition retains the claim for a bounded retry" do
+  test "failed normal-completion postcondition retries without inflating the work attempt" do
     issue = dispatch_issue(471)
 
     Application.put_env(:symphony_elixir, :owner_control_client_module, CompletionControl)
@@ -872,7 +872,7 @@ defmodule SymphonyElixir.OwnerControlTest do
 
     assert_receive {:owner_control_complete_run, 471}, 1_000
     assert MapSet.member?(updated_state.claimed, issue.id)
-    assert %{attempt: 2, delay_type: :completion_postcondition} = updated_state.retry_attempts[issue.id]
+    assert %{attempt: 1, delay_type: :completion_postcondition} = updated_state.retry_attempts[issue.id]
   end
 
   test "unleased issues fail closed outside a fresh active Ready for AI snapshot" do

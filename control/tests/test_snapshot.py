@@ -4,6 +4,25 @@ from owner_control.snapshot import SnapshotBuilder
 
 
 class SnapshotBuilderTest(unittest.TestCase):
+    def test_projects_done_items_for_the_done_work_tab(self):
+        snapshot = SnapshotBuilder().build(
+            service={"live": True},
+            intake_active=False,
+            worker_limit=4,
+            runtime={"running": [], "retrying": [], "blocked": []},
+            project={
+                "items": [
+                    {"number": 1, "title": "Project done", "status": "Done", "state": "OPEN"},
+                    {"number": 2, "title": "Issue closed", "status": "Backlog", "state": "CLOSED"},
+                ]
+            },
+            canonical={"sha": "canonical"},
+            test={"sha": "test"},
+        )
+
+        self.assertEqual([1, 2], [item["number"] for item in snapshot["owner_view"]["done"]])
+        self.assertEqual(2, snapshot["counts"]["done"])
+
     def test_projects_deterministic_release_waves_from_delivery_evidence(self):
         snapshot = SnapshotBuilder().build(
             service={"live": True},

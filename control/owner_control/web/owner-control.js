@@ -1,6 +1,6 @@
 "use strict";
 
-const THEME_STORAGE_KEY = "owner-control-theme";
+const THEME_STORAGE_KEY = "owner-control-v5-theme";
 const TABLE_PAGE_SIZE = 12;
 const csrf = document.querySelector('meta[name="owner-control-csrf"]').content;
 const runtimeUrl = document.querySelector('meta[name="runtime-diagnostics-url"]').content;
@@ -17,6 +17,13 @@ const dialogConfirm = document.getElementById("dialog-confirm");
 const toastRegion = document.getElementById("toast-region");
 const themeToggle = document.getElementById("theme-toggle");
 const ownerTabs = document.getElementById("owner-tabs");
+const workSummary = document.getElementById("work-summary");
+const workSearch = document.getElementById("work-search");
+const workModelFilter = document.getElementById("work-model-filter");
+const workStageFilter = document.getElementById("work-stage-filter");
+const workSort = document.getElementById("work-sort");
+const headerServiceStatus = document.getElementById("header-service-status");
+const headerServiceActions = document.getElementById("header-service-actions");
 const issueTablePanel = document.getElementById("issue-table-panel");
 const issueTableBody = document.getElementById("issue-table-body");
 const issueDrawer = document.getElementById("issue-drawer");
@@ -40,11 +47,15 @@ let pendingAction = null;
 let renderedSignature = null;
 let activeTab = "running";
 let activeTabInitialized = false;
-let activePage = "overview";
+let activePage = "work";
 let historyRange = "60m";
 let selectedIssue = null;
 let drawerDismissed = false;
 let visibleRows = TABLE_PAGE_SIZE;
+let workQuery = "";
+let workModel = "";
+let workStage = "";
+let workOrder = "oldest";
 let workChart = null;
 let workChartSignature = null;
 let overviewChart = null;
@@ -102,18 +113,18 @@ function initialTheme() {
     const stored = localStorage.getItem(THEME_STORAGE_KEY);
     if (stored === "light" || stored === "dark") return stored;
   } catch (_error) { /* unavailable storage */ }
-  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  return "light";
 }
 
 const PAGE_META = {
-  overview: ["Owner dashboard", "Overview"],
-  work: ["Symphony execution", "Work"],
-  review: ["Owner acceptance", "Review"],
-  waves: ["Delivery queue", "Release waves"],
-  infrastructure: ["Capacity and CI", "Infrastructure"],
-  owner: ["Concrete decisions only", "Needs owner"],
-  quarantine: ["Retry circuit breaker", "Quarantine"],
-  runtime: ["Internal evidence", "Runtime diagnostics"],
+  overview: ["Owner dashboard", "Overview", "Today at a glance: capacity, flow, delivery and only the signals that need attention."],
+  work: ["Symphony execution", "Work", "One Issue, one row, one current stage. Project-only status never masquerades as a live worker."],
+  review: ["Owner acceptance", "Review", "Only tasks with verified PR, CI and TEST evidence."],
+  waves: ["Delivery queue", "Release waves", "Current delivery wave and every queued wave behind it."],
+  infrastructure: ["Capacity and CI", "Infrastructure", "Capacity by physical server, current jobs and the local cost of Symphony sessions."],
+  owner: ["Concrete decisions only", "Needs owner", "Only concrete product or access decisions. Technical failures stay in Quarantine."],
+  quarantine: ["Retry circuit breaker", "Quarantine", "Tasks stopped after deterministic or repeated failures. No automatic retry storms."],
+  runtime: ["Internal evidence", "Runtime diagnostics", "Internal details stay here and never compete with the owner workflow."],
 };
 
 function buildMobileNav() {
@@ -129,15 +140,17 @@ function buildMobileNav() {
 function activatePage(page, focus = false) {
   if (!PAGE_META[page]) return;
   activePage = page;
+  app.dataset.activePage = page;
   for (const panel of document.querySelectorAll(".page-panel")) panel.hidden = panel.dataset.page !== page;
   for (const button of document.querySelectorAll("[data-page]")) {
     const active = button.dataset.page === page;
     button.classList.toggle("is-active", active);
     button.setAttribute("aria-current", active ? "page" : "false");
   }
-  const [kicker, title] = PAGE_META[page];
+  const [kicker, title, subtitle] = PAGE_META[page];
   document.getElementById("page-kicker").textContent = kicker;
   document.getElementById("page-title").textContent = title;
+  document.getElementById("page-subtitle").textContent = subtitle;
   historyRangeControl.hidden = !["overview", "infrastructure"].includes(page);
   if (page === "runtime") {
     const diagnostics = document.getElementById("runtime-diagnostics");
@@ -264,9 +277,16 @@ function renderService(snapshot) {
   );
 
   clear(targets.serviceActions);
+  clear(headerServiceActions);
   const supervisorFresh = snapshot.sources?.supervisor?.status === "fresh";
   const runtimeFresh = snapshot.sources?.runtime?.status === "fresh";
   const githubFresh = snapshot.sources?.github?.status === "fresh";
+  clear(headerServiceStatus);
+  headerServiceStatus.className = `live-label ${isRunning ? "is-running" : serviceKnown ? "is-stopped" : "is-unknown"}`;
+  headerServiceStatus.append(
+    el("span", "service-dot"),
+    document.createTextNode(isRunning ? `${number(snapshot.workers?.running)} active ${number(snapshot.workers?.running) === 1 ? "worker" : "workers"}` : serviceKnown ? "Symphony stopped" : "Checking Symphony"),
+  );
   if (isTransitioning) {
     const pending = el("button", "button secondary", transitionLabel);
     pending.type = "button";
@@ -282,6 +302,15 @@ function renderService(snapshot) {
       !intakeActive && (!runtimeFresh || !githubFresh || systemicBlocked),
     );
     if (intake.disabled) intake.title = systemicBlocked ? (snapshot.systemic_gate.reason || "Systemic gate is blocked.") : "Resume requires fresh runtime and GitHub state.";
+    const headerIntake = actionButton(
+      intakeActive ? "Pause intake" : "Resume intake",
+      intakeActive ? "pause" : "resume",
+      "secondary",
+      intake.disabled,
+    );
+    headerIntake.prepend(icon(intakeActive ? "pause-circle" : "play-circle"));
+    headerIntake.title = intake.title;
+    headerServiceActions.append(headerIntake);
     const advanced = el("details", "service-advanced");
     advanced.append(el("summary", "button secondary", "Service actions"));
     const advancedActions = el("div", "service-advanced-actions");
@@ -296,6 +325,10 @@ function renderService(snapshot) {
     const start = actionButton("Start Symphony", "start_service", "primary", !supervisorFresh);
     if (!supervisorFresh) start.title = "Waiting for fresh supervisor state.";
     targets.serviceActions.append(start);
+    const headerStart = actionButton("Start Symphony", "start_service", "primary", !supervisorFresh);
+    headerStart.prepend(icon("play-circle"));
+    headerStart.title = start.title;
+    headerServiceActions.append(headerStart);
   }
 }
 
@@ -618,12 +651,21 @@ function escalationChain(model) {
 
 function taskProgress(item) {
   const phase = String(item.display_phase || item.stage || item.status || "").toLowerCase();
-  if (item.pr?.merged === true && item.test?.contains_merge === true) return 100;
+  const active = item.lane === "running" || String(item.status || "").toLowerCase() === "running";
+  if (!active && hasVerifiedIssueDelivery(item)) return 100;
   if (phase.includes("test")) return 92;
   if (phase.includes("merge") || item.ci?.status === "success") return 84;
   if (phase.includes("ci") || item.pr) return 72;
   if (phase.includes("review")) return 62;
   return item.started_at ? 45 : 15;
+}
+
+function hasVerifiedIssueDelivery(item) {
+  const mergeSha = item.pr?.merge_sha;
+  return item.pr?.merged === true
+    && Boolean(mergeSha)
+    && item.test?.merge_sha === mergeSha
+    && item.test?.contains_merge === true;
 }
 
 function historySamples(snapshot) {
@@ -690,6 +732,14 @@ function renderWorkbench(snapshot) {
     activeTabInitialized = true;
   }
   clear(ownerTabs);
+  clear(workSummary);
+  workSummary.append(
+    counterCard("activity", "Active", number(snapshot.counts?.running)),
+    counterCard("clock-3", "Waiting delivery", number(snapshot.counts?.queued), "warning"),
+    counterCard("sparkles", "Ready AI", number(snapshot.counts?.ready_for_ai), "good"),
+    counterCard("archive", "Backlog", number(snapshot.counts?.backlog)),
+    counterCard("gauge", "Weekly used", snapshot.quota?.weekly ? formatPercent(snapshot.quota.weekly.used_percent) : "—"),
+  );
   for (const [key, label, count, tone] of tabs) {
     const tab = el("button", "owner-tab " + tone, label);
     const selected = activeTab === key;
@@ -704,7 +754,7 @@ function renderWorkbench(snapshot) {
     ownerTabs.append(tab);
   }
   issueTablePanel.setAttribute("aria-labelledby", `owner-tab-${activeTab}`);
-  const items = workItems(snapshot, activeTab);
+  const items = filteredWorkItems(snapshot, activeTab);
   if (!items.some((item) => String(item.number) === String(selectedIssue))) {
     selectedIssue = null;
     if (!drawerDismissed && !narrowWorkbench()) selectedIssue = items[0]?.number ?? null;
@@ -727,10 +777,11 @@ function renderWorkbench(snapshot) {
 
 function workbenchTabs(snapshot) {
   return [
-    ["running", "Active workers", number(snapshot.counts?.running), "neutral"],
+    ["running", "Active", number(snapshot.counts?.running), "neutral"],
     ["followups", "Waiting delivery", number(snapshot.counts?.queued), "warning"],
     ["ready_ai", "Ready AI", number(snapshot.counts?.ready_for_ai), "good"],
     ["backlog", "Backlog", number(snapshot.counts?.backlog), "neutral"],
+    ["done", "Done", number(snapshot.counts?.done), "neutral"],
   ];
 }
 
@@ -743,15 +794,45 @@ function workItems(snapshot, tab) {
     followups: (owner.follow_ups || []).map((item) => ({ ...item, lane: "followups" })),
     ready_ai: (owner.backlog || []).filter((item) => item.status === "Ready for AI").map((item) => ({ ...item, lane: "ready_ai" })),
     backlog: (owner.backlog || []).filter((item) => item.status !== "Ready for AI").map((item) => ({ ...item, lane: "backlog" })),
+    done: (owner.done || []).map((item) => ({ ...item, lane: "done" })),
   };
   const unique = new Map();
   for (const item of lanes[tab] || []) if (!unique.has(String(item.number))) unique.set(String(item.number), item);
   return [...unique.values()];
 }
 
+function workStageKey(item) {
+  const phase = String(item.display_phase || item.stage || item.status || "").toLowerCase();
+  if (phase.includes("ci") || phase.includes("check")) return "ci";
+  if (phase.includes("merge") || phase.includes("land") || phase.includes("wave")) return "landing";
+  if (phase.includes("test")) return "test";
+  if (phase.includes("agent") || phase.includes("code") || phase.includes("implement")) return "coding";
+  return "";
+}
+
+function filteredWorkItems(snapshot, tab) {
+  const items = workItems(snapshot, tab).filter((item) => {
+    const haystack = `#${item.number || ""} ${item.title || ""}`.toLowerCase();
+    const model = modelName(item.model).toLowerCase();
+    const stage = workStageKey(item);
+    return (!workQuery || haystack.includes(workQuery))
+      && (!workModel || model === workModel)
+      && (!workStage || stage === workStage);
+  });
+  const timestamp = (item) => {
+    const value = Date.parse(item.started_at || item.completed_at || "");
+    return Number.isFinite(value) ? value : Number.MAX_SAFE_INTEGER;
+  };
+  return items.sort((left, right) => {
+    if (workOrder === "newest") return timestamp(right) - timestamp(left);
+    if (workOrder === "impact") return number(right.usage?.week_impact_percent) - number(left.usage?.week_impact_percent);
+    return timestamp(left) - timestamp(right);
+  });
+}
+
 function findWorkbenchItem(snapshot, issue) {
   if (issue === null || issue === undefined) return null;
-  for (const tab of ["running", "followups", "ready_ai", "backlog"]) {
+  for (const tab of ["running", "followups", "ready_ai", "backlog", "done"]) {
     const found = workItems(snapshot, tab).find((item) => String(item.number) === String(issue));
     if (found) return found;
   }
@@ -767,11 +848,18 @@ function issueTableRow(item) {
   issue.type = "button";
   issue.dataset.issueSelect = String(item.number || "");
   issue.setAttribute("aria-expanded", String(String(selectedIssue) === String(item.number)));
-  issue.append(el("strong", "", "#" + item.number), el("span", "issue-title", item.title || "Untitled Issue"));
+  const issueMeta = el("span", "issue-row-meta");
+  issueMeta.append(escalationChain(item.model));
+  const taskTokens = item.usage?.total_tokens;
+  const selectedModel = modelName(item.model);
+  const metaText = [item.started_at ? elapsed(item.started_at) : null, item.turn_count !== undefined ? `${number(item.turn_count)} turns` : null, item.pr?.number ? `PR #${item.pr.number}` : null].filter(Boolean).join(" · ");
+  issueMeta.title = [selectedModel, Number.isFinite(Number(taskTokens)) ? `${formatNumber(taskTokens)} task tokens` : null].filter(Boolean).join(" · ");
+  if (metaText) issueMeta.append(el("span", "", metaText));
+  issue.append(el("strong", "", "#" + item.number), el("span", "issue-title", item.title || "Untitled Issue"), issueMeta);
   const issueCell = document.createElement("td");
   issueCell.dataset.label = "Issue";
   issueCell.append(issue);
-  const stateCell = el("td", "state-cell " + item.lane, laneLabel(item));
+  const stateCell = el("td", `state-cell ${item.lane} ${stageTone(item)}`, laneLabel(item));
   stateCell.dataset.label = "State";
 
   const progressCell = document.createElement("td");
@@ -779,53 +867,74 @@ function issueTableRow(item) {
   const progress = item.lane === "blocked" || item.lane === "quarantine"
     ? item.question || item.reason || "Owner input required"
     : item.display_phase || item.stage || item.status || "—";
-  progressCell.append(el("strong", "row-phase", progress));
-  if (item.lane === "running") {
-    const facts = el("div", "cell-meta");
-    facts.append(el("span", "", modelName(item.model)));
-    const elapsedValue = el("span", "", elapsed(item.started_at));
-    if (item.started_at) elapsedValue.dataset.startedAt = item.started_at;
-    facts.append(elapsedValue, el("span", "", `${number(item.turn_count)} turns`));
-    const taskBar = el("div", "task-progress");
-    taskBar.title = "Workflow-stage progress, not a time estimate.";
-    taskBar.setAttribute("aria-label", `Workflow stage progress ${taskProgress(item)}%`);
-    const taskFill = el("span");
-    taskFill.style.width = `${taskProgress(item)}%`;
-    taskBar.append(taskFill);
-    progressCell.append(facts, taskBar, escalationChain(item.model));
-  }
+  const taskValue = taskProgress(item);
+  const progressHeading = el("div", "progress-label");
+  progressHeading.append(el("strong", "row-phase", progress), el("strong", "progress-percent", `${taskValue}%`));
+  const taskBar = el("div", "task-progress");
+  taskBar.title = "Workflow-stage progress, not a time estimate.";
+  taskBar.setAttribute("aria-label", `Workflow stage progress ${taskValue}%`);
+  const taskFill = el("span");
+  taskFill.style.width = `${taskValue}%`;
+  taskBar.append(taskFill);
+  progressCell.append(progressHeading, taskBar);
 
-  const deliveryCell = document.createElement("td");
-  deliveryCell.dataset.label = "Delivery / usage";
-  const evidence = el("div", "evidence-summary");
-  if (item.pr || item.ci || item.test) {
-    evidence.append(
-      evidenceLink(item.pr?.url, item.pr?.number ? `PR #${item.pr.number}` : "PR —", item.pr?.url ? "neutral" : "muted"),
-      evidenceLink(item.ci?.url, `CI ${titleCase(item.ci?.status || "unknown")}`, statusTone(item.ci?.status)),
-      evidenceLink(item.test?.url, `TEST ${titleCase(item.test?.status || (item.test?.synced ? "synced" : "unknown"))}`, item.test?.synced ? "good" : statusTone(item.test?.status)),
-    );
-  } else {
-    evidence.append(el("span", "muted", "—"));
-  }
-  deliveryCell.append(evidence);
-  if (item.lane === "running" || item.lane === "followups") {
-    const tokens = item.usage?.total_tokens;
-    const usage = el("div", "usage-summary", Number.isFinite(Number(tokens)) ? `${formatNumber(tokens)} tokens · ${estimatedCredits(item.usage?.estimated_credits_micros)}` : "Task usage unavailable");
-    deliveryCell.append(usage);
-  }
-  row.append(issueCell, stateCell, progressCell, deliveryCell);
+  const weekCell = document.createElement("td");
+  weekCell.dataset.label = "Week impact";
+  weekCell.append(workWeekImpact(item.usage));
+  row.append(issueCell, progressCell, weekCell, stateCell);
+  if (String(selectedIssue) === String(item.number)) row.append(taskInlineDetails(item));
   return row;
 }
 
-function selectWorkbenchIssue(issue) {
-  selectedIssue = issue;
-  drawerDismissed = false;
-  for (const row of document.querySelectorAll("[data-issue-row]")) {
-    const selected = String(row.dataset.issueRow) === String(issue);
-    row.setAttribute("aria-selected", String(selected));
-    row.querySelector("[data-issue-select]")?.setAttribute("aria-expanded", String(selected));
+function workWeekImpact(usage) {
+  const impact = optionalNumber(usage?.week_impact_percent);
+  const wrap = el("div", "week-impact");
+  wrap.title = impact === null
+    ? "Weekly impact is unavailable until task usage can be matched to observed account-wide weekly quota movement."
+    : "Approximate attribution based on this task's usage ledger and observed account-wide weekly quota movement.";
+  wrap.append(
+    el("strong", "", impact === null ? "—" : `≈ ${formatPercent(impact)}`),
+    el("small", "", impact === null ? "impact unavailable" : "week impact"),
+  );
+  return wrap;
+}
+
+function taskInlineDetails(item) {
+  const details = el("td", "task-inline-details");
+  details.colSpan = 4;
+  const body = el("div", "task-inline-body");
+  const stages = el("div", "task-stage-line");
+  const labels = ["Plan", "Code", "PR / CI", "Wave", "TEST"];
+  const progress = taskProgress(item);
+  const current = Math.min(labels.length - 1, Math.max(0, Math.floor(progress / 20)));
+  labels.forEach((label, index) => {
+    const stage = el("span", "task-stage", label);
+    if (index < current) stage.classList.add("is-done");
+    if (index === current) stage.classList.add("is-current");
+    stages.append(stage);
+  });
+  const summary = el("div", "task-detail-text");
+  const currentState = item.deferred_reason || item.error || item.display_phase || item.stage || item.status || "In progress";
+  summary.append(el("strong", "", "Current: "), document.createTextNode(currentState));
+  if (item.model?.escalation_history?.length) summary.append(escalationChain(item.model));
+  body.append(stages, summary, evidenceRow(item), usageRow(item.usage));
+
+  const actions = el("div", "row-actions task-inline-actions");
+  const githubFresh = currentSnapshot?.sources?.github?.status === "fresh";
+  if (item.issue_url) actions.append(externalLink(item.issue_url, "Open Issue", "button secondary"));
+  if (item.pr?.url) actions.append(externalLink(item.pr.url, "Open PR", "button secondary"));
+  if (["quarantine", "ready_ai", "backlog"].includes(item.lane)) {
+    actions.append(actionButton("Start", "run", "primary", !githubFresh, item.number));
   }
-  renderDrawer(findWorkbenchItem(currentSnapshot || {}, issue));
+  details.append(body, actions);
+  return details;
+}
+
+function selectWorkbenchIssue(issue) {
+  const closing = String(selectedIssue) === String(issue);
+  selectedIssue = closing ? null : issue;
+  drawerDismissed = closing;
+  renderWorkbench(currentSnapshot || {});
 }
 
 function renderDrawer(item) {
@@ -893,9 +1002,22 @@ function narrowWorkbench() {
 }
 
 function laneLabel(item) {
+  const phase = String(item.display_phase || item.stage || item.status || "").toLowerCase();
+  if (item.lane === "running" && (phase.includes("ci") || phase.includes("check"))) return "CI running";
+  if (item.lane === "running" && (phase.includes("wave") || phase.includes("land") || phase.includes("merge"))) return "Waiting wave";
+  if (item.lane === "running" && phase.includes("test")) return "Waiting TEST";
+  if (item.lane === "running" && (phase.includes("code") || phase.includes("implement"))) return "Implementing";
   if (item.lane === "running") return "Running";
   if (item.lane === "followups") return "Waiting delivery";
+  if (item.lane === "done") return "Done";
   return item.status === "Ready for AI" ? "Ready for AI" : "Backlog";
+}
+
+function stageTone(item) {
+  const label = laneLabel(item).toLowerCase();
+  if (label.includes("ci") || label.includes("waiting")) return "is-warning";
+  if (label === "done" || label === "ready for ai") return "is-good";
+  return "is-active";
 }
 
 function renderSources(snapshot) {
@@ -1167,11 +1289,11 @@ function showInlineActionError(issue, message) {
 function renderActionErrors() {
   document.querySelectorAll(".action-error[data-persistent]").forEach((node) => node.remove());
   for (const [key, message] of actionErrors) {
+    const inlineCard = document.querySelector(`[data-issue-card="${CSS.escape(key)}"]`);
     const target = key === "service"
       ? document.querySelector(".service-panel")
-      : String(issueDrawer.dataset.issueCard || "") === key
-        ? issueDrawerContent
-        : null;
+      : inlineCard?.querySelector(".task-inline-body") || inlineCard
+        || (String(issueDrawer.dataset.issueCard || "") === key ? issueDrawerContent : null);
     if (!target) continue;
     const error = el("div", "action-error", message);
     error.dataset.persistent = "true";
@@ -1412,12 +1534,24 @@ document.getElementById("dialog-cancel").addEventListener("click", () => actionD
 actionDialog.addEventListener("close", () => { if (!actionInFlight) pendingAction = null; });
 refreshButton.addEventListener("click", () => refreshSnapshot());
 historyRangeSelect.addEventListener("change", () => setHistoryRange(historyRangeSelect.value));
+for (const control of [workSearch, workModelFilter, workStageFilter, workSort]) {
+  control.addEventListener("input", () => {
+    workQuery = workSearch.value.trim().toLowerCase();
+    workModel = workModelFilter.value;
+    workStage = workStageFilter.value;
+    workOrder = workSort.value;
+    visibleRows = TABLE_PAGE_SIZE;
+    selectedIssue = null;
+    drawerDismissed = true;
+    renderWorkbench(currentSnapshot || {});
+  });
+}
 document.getElementById("runtime-diagnostics").addEventListener("toggle", (event) => { if (event.target.open) loadLogs(); });
 window.setInterval(() => document.querySelectorAll("[data-started-at]").forEach((node) => { node.textContent = elapsed(node.dataset.startedAt); }), 1000);
 window.setInterval(() => refreshSnapshot({ announce: false }), 5000);
 buildMobileNav();
 setHistoryRange("60m");
 setTheme(initialTheme(), false);
-activatePage("overview");
+activatePage("work");
 refreshIcons();
 refreshSnapshot();

@@ -52,6 +52,7 @@ class SnapshotBuilder:
             "system_quarantines": [],
             "ready_for_acceptance": [],
             "follow_ups": [],
+            "done": [],
         }
         project_only_in_progress: list[dict[str, Any]] = []
         counts = {
@@ -145,6 +146,7 @@ class SnapshotBuilder:
             elif status.casefold() == "in progress":
                 project_only_in_progress.append(deepcopy(item))
             elif status.casefold() == "done" or str(item.get("state", "")).casefold() == "closed":
+                lanes["done"].append(item)
                 counts["done"] += 1
             else:
                 lanes["backlog"].append(item)

@@ -17,8 +17,8 @@
       <aside class="primary-sidebar" aria-label="Owner Control navigation">
         <div class="brand-lockup sidebar-brand"><p class="eyebrow">Symphony</p><strong>Owner Control</strong></div>
         <nav class="primary-nav" id="primary-nav">
-          <button class="primary-nav-item is-active" type="button" data-page="overview"><i data-lucide="layout-dashboard"></i><span>Overview</span></button>
-          <button class="primary-nav-item" type="button" data-page="work"><i data-lucide="activity"></i><span>Work</span><b id="nav-running">0</b></button>
+          <button class="primary-nav-item" type="button" data-page="overview"><i data-lucide="layout-dashboard"></i><span>Overview</span></button>
+          <button class="primary-nav-item is-active" type="button" data-page="work"><i data-lucide="activity"></i><span>Work</span><b id="nav-running">0</b></button>
           <button class="primary-nav-item" type="button" data-page="review"><i data-lucide="circle-check-big"></i><span>Review</span><b id="nav-review">0</b></button>
           <button class="primary-nav-item" type="button" data-page="waves"><i data-lucide="git-merge"></i><span>Release waves</span></button>
           <button class="primary-nav-item" type="button" data-page="infrastructure"><i data-lucide="server"></i><span>Infrastructure</span></button>
@@ -30,8 +30,10 @@
 
       <div class="app-content">
         <header class="topbar" id="owner-header">
-          <div><p class="eyebrow" id="page-kicker">Owner dashboard</p><h1 id="page-title">Overview</h1></div>
+          <div><h1 id="page-title">Work</h1><p id="page-subtitle">One Issue, one row, one current stage. Project-only status never masquerades as a live worker.</p><p class="eyebrow visually-hidden" id="page-kicker">Symphony execution</p></div>
           <div class="topbar-actions">
+            <span class="live-label" id="header-service-status"><span class="service-dot"></span>Checking Symphony</span>
+            <div class="header-service-actions" id="header-service-actions"></div>
             <div class="history-range" id="history-range" hidden>
               <span class="history-range-label"><i data-lucide="clock-3"></i>Range</span>
               <div class="history-range-buttons">
@@ -52,7 +54,7 @@
         <div class="notice is-hidden" id="global-notice" role="status"></div>
 
         <main>
-          <section class="page-panel" id="page-overview" data-page="overview">
+          <section class="page-panel" id="page-overview" data-page="overview" hidden>
             <section class="summary-grid" aria-label="Service and delivery summary">
               <section class="panel service-panel summary-card" aria-labelledby="service-title"><div class="section-heading compact"><div><p class="section-kicker">Service</p><h2 id="service-title">Checking Symphony…</h2></div><div class="service-actions" id="service-actions"></div></div><div class="service-facts" id="service-facts"></div></section>
               <section class="panel summary-card" aria-labelledby="delivery-title"><div class="section-heading compact"><h2 id="delivery-title"><i data-lucide="git-commit-horizontal"></i>Delivery</h2></div><div id="delivery-content" class="loading-block" role="status" aria-label="Loading delivery state"></div></section>
@@ -67,8 +69,8 @@
             <section class="infrastructure-summary" id="overview-infrastructure"></section>
           </section>
 
-          <section class="page-panel" id="page-work" data-page="work" hidden>
-            <section class="panel workbench" aria-labelledby="workbench-title"><div class="workbench-heading"><div><p class="section-kicker">Symphony work</p><h2 id="workbench-title">Current work</h2></div><div class="work-chart-wrap"><canvas id="owner-work-chart" aria-label="Owner work by status" role="img"></canvas></div></div><nav class="owner-tabs" id="owner-tabs" role="tablist" aria-label="Work queues"></nav><div class="workbench-body"><section class="issue-table-panel" id="issue-table-panel" role="tabpanel" aria-live="polite"><div class="issue-table-wrap"><table class="issue-table" id="issue-table"><thead><tr><th scope="col">Issue</th><th scope="col">State</th><th scope="col">Progress</th><th scope="col">Delivery / usage</th></tr></thead><tbody id="issue-table-body"><tr><td colspan="4" class="loading-cell">Loading work…</td></tr></tbody></table></div><button class="show-more is-hidden" id="issue-show-more" type="button">Show more</button></section><aside class="issue-drawer" id="issue-drawer" aria-hidden="true" aria-labelledby="issue-drawer-title" inert><div class="drawer-heading"><div><p class="section-kicker" id="issue-drawer-kicker">Select an Issue</p><h2 id="issue-drawer-title">Issue details</h2></div><button class="icon-button" id="issue-drawer-close" type="button" aria-label="Close issue details"><i data-lucide="x"></i></button></div><div id="issue-drawer-content"><p class="muted">Select an Issue to review evidence and available owner actions.</p></div></aside></div></section>
+          <section class="page-panel" id="page-work" data-page="work">
+            <section class="panel workbench" aria-labelledby="workbench-title"><div class="workbench-heading"><div><p class="section-kicker">Symphony work</p><h2 id="workbench-title">Current work</h2></div><div class="work-chart-wrap"><canvas id="owner-work-chart" aria-label="Owner work by status" role="img"></canvas></div></div><section class="work-summary" id="work-summary" aria-label="Work counters"></section><nav class="owner-tabs" id="owner-tabs" role="tablist" aria-label="Work queues"></nav><div class="work-toolbar"><label class="visually-hidden" for="work-search">Search work</label><input id="work-search" type="search" placeholder="Search Issue, title or PR"><label class="visually-hidden" for="work-stage-filter">Filter by stage</label><select id="work-stage-filter"><option value="">All stages</option><option value="coding">Coding</option><option value="ci">CI</option><option value="landing">Landing</option><option value="test">TEST</option></select><label class="visually-hidden" for="work-model-filter">Filter by model</label><select id="work-model-filter"><option value="">All models</option><option value="luna">Luna</option><option value="terra">Terra</option><option value="sol">Sol</option></select><label class="visually-hidden" for="work-sort">Sort work</label><select id="work-sort"><option value="oldest">Oldest first</option><option value="newest">Newest first</option><option value="impact">Highest impact</option></select></div><div class="workbench-body"><section class="issue-table-panel" id="issue-table-panel" role="tabpanel" aria-live="polite"><div class="issue-table-wrap"><table class="issue-table" id="issue-table"><thead><tr><th scope="col">Issue</th><th scope="col">Progress</th><th scope="col">Week impact</th><th scope="col">State</th></tr></thead><tbody id="issue-table-body"><tr><td colspan="4" class="loading-cell">Loading work…</td></tr></tbody></table></div><button class="show-more is-hidden" id="issue-show-more" type="button">Show more</button></section><aside class="issue-drawer" id="issue-drawer" aria-hidden="true" aria-labelledby="issue-drawer-title" inert><div class="drawer-heading"><div><p class="section-kicker" id="issue-drawer-kicker">Select an Issue</p><h2 id="issue-drawer-title">Issue details</h2></div><button class="icon-button" id="issue-drawer-close" type="button" aria-label="Close issue details"><i data-lucide="x"></i></button></div><div id="issue-drawer-content"><p class="muted">Select an Issue to review evidence and available owner actions.</p></div></aside></div></section>
           </section>
 
           <section class="page-panel" id="page-review" data-page="review" hidden><div class="page-heading"><div><p class="section-kicker">Owner acceptance</p><h2>Ready for Acceptance</h2></div></div><div class="card-list" id="review-content"></div></section>

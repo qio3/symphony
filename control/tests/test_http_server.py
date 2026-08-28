@@ -152,6 +152,36 @@ class ControlHttpServerTest(unittest.TestCase):
         self.assertIn(".history-range[hidden] { display: none; }", css)
         self.assertRegex(css, r"@media \(max-width:\s*760px\)[\s\S]*\.history-range-buttons\s*\{[^}]*display:\s*none")
 
+    def test_owner_shell_uses_the_approved_v5_visual_contract(self):
+        html, _csrf, _headers = self.browser_session()
+
+        self.assertRegex(html, r'id="page-overview"[^>]*\bhidden\b')
+        self.assertRegex(html, r'id="page-work"[^>]*data-page="work"(?![^>]*\bhidden\b)')
+        self.assertIn('id="page-subtitle"', html)
+        self.assertIn('id="work-summary"', html)
+        self.assertIn('id="work-search"', html)
+        self.assertIn('id="work-model-filter"', html)
+        self.assertIn('id="work-stage-filter"', html)
+        self.assertIn('id="work-sort"', html)
+        self.assertIn('id="header-service-status"', html)
+        self.assertIn('id="header-service-actions"', html)
+
+        with self.request("/assets/owner-control.css", authorized=False) as response:
+            css = response.read().decode("utf-8")
+        self.assertIn("--oc-bg: #edf1f4", css)
+        self.assertIn("grid-template-columns: 205px minmax(0, 1fr)", css)
+        self.assertIn("font-size: 11px", css)
+        self.assertRegex(css, r"\.issue-table tbody\s*\{[^}]*display:\s*grid")
+
+        with self.request("/assets/owner-control.js", authorized=False) as response:
+            javascript = response.read().decode("utf-8")
+        self.assertIn('const THEME_STORAGE_KEY = "owner-control-v5-theme"', javascript)
+        self.assertIn('let activePage = "work"', javascript)
+        self.assertIn('activatePage("work")', javascript)
+        self.assertIn("function taskInlineDetails", javascript)
+        self.assertIn("function filteredWorkItems", javascript)
+        self.assertIn("function workWeekImpact", javascript)
+
     def test_owner_shell_has_theme_tabs_table_chart_and_detail_drawer(self):
         html, _csrf, _headers = self.browser_session()
 
@@ -192,7 +222,7 @@ class ControlHttpServerTest(unittest.TestCase):
         with self.request("/assets/owner-control.js", authorized=False) as response:
             javascript = response.read().decode("utf-8")
 
-        self.assertIn('const THEME_STORAGE_KEY = "owner-control-theme"', javascript)
+        self.assertIn('const THEME_STORAGE_KEY = "owner-control-v5-theme"', javascript)
         self.assertIn("localStorage.getItem(THEME_STORAGE_KEY)", javascript)
         self.assertIn("localStorage.setItem(THEME_STORAGE_KEY", javascript)
         self.assertIn("document.documentElement.dataset.theme", javascript)
@@ -232,15 +262,20 @@ class ControlHttpServerTest(unittest.TestCase):
         self.assertIn('borderDash', javascript)
         self.assertIn("Release wave data unavailable", javascript)
         self.assertIn("Infrastructure metrics unavailable", javascript)
-        self.assertIn('"Active workers"', javascript)
+        self.assertIn('["running", "Active"', javascript)
         self.assertIn('"Waiting delivery"', javascript)
         self.assertIn('event.target.closest("button[data-page]")', javascript)
         self.assertNotIn('event.target.closest("[data-page]")', javascript)
-        self.assertIn("item.pr?.merged === true && item.test?.contains_merge === true", javascript)
+        self.assertIn("function hasVerifiedIssueDelivery", javascript)
+        self.assertIn("item.test?.merge_sha === mergeSha", javascript)
+        self.assertIn('item.lane === "running"', javascript)
         self.assertIn("function optionalNumber", javascript)
         self.assertIn("overviewHistoryState.textContent", javascript)
         self.assertIn("function workerLimitControl", javascript)
         self.assertIn('fetch("/ui/actions/set_workers"', javascript)
+        self.assertIn("function workStageKey", javascript)
+        self.assertIn('phase.includes("merge")', javascript)
+        self.assertIn('return "landing"', javascript)
 
     def test_service_action_menu_stacks_above_service_facts(self):
         with self.request("/assets/owner-control.css", authorized=False) as response:
