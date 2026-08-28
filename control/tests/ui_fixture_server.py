@@ -55,6 +55,11 @@ SNAPSHOT = {
                 "target_prs": 2,
                 "progress_percent": 25,
                 "summary": "1 of 2 pull requests is queued in the deterministic landing valve.",
+                "status_entered_at": "2026-08-24T09:20:00Z",
+                "status_history": [
+                    {"phase": "queued", "entered_at": "2026-08-24T09:00:00Z", "exited_at": "2026-08-24T09:20:00Z"},
+                    {"phase": "collecting", "entered_at": "2026-08-24T09:20:00Z", "exited_at": None},
+                ],
                 "issues": [
                     {"number": 401, "title": "Stabilize article publishing", "url": "https://github.test/issues/401", "pr": {"number": 421}, "ci": {"status": "success"}, "usage": {"week_impact_percent": 0.7}},
                 ],
@@ -96,10 +101,15 @@ SNAPSHOT = {
         "queued_jobs": 3,
         "alerts": 0,
         "hosts": [
-            {"name": "Local Symphony", "kind": "local", "status": "online", "cpu_percent": 31, "memory_percent": 48, "runners_busy": 0, "runners_online": 0, "runners_total": 0, "jobs": [{"issue": 401, "name": "Terra session"}]},
-            {"name": "CI_1", "kind": "ci", "status": "online", "cpu_percent": 57, "memory_percent": 62, "runners_busy": 2, "runners_online": 3, "runners_total": 3, "jobs": [{"issue": 401, "name": "Backend"}, {"issue": 402, "name": "Frontend"}]},
-            {"name": "CI_2", "kind": "ci", "status": "online", "cpu_percent": 84, "memory_percent": 71, "runners_busy": 2, "runners_online": 3, "runners_total": 3, "jobs": [{"issue": 399, "name": "E2E"}]},
+            {"name": "Local Symphony", "kind": "local", "role": "runtime", "status": "online", "cpu_percent": 31, "memory_percent": 48, "runners_busy": 0, "runners_online": 0, "runners_total": 0, "jobs": [{"issue": 401, "name": "Terra session"}]},
+            {"name": "CI_1", "kind": "ci", "role": "primary-ci", "status": "online", "cpu_percent": 57, "memory_percent": 62, "runners_busy": 2, "runners_online": 3, "runners_total": 3, "jobs": [{"issue": 401, "name": "Backend"}, {"issue": 402, "name": "Frontend"}]},
+            {"name": "CI_2", "kind": "ci", "role": "primary-ci", "status": "online", "cpu_percent": 84, "memory_percent": 71, "runners_busy": 2, "runners_online": 3, "runners_total": 3, "jobs": [{"issue": 399, "name": "E2E"}]},
+            {"name": "Backup", "kind": "ci", "role": "control-only", "status": "online", "cpu_percent": 14, "memory_percent": 22, "runners_busy": 1, "runners_online": 1, "runners_total": 1, "jobs": [{"issue": None, "name": "Landing valve reconcile"}]},
         ],
+        "capacity": {
+            "primary_ci": {"busy": 4, "online": 6, "total": 6},
+            "control": {"busy": 1, "online": 1, "total": 1},
+        },
         "history": [
             {"recorded_at": "2026-08-24T08:30:00Z", "hosts": {"Local Symphony": {"cpu_percent": 12, "memory_percent": 41}, "CI_1": {"cpu_percent": 24, "memory_percent": 46}, "CI_2": {"cpu_percent": 38, "memory_percent": 58}}},
             {"recorded_at": "2026-08-24T08:45:00Z", "hosts": {"Local Symphony": {"cpu_percent": 38, "memory_percent": 44}, "CI_1": {"cpu_percent": 48, "memory_percent": 52}, "CI_2": {"cpu_percent": 74, "memory_percent": 64}}},
@@ -163,6 +173,11 @@ SNAPSHOT = {
                 "status": "running",
                 "started_at": "2026-08-24T09:18:00Z",
                 "turn_count": 3,
+                "status_entered_at": "2026-08-24T09:18:00Z",
+                "status_history": [
+                    {"phase": "Ready for AI", "entered_at": "2026-08-24T08:45:00Z", "exited_at": "2026-08-24T09:18:00Z"},
+                    {"phase": "Coding", "entered_at": "2026-08-24T09:18:00Z", "exited_at": None},
+                ],
                 "model": {"selected_tier": "luna", "actual_model": "gpt-5.6-luna"},
                 "ci": {"status": "success", "url": "https://github.test/actions/runs/2"},
                 "usage": {"total_tokens": 4300, "estimated_credits_micros": 110000, "week_impact_percent": None},
@@ -262,6 +277,16 @@ def refresh_fixture_clock() -> None:
         source["confirmed_at"] = iso(now)
     SNAPSHOT["owner_view"]["work_items"][0]["started_at"] = iso(now - timedelta(minutes=28))
     SNAPSHOT["owner_view"]["work_items"][1]["started_at"] = iso(now - timedelta(minutes=12))
+    task_history = SNAPSHOT["owner_view"]["work_items"][1]["status_history"]
+    task_history[0]["entered_at"] = iso(now - timedelta(minutes=45))
+    task_history[0]["exited_at"] = iso(now - timedelta(minutes=12))
+    task_history[1]["entered_at"] = iso(now - timedelta(minutes=12))
+    SNAPSHOT["owner_view"]["work_items"][1]["status_entered_at"] = iso(now - timedelta(minutes=12))
+    wave = SNAPSHOT["release_waves"]["waves"][0]
+    wave["status_history"][0]["entered_at"] = iso(now - timedelta(minutes=35))
+    wave["status_history"][0]["exited_at"] = iso(now - timedelta(minutes=10))
+    wave["status_history"][1]["entered_at"] = iso(now - timedelta(minutes=10))
+    wave["status_entered_at"] = iso(now - timedelta(minutes=10))
     for index, sample in enumerate(SNAPSHOT["history"]):
         sample["recorded_at"] = iso(now - timedelta(minutes=15 * (len(SNAPSHOT["history"]) - index - 1)))
     for index, sample in enumerate(SNAPSHOT["infrastructure"]["history"]):

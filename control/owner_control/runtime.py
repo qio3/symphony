@@ -245,6 +245,15 @@ class SnapshotService:
         snapshot["failures"] = failures
         snapshot["sources"] = sources
         snapshot["refreshed_at"] = refreshed_at
+        self._attach_phase_histories(
+            snapshot,
+            refreshed_at=refreshed_at,
+            record_issues=(
+                sources.get("runtime", {}).get("status") == "fresh"
+                and sources.get("github", {}).get("status") == "fresh"
+            ),
+            record_waves=sources.get("github", {}).get("status") == "fresh",
+        )
         snapshot["history"] = self._state_store.record_status_sample(
             {
                 "recorded_at": refreshed_at,
@@ -283,6 +292,103 @@ class SnapshotService:
         )
         return snapshot
 
+    def _attach_phase_histories(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        refreshed_at: str,
+        record_issues: bool,
+        record_waves: bool,
+    ) -> None:
+        owner_view = snapshot.get("owner_view") or {}
+        lane_phases = {
+            "blocked": "Blocked",
+            "system_quarantines": "Quarantined",
+            "ready_for_acceptance": "Ready for Acceptance",
+            "follow_ups": "Retrying",
+            "done": "Done",
+            "backlog": None,
+        }
+        issue_items: dict[str, dict[str, Any]] = {}
+        observations: list[dict[str, Any]] = []
+        for lane in (
+            "work_items",
+            "follow_ups",
+            "blocked",
+            "system_quarantines",
+            "ready_for_acceptance",
+            "backlog",
+            "done",
+        ):
+            for item in owner_view.get(lane) or []:
+                if not isinstance(item, dict) or item.get("number") is None:
+                    continue
+                key = str(item["number"])
+                issue_items.setdefault(key, item)
+                phase = (
+                    item.get("display_phase")
+                    or lane_phases.get(lane)
+                    or item.get("status")
+                    or item.get("stage")
+                )
+                if not phase:
+                    continue
+                item.setdefault("display_phase", str(phase))
+                seed = (
+                    item.get("started_at")
+                    if lane == "work_items" and str(phase).casefold() == "coding"
+                    else None
+                )
+                observations.append(
+                    {"key": key, "phase": str(phase), "entered_at": seed}
+                )
+
+        histories = (
+            self._state_store.record_phase_observations(
+                "issues", observations, recorded_at=refreshed_at
+            )
+            if record_issues
+            else self._state_store.phase_histories("issues")
+        )
+        for key, item in issue_items.items():
+            history = histories.get(key) or []
+            item["status_history"] = deepcopy(history)
+            item["status_entered_at"] = (
+                history[-1].get("entered_at") if history else None
+            )
+
+        release = snapshot.get("release_waves") or {}
+        waves = [wave for wave in release.get("waves") or [] if isinstance(wave, dict)]
+        wave_items: dict[str, dict[str, Any]] = {}
+        wave_observations: list[dict[str, Any]] = []
+        for wave in waves:
+            key = _wave_history_key(wave)
+            if key is None:
+                continue
+            wave_items[key] = wave
+            run = wave.get("run")
+            seed = run.get("created_at") if isinstance(run, dict) else None
+            wave_observations.append(
+                {
+                    "key": key,
+                    "phase": str(wave.get("status") or "queued"),
+                    "entered_at": seed,
+                }
+            )
+        wave_histories = (
+            self._state_store.record_phase_observations(
+                "waves", wave_observations, recorded_at=refreshed_at
+            )
+            if record_waves and release.get("available") is not False
+            else self._state_store.phase_histories("waves")
+        )
+        for key, wave in wave_items.items():
+            history = wave_histories.get(key) or []
+            wave["status_history"] = deepcopy(history)
+            wave["status_entered_at"] = (
+                history[-1].get("entered_at") if history else None
+            )
+
     def _infrastructure_projection(
         self,
         *,
@@ -296,6 +402,7 @@ class SnapshotService:
                 {
                     "name": "Local Symphony",
                     "kind": "local",
+                    "role": "runtime",
                     "status": "stopped",
                     "cpu_percent": 0.0,
                     "memory_percent": 0.0,
@@ -356,6 +463,12 @@ class SnapshotService:
                     alerts += int(stored_remote.get("alerts") or 0)
                 alerts += 1
                 stale = True
+        for host in hosts:
+            if isinstance(host, dict):
+                host.setdefault(
+                    "role",
+                    "runtime" if host.get("kind") == "local" else "primary-ci",
+                )
         history = self._state_store.record_infrastructure_sample(
             {
                 "recorded_at": refreshed_at,
@@ -370,6 +483,7 @@ class SnapshotService:
         )
         return {
             "hosts": hosts,
+            "capacity": _infrastructure_capacity(hosts),
             "queued_jobs": queued_jobs,
             "alerts": alerts,
             "stale": stale,
@@ -694,6 +808,41 @@ def _merge_last_good_host_metrics(
                 value["status"] = "stale"
         merged.append(value)
     return merged, stale
+
+
+def _wave_history_key(wave: dict[str, Any]) -> str | None:
+    pull_requests = sorted(
+        {
+            int(item["pr"]["number"])
+            for item in wave.get("issues") or []
+            if isinstance(item, dict)
+            and isinstance(item.get("pr"), dict)
+            and isinstance(item["pr"].get("number"), int)
+        }
+    )
+    if pull_requests:
+        return "prs:" + ",".join(str(number) for number in pull_requests)
+    run = wave.get("run")
+    if isinstance(run, dict) and run.get("id") is not None:
+        return f"run:{run['id']}"
+    position = wave.get("position")
+    return f"position:{position}" if position is not None else None
+
+
+def _infrastructure_capacity(
+    hosts: list[dict[str, Any]],
+) -> dict[str, dict[str, int]]:
+    capacity = {
+        "primary_ci": {"busy": 0, "online": 0, "total": 0},
+        "control": {"busy": 0, "online": 0, "total": 0},
+    }
+    for host in hosts:
+        if not isinstance(host, dict) or host.get("role") == "runtime":
+            continue
+        target = "control" if host.get("role") == "control-only" else "primary_ci"
+        for field in ("busy", "online", "total"):
+            capacity[target][field] += int(host.get(f"runners_{field}") or 0)
+    return capacity
 
 
 def _empty_runtime() -> dict[str, Any]:

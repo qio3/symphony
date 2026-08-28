@@ -543,6 +543,18 @@ body { font-size: 12px; line-height: 1.42; }
 .task-stage { padding-top: 4px; border-top: 3px solid var(--oc-line); color: var(--oc-muted); font-size: 8px; }
 .task-stage.is-done { border-color: var(--oc-positive); color: var(--oc-text); }
 .task-stage.is-current { border-color: var(--oc-focus); color: var(--oc-focus); font-weight: 800; }
+.row-phase-copy { display: grid; gap: 2px; }
+.stage-age { color: var(--oc-muted); font-size: 8px; font-weight: 600; }
+.status-timeline { display: grid; gap: 0; margin-top: 8px; padding: 8px 10px; border: 1px solid var(--oc-line); border-radius: 8px; background: var(--oc-surface-subtle); }
+.status-timeline:empty { display: none; }
+.status-timeline-title { margin-bottom: 4px; font-size: 9px; }
+.status-timeline-item { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 32px; padding: 5px 0 5px 16px; border-left: 2px solid var(--oc-line-strong); }
+.status-timeline-item::before { position: absolute; left: -5px; width: 8px; height: 8px; border: 2px solid var(--oc-surface); border-radius: 999px; background: var(--oc-muted); content: ""; }
+.status-timeline-item.is-current { border-left-color: var(--oc-focus); }
+.status-timeline-item.is-current::before { background: var(--oc-focus); }
+.status-timeline-item > div { display: grid; gap: 1px; }
+.status-timeline-item strong, .status-timeline-duration { font-size: 9px; }
+.machine-role { color: var(--oc-focus); font-size: 8px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
 .task-detail-text { color: var(--oc-muted); font-size: 10px; line-height: 1.45; }
 .task-detail-text strong { color: var(--oc-text); }
 .task-inline-body > .evidence-row, .task-inline-body > .usage-row { margin-top: 8px; }

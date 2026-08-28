@@ -6,6 +6,64 @@ from owner_control.state_store import StateStore
 
 
 class StateStoreHistoryTest(unittest.TestCase):
+    def test_phase_observation_closes_previous_phase_without_duplicate_entries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "owner-control.json"
+            store = StateStore(path)
+
+            first = store.record_phase_observations(
+                "issues",
+                [{"key": "524", "phase": "Coding", "entered_at": "2026-08-28T08:05:41Z"}],
+                recorded_at="2026-08-28T10:00:00Z",
+            )
+            duplicate = store.record_phase_observations(
+                "issues",
+                [{"key": "524", "phase": "Coding"}],
+                recorded_at="2026-08-28T10:01:00Z",
+            )
+            transitioned = store.record_phase_observations(
+                "issues",
+                [{"key": "524", "phase": "Waiting CI"}],
+                recorded_at="2026-08-28T10:02:00Z",
+            )
+
+            self.assertEqual(first["524"][0]["entered_at"], "2026-08-28T08:05:41Z")
+            self.assertEqual(len(duplicate["524"]), 1)
+            self.assertEqual(
+                transitioned["524"],
+                [
+                    {
+                        "phase": "Coding",
+                        "entered_at": "2026-08-28T08:05:41Z",
+                        "exited_at": "2026-08-28T10:02:00Z",
+                    },
+                    {
+                        "phase": "Waiting CI",
+                        "entered_at": "2026-08-28T10:02:00Z",
+                        "exited_at": None,
+                    },
+                ],
+            )
+            self.assertEqual(
+                StateStore(path).phase_histories("issues"),
+                transitioned,
+            )
+
+    def test_wave_phase_history_is_persisted_by_pr_composition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "owner-control.json"
+            store = StateStore(path)
+
+            store.record_phase_observations(
+                "waves",
+                [{"key": "prs:421,423", "phase": "landing", "entered_at": "2026-08-28T09:30:00Z"}],
+                recorded_at="2026-08-28T09:35:00Z",
+            )
+            histories = StateStore(path).phase_histories("waves")
+
+            self.assertEqual(histories["prs:421,423"][0]["phase"], "landing")
+            self.assertEqual(histories["prs:421,423"][0]["entered_at"], "2026-08-28T09:30:00Z")
+
     def test_persisted_action_steps_and_result_survive_a_new_store_instance(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "owner-control.json"
