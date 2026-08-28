@@ -51,6 +51,7 @@ class ActionService:
         *,
         snapshot_provider: Callable[[], dict[str, Any]],
         fresh_snapshot_provider: Callable[[], dict[str, Any]] | None = None,
+        completion_snapshot_provider: Callable[[], dict[str, Any]] | None = None,
         lifecycle: Lifecycle,
         supervisor: Supervisor,
         state_store: StateStore,
@@ -58,6 +59,9 @@ class ActionService:
     ):
         self._snapshot_provider = snapshot_provider
         self._fresh_snapshot_provider = fresh_snapshot_provider or snapshot_provider
+        self._completion_snapshot_provider = (
+            completion_snapshot_provider or self._fresh_snapshot_provider
+        )
         self._lifecycle = lifecycle
         self._supervisor = supervisor
         self._state_store = state_store
@@ -258,8 +262,8 @@ class ActionService:
         issue_number = self._issue_number(params.get("issue"))
         if action == "complete_run":
             try:
-                snapshot = self._fresh_snapshot_provider()
-                self._require_fresh_sources(snapshot, "github", "runtime")
+                snapshot = self._completion_snapshot_provider()
+                self._require_fresh_sources(snapshot, "github")
             except ActionError as error:
                 raise RetryableActionError(str(error)) from error
             except Exception as error:
@@ -402,8 +406,6 @@ class ActionService:
             raise RetryableActionError("complete_run requires a canonical issue state")
         if self._has_label(issue, "symphony"):
             raise RetryableActionError("complete_run requires the Symphony lease to be absent")
-        if self._runtime_contains_issue(snapshot, issue_number):
-            raise RetryableActionError("complete_run requires no runtime entry for the issue")
         self._lifecycle.set_status(issue_number, "Ready for Acceptance")
         return {"status": "accepted", "action": "complete_run", "issue": issue_number}
 
@@ -452,28 +454,6 @@ class ActionService:
         return label.casefold() in {
             str(value).casefold() for value in issue.get("labels", [])
         }
-
-    @staticmethod
-    def _runtime_contains_issue(snapshot: dict[str, Any], issue_number: int) -> bool:
-        for lane in ("running", "retrying", "blocked"):
-            entries = snapshot.get(lane, [])
-            if not isinstance(entries, list):
-                return True
-            for entry in entries:
-                if not isinstance(entry, dict):
-                    return True
-                if ActionService._runtime_issue_number(entry) in {None, issue_number}:
-                    return True
-        return False
-
-    @staticmethod
-    def _runtime_issue_number(entry: dict[str, Any]) -> int | None:
-        raw_issue_id = entry.get("issue_id")
-        raw_text = str(raw_issue_id) if raw_issue_id is not None else ""
-        if raw_text.isdigit() and int(raw_text) > 0:
-            return int(raw_text)
-        match = re.search(r"(\d+)$", str(entry.get("issue_identifier") or ""))
-        return int(match.group(1)) if match else None
 
     @staticmethod
     def _quarantine_reason(reason: Any) -> str:

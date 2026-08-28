@@ -74,6 +74,27 @@ class SnapshotService:
                 raise RuntimeError("owner-control snapshot is not ready")
             return self._cached
 
+    def completion_snapshot(self) -> dict[str, Any]:
+        """Read fresh GitHub lifecycle state without calling the waiting runtime."""
+        refreshed_at = datetime.now(timezone.utc).isoformat()
+        project = self._github.project_snapshot(reconcile_intake=False)
+        snapshot = self._builder.build(
+            service={},
+            intake_active=self._state_store.intake_active(),
+            worker_limit=self._state_store.worker_limit(self._worker_limit),
+            worker_max=self._worker_limit,
+            runtime=_empty_runtime(),
+            project=project,
+            canonical={},
+            test={},
+            landing=None,
+            quarantines=self._state_store.quarantines(),
+        )
+        snapshot["sources"] = {"github": _fresh_source(refreshed_at)}
+        snapshot["refreshed_at"] = refreshed_at
+        snapshot["stale"] = False
+        return snapshot
+
     def invalidate(self) -> None:
         refreshed_at = datetime.now(timezone.utc).isoformat()
         control_state = self._state_store.read()

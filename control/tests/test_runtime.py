@@ -314,6 +314,41 @@ class SnapshotServiceTest(unittest.TestCase):
         self.assertEqual(snapshot["workers"], {"running": 0, "limit": 2, "maximum": 2})
         self.assertEqual(github.reconcile_requests, [True])
 
+    def test_completion_snapshot_refreshes_github_without_reading_waiting_runtime(self):
+        class CompletionGitHub(FakeGitHub):
+            def project_snapshot(self, *, reconcile_intake=False):
+                self.reconcile_requests.append(reconcile_intake)
+                return {
+                    "items": [
+                        {
+                            "number": 404,
+                            "title": "Finished work",
+                            "status": "In Progress",
+                            "state": "OPEN",
+                            "labels": [],
+                        }
+                    ]
+                }
+
+        symphony = CountingSymphony()
+        github = CompletionGitHub()
+        service = SnapshotService(
+            symphony=symphony,
+            github=github,
+            test_environment=FakeTest(),
+            supervisor=FakeSupervisor(),
+            state_store=self.store,
+            worker_limit=12,
+            canonical_ref="rebrand/stanina",
+        )
+
+        snapshot = service.completion_snapshot()
+
+        self.assertEqual(snapshot["sources"]["github"]["status"], "fresh")
+        self.assertEqual(snapshot["issues"]["404"]["status"], "In Progress")
+        self.assertEqual(github.reconcile_requests, [False])
+        self.assertEqual(symphony.calls, 0)
+
     def test_combines_local_and_remote_infrastructure_without_losing_history(self):
         class RemoteInfrastructure:
             def snapshot(self):
