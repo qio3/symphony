@@ -116,6 +116,83 @@ class StateStore:
             return []
         return [item for item in value if isinstance(item, dict)]
 
+    def phase_histories(self, kind: str) -> dict[str, list[dict[str, Any]]]:
+        if kind not in {"issues", "waves"}:
+            raise ValueError("phase history kind must be issues or waves")
+        value = self.read().get("phase_histories")
+        histories = value.get(kind) if isinstance(value, dict) else None
+        if not isinstance(histories, dict):
+            return {}
+        return {
+            str(key): [dict(entry) for entry in entries if isinstance(entry, dict)]
+            for key, entries in histories.items()
+            if isinstance(entries, list)
+        }
+
+    def record_phase_observations(
+        self,
+        kind: str,
+        observations: list[dict[str, Any]],
+        *,
+        recorded_at: str,
+        retention_seconds: int = 30 * 24 * 60 * 60,
+    ) -> dict[str, list[dict[str, Any]]]:
+        if kind not in {"issues", "waves"}:
+            raise ValueError("phase history kind must be issues or waves")
+        recorded_timestamp = _timestamp(recorded_at)
+        if recorded_timestamp is None:
+            raise ValueError("phase observations require an ISO recorded_at timestamp")
+        cutoff = recorded_timestamp - max(int(retention_seconds), 0)
+
+        with self._lock:
+            state = self._read_unlocked()
+            raw_all = state.get("phase_histories")
+            all_histories = dict(raw_all) if isinstance(raw_all, dict) else {}
+            raw_histories = all_histories.get(kind)
+            histories: dict[str, list[dict[str, Any]]] = {}
+            for key, raw_entries in (
+                raw_histories.items() if isinstance(raw_histories, dict) else []
+            ):
+                if not isinstance(raw_entries, list):
+                    continue
+                entries = [dict(entry) for entry in raw_entries if isinstance(entry, dict)]
+                latest = entries[-1] if entries else None
+                latest_at = _timestamp(
+                    (latest or {}).get("exited_at") or (latest or {}).get("entered_at")
+                )
+                if latest_at is not None and cutoff <= latest_at <= recorded_timestamp:
+                    histories[str(key)] = entries
+
+            for observation in observations:
+                if not isinstance(observation, dict):
+                    continue
+                key = str(observation.get("key") or "").strip()
+                phase = str(observation.get("phase") or "").strip()
+                if not key or not phase:
+                    continue
+                entries = histories.setdefault(key, [])
+                if entries and entries[-1].get("phase") == phase:
+                    continue
+                if entries and entries[-1].get("exited_at") is None:
+                    entries[-1]["exited_at"] = recorded_at
+                entered_at = observation.get("entered_at")
+                entered_timestamp = _timestamp(entered_at)
+                if entered_timestamp is None or entered_timestamp > recorded_timestamp:
+                    entered_at = recorded_at
+                entries.append(
+                    {
+                        "phase": phase,
+                        "entered_at": entered_at,
+                        "exited_at": None,
+                    }
+                )
+
+            all_histories[kind] = histories
+            if all_histories != raw_all:
+                state["phase_histories"] = all_histories
+                self._write_unlocked(state)
+            return json.loads(json.dumps(histories))
+
     def record_status_sample(
         self,
         sample: dict[str, Any],

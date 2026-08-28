@@ -158,6 +158,7 @@ class InfrastructureClient:
                 {
                     "name": configured["name"],
                     "kind": "ci",
+                    "role": configured["role"],
                     "status": status,
                     **metrics,
                     "runners_busy": sum(bool(runner.get("busy")) for runner in host_runners),
@@ -171,6 +172,7 @@ class InfrastructureClient:
             )
         return {
             "hosts": hosts,
+            "capacity": _capacity_by_role(hosts),
             "queued_jobs": queued_jobs,
             "alerts": alerts,
             "stale": stale,
@@ -309,6 +311,7 @@ def _load_hosts(config_path: Path) -> list[dict[str, Any]]:
         user = str(raw.get("user") or "").strip()
         identity = Path(str(raw.get("identity_file") or ""))
         runners = raw.get("runner_names")
+        role = str(raw.get("role") or "primary-ci").strip().casefold()
         port = raw.get("port", 22)
         if not name or not _SAFE_HOST.fullmatch(host) or not _SAFE_USER.fullmatch(user):
             raise ValueError("infrastructure host identity is invalid")
@@ -320,6 +323,8 @@ def _load_hosts(config_path: Path) -> list[dict[str, Any]]:
             isinstance(runner, str) and runner for runner in runners
         ):
             raise ValueError("infrastructure runner_names must be strings")
+        if role not in {"primary-ci", "control-only"}:
+            raise ValueError("infrastructure role must be primary-ci or control-only")
         hosts.append(
             {
                 "name": name,
@@ -328,6 +333,7 @@ def _load_hosts(config_path: Path) -> list[dict[str, Any]]:
                 "port": port,
                 "identity_file": str(identity),
                 "runner_names": list(runners),
+                "role": role,
             }
         )
     return hosts
@@ -352,3 +358,15 @@ def _optional_number(value: Any) -> float | None:
     if value is None:
         return None
     return float(value)
+
+
+def _capacity_by_role(hosts: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    result = {
+        "primary_ci": {"busy": 0, "online": 0, "total": 0},
+        "control": {"busy": 0, "online": 0, "total": 0},
+    }
+    for host in hosts:
+        key = "control" if host.get("role") == "control-only" else "primary_ci"
+        for field in ("busy", "online", "total"):
+            result[key][field] += int(host.get(f"runners_{field}") or 0)
+    return result

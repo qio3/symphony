@@ -542,7 +542,7 @@ function renderReleaseWaves(snapshot) {
   const headingCopy = el("div");
   headingCopy.append(
     el("p", "section-kicker", "GitHub landing valve"),
-    el("h2", "", current ? `Wave #${current.number || "—"} · ${titleCase(current.status)}` : "Collecting the next wave"),
+    el("h2", "", current ? `Wave #${current.number || "—"} · ${titleCase(current.status)}${stageAgeSuffix(current)}` : "Collecting the next wave"),
     el("p", "muted", current?.summary || `0 of ${number(release.limit || 1)} pull requests are queued for deterministic landing.`),
   );
   const valveState = current?.status === "blocked" ? "Blocked" : "Valve healthy";
@@ -597,7 +597,7 @@ function waveCard(wave) {
       : "Queued wave";
   card.append(
     badge(titleCase(wave.status || "queued"), statusTone(wave.status)),
-    el("h3", "", `${label} · ${number(wave.ready_prs)} / ${number(wave.target_prs || 1)} PR`),
+    el("h3", "", `${label} · ${number(wave.ready_prs)} / ${number(wave.target_prs || 1)} PR${stageAgeSuffix(wave)}`),
     el("p", "", wave.summary || wave.blocker || "Waiting for deterministic delivery evidence."),
   );
   const progress = el("div", "task-progress");
@@ -674,16 +674,17 @@ function renderInfrastructure(snapshot) {
   clear(targets.infrastructureHosts);
   const infrastructure = snapshot.infrastructure || {};
   const hosts = Array.isArray(infrastructure.hosts) ? infrastructure.hosts : [];
-  const runners = hosts.reduce((sum, host) => sum + number(host.runners_total), 0);
-  const online = hosts.reduce((sum, host) => sum + number(host.runners_online), 0);
-  const busy = hosts.reduce((sum, host) => sum + number(host.runners_busy), 0);
+  const capacity = infrastructure.capacity || {};
+  const primary = capacity.primary_ci || capacityForRole(hosts, "primary-ci");
+  const control = capacity.control || capacityForRole(hosts, "control-only");
   targets.infrastructureCounters.append(
     counterCard("server", "Hosts", hosts.length),
-    counterCard("cpu", "Runners online", `${online}/${runners}`),
-    counterCard("activity", "Busy", busy),
+    counterCard("cpu", "CI online", `${number(primary.online)}/${number(primary.total)}`),
+    counterCard("activity", "CI busy", number(primary.busy)),
+    counterCard("git-merge", "Control busy", `${number(control.busy)}/${number(control.total)}`),
     counterCard("list-checks", "Queued jobs", number(infrastructure.queued_jobs)),
-    counterCard("triangle-alert", "Alerts", number(infrastructure.alerts), infrastructure.alerts ? "danger" : "neutral"),
   );
+  if (number(infrastructure.alerts)) targets.infrastructureCounters.append(counterCard("triangle-alert", "Alerts", number(infrastructure.alerts), "danger"));
   if (!hosts.length) {
     targets.infrastructureHosts.append(emptyState("Infrastructure metrics unavailable", "Configure a deterministic metrics source before CPU, RAM and runner charts can be shown."));
     clear(targets.infrastructureDetail);
@@ -702,8 +703,23 @@ function machineSelector(host) {
   button.setAttribute("aria-pressed", String(host.name === selectedInfrastructureHost));
   const heading = el("span", "machine-option-heading");
   heading.append(icon(host.kind === "local" ? "monitor" : "server"), el("strong", "", host.name || "Host"), badge(titleCase(host.status || "unknown"), host.status === "online" ? "good" : "warning"));
-  button.append(heading, el("small", "muted", `Busy ${number(host.runners_busy)} · online ${number(host.runners_online)}/${number(host.runners_total)}`));
+  button.append(heading, el("small", "machine-role", infrastructureRoleLabel(host.role)), el("small", "muted", `Busy ${number(host.runners_busy)} · online ${number(host.runners_online)}/${number(host.runners_total)}`));
   return button;
+}
+
+function capacityForRole(hosts, role) {
+  return hosts.filter((host) => host.role === role).reduce((total, host) => ({
+    busy: total.busy + number(host.runners_busy),
+    online: total.online + number(host.runners_online),
+    total: total.total + number(host.runners_total),
+  }), { busy: 0, online: 0, total: 0 });
+}
+
+function infrastructureRoleLabel(role) {
+  if (role === "primary-ci") return "Primary CI";
+  if (role === "control-only") return "Control only";
+  if (role === "runtime") return "Symphony runtime";
+  return "Infrastructure";
 }
 
 function selectInfrastructureHost(name) {
@@ -875,6 +891,15 @@ function taskProgress(item) {
   if (phase.includes("ci") || item.pr) return 72;
   if (phase.includes("review")) return 62;
   return item.started_at ? 45 : 15;
+}
+
+function taskStageIndex(item) {
+  const phase = String(item.display_phase || item.stage || item.status || "").toLowerCase();
+  if (phase.includes("test") || phase.includes("accept") || phase === "done") return 4;
+  if (phase.includes("merge") || phase.includes("land") || phase.includes("wave")) return 3;
+  if (phase.includes("ci") || phase.includes("check") || phase.includes("pr")) return 2;
+  if (phase.includes("cod") || phase.includes("implement") || phase.includes("agent")) return 1;
+  return 0;
 }
 
 function hasVerifiedIssueDelivery(item) {
@@ -1108,7 +1133,10 @@ function issueTableRow(item) {
     : item.display_phase || item.stage || item.status || "—";
   const taskValue = taskProgress(item);
   const progressHeading = el("div", "progress-label");
-  progressHeading.append(el("strong", "row-phase", progress), el("strong", "progress-percent", `${taskValue}%`));
+  const phaseCopy = el("div", "row-phase-copy");
+  phaseCopy.append(el("strong", "row-phase", progress));
+  if (item.status_entered_at) phaseCopy.append(el("small", "stage-age", `${elapsed(item.status_entered_at)} in stage`));
+  progressHeading.append(phaseCopy, el("strong", "progress-percent", `${taskValue}%`));
   const taskBar = el("div", "task-progress");
   taskBar.title = "Workflow-stage progress, not a time estimate.";
   taskBar.setAttribute("aria-label", `Workflow stage progress ${taskValue}%`);
@@ -1147,8 +1175,7 @@ function taskInlineDetails(item) {
   const body = el("div", "task-inline-body");
   const stages = el("div", "task-stage-line");
   const labels = ["Plan", "Code", "PR / CI", "Wave", "TEST"];
-  const progress = taskProgress(item);
-  const current = Math.min(labels.length - 1, Math.max(0, Math.floor(progress / 20)));
+  const current = taskStageIndex(item);
   labels.forEach((label, index) => {
     const stage = el("span", "task-stage", label);
     if (index < current) stage.classList.add("is-done");
@@ -1159,7 +1186,7 @@ function taskInlineDetails(item) {
   const currentState = item.deferred_reason || item.error || item.display_phase || item.stage || item.status || "In progress";
   summary.append(el("strong", "", "Current: "), document.createTextNode(currentState));
   if (item.model?.escalation_history?.length) summary.append(escalationChain(item.model));
-  body.append(stages, summary, evidenceRow(item), usageRow(item.usage));
+  body.append(stages, summary, evidenceRow(item), statusTimeline(item.status_history), usageRow(item.usage));
 
   const actions = el("div", "row-actions task-inline-actions");
   const githubFresh = currentSnapshot?.sources?.github?.status === "fresh";
@@ -1318,12 +1345,35 @@ function evidenceRow(item) {
   const pr = item.pr || {};
   const ci = item.ci || {};
   const test = item.test || {};
+  if (!pr.number) {
+    row.append(evidenceLink(null, "PR —", "muted"), evidenceLink(null, "CI —", "muted"), evidenceLink(null, "TEST —", "muted"));
+    return row;
+  }
+  const merged = pr.merged === true || Boolean(pr.merge_sha);
   row.append(
-    evidenceLink(pr.url, pr.number ? `PR #${pr.number}` : "PR —", pr.url ? "neutral" : "muted"),
-    evidenceLink(ci.url, `CI ${titleCase(ci.status || "unknown")}`, statusTone(ci.status)),
-    evidenceLink(test.url, `TEST ${titleCase(test.status || (test.synced ? "synced" : "unknown"))}`, test.synced ? "good" : statusTone(test.status)),
+    evidenceLink(pr.url, `PR #${pr.number}`, pr.url ? "neutral" : "muted"),
+    evidenceLink(ci.url, ci.status ? `CI ${titleCase(ci.status)}` : "CI —", ci.status ? statusTone(ci.status) : "muted"),
+    merged
+      ? evidenceLink(test.url, `TEST ${titleCase(test.status || (test.contains_merge ? "verified" : test.synced ? "synced" : "unknown"))}`, test.contains_merge || test.synced ? "good" : statusTone(test.status))
+      : evidenceLink(null, "TEST —", "muted"),
   );
   return row;
+}
+
+function statusTimeline(history) {
+  const timeline = el("div", "status-timeline");
+  const entries = Array.isArray(history) ? history : [];
+  if (!entries.length) return timeline;
+  timeline.append(el("strong", "status-timeline-title", "Status history"));
+  for (const entry of entries) {
+    const item = el("div", "status-timeline-item");
+    if (!entry.exited_at) item.classList.add("is-current");
+    const copy = el("div");
+    copy.append(el("strong", "", titleCase(entry.phase)), el("small", "muted", formatTimestamp(entry.entered_at)));
+    item.append(copy, el("span", "status-timeline-duration", elapsedBetween(entry.entered_at, entry.exited_at)));
+    timeline.append(item);
+  }
+  return timeline;
 }
 
 function usageRow(usage) {
@@ -1703,6 +1753,9 @@ function statusTone(value) { const status = String(value || "").toLowerCase(); i
 function formatReset(epoch) { const value = Number(epoch) * 1000; return Number.isFinite(value) ? new Intl.DateTimeFormat("en", { weekday: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(value)) : "unknown"; }
 function relativeTime(value) { const timestamp = Date.parse(value); if (!Number.isFinite(timestamp)) return "now"; const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000)); if (seconds < 5) return "now"; if (seconds < 60) return `${seconds}s ago`; const minutes = Math.round(seconds / 60); return minutes < 60 ? `${minutes}m ago` : `${Math.round(minutes / 60)}h ago`; }
 function elapsed(value) { const timestamp = Date.parse(value); if (!Number.isFinite(timestamp)) return "—"; const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000)); const hours = Math.floor(seconds / 3600); const minutes = Math.floor((seconds % 3600) / 60); return hours ? `${hours}h ${minutes}m` : `${minutes}m`; }
+function elapsedBetween(start, end = null) { const from = Date.parse(start); const to = end ? Date.parse(end) : Date.now(); if (!Number.isFinite(from) || !Number.isFinite(to)) return "—"; const seconds = Math.max(0, Math.floor((to - from) / 1000)); const days = Math.floor(seconds / 86400); const hours = Math.floor((seconds % 86400) / 3600); const minutes = Math.floor((seconds % 3600) / 60); if (days) return `${days}d ${hours}h`; return hours ? `${hours}h ${minutes}m` : `${minutes}m`; }
+function stageAgeSuffix(item) { return item?.status_entered_at ? ` · ${elapsedBetween(item.status_entered_at)} in stage` : ""; }
+function formatTimestamp(value) { const timestamp = Date.parse(value); return Number.isFinite(timestamp) ? new Intl.DateTimeFormat("en", { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(timestamp)) : "Time unavailable"; }
 
 function activateOwnerTab(key, focus = false) {
   activeTab = key;

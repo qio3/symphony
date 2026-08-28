@@ -34,6 +34,7 @@ class InfrastructureClientTest(unittest.TestCase):
                         "hosts": [
                             {
                                 "name": "CI_1",
+                                "role": "primary-ci",
                                 "host": "192.0.2.10",
                                 "user": "root",
                                 "identity_file": str(Path(directory) / "ci-key"),
@@ -137,6 +138,7 @@ class InfrastructureClientTest(unittest.TestCase):
                             },
                             {
                                 "name": "Backup",
+                                "role": "control-only",
                                 "host": "192.0.2.20",
                                 "user": "dev",
                                 "port": 2223,
@@ -253,6 +255,7 @@ class InfrastructureClientTest(unittest.TestCase):
             {
                 "name": "CI_1",
                 "kind": "ci",
+                "role": "primary-ci",
                 "status": "online",
                 "cpu_percent": 57.5,
                 "memory_percent": 62.25,
@@ -270,6 +273,9 @@ class InfrastructureClientTest(unittest.TestCase):
             },
         )
         self.assertEqual(snapshot["hosts"][1]["runners_total"], 1)
+        self.assertEqual(snapshot["hosts"][1]["role"], "control-only")
+        self.assertEqual(snapshot["capacity"]["primary_ci"], {"busy": 1, "online": 2, "total": 2})
+        self.assertEqual(snapshot["capacity"]["control"], {"busy": 0, "online": 1, "total": 1})
         self.assertTrue(any(command[:2] == ["gh", "api"] for command in calls))
         self.assertTrue(any(command[0] == "ssh" for command in calls))
 
