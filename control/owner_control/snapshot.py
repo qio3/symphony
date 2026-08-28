@@ -237,7 +237,10 @@ class SnapshotBuilder:
             return {"mode": "landing-valve", "available": False, "waves": [], "recent": []}
 
         limit = landing.get("limit") if landing.get("limit") in {1, 2} else 1
-        queued = [item for item in landing.get("queued") or [] if isinstance(item, dict)]
+        queued = sorted(
+            [item for item in landing.get("queued") or [] if isinstance(item, dict)],
+            key=lambda item: item.get("number") if isinstance(item.get("number"), int) else 2**63 - 1,
+        )
         runs = [item for item in landing.get("runs") or [] if isinstance(item, dict)]
         active_run = next(
             (
@@ -252,15 +255,16 @@ class SnapshotBuilder:
             for item in project_items.values()
             if isinstance(item.get("pr"), dict) and (item.get("pr") or {}).get("number")
         }
-        wave_items = []
+        wave_item_groups = []
         for pull in queued:
+            pull_items = []
             issue_numbers = [
                 number for number in pull.get("issue_numbers") or [] if str(number) in project_items
             ]
             if not issue_numbers and pull.get("number") in issues_by_pr:
                 issue_numbers = [issues_by_pr[pull["number"]]["number"]]
             if not issue_numbers:
-                wave_items.append(
+                pull_items.append(
                     {
                         "number": None,
                         "title": pull.get("title"),
@@ -269,19 +273,20 @@ class SnapshotBuilder:
                         "ci": {"status": "success"},
                     }
                 )
-                continue
-            for number in issue_numbers:
-                item = project_items[str(number)]
-                wave_items.append(
-                    {
-                        "number": item.get("number"),
-                        "title": item.get("title"),
-                        "url": item.get("issue_url") or item.get("url"),
-                        "pr": {**deepcopy(pull), "url": pull.get("url")},
-                        "ci": {"status": "success"},
-                        "usage": deepcopy(item.get("usage")),
-                    }
-                )
+            else:
+                for number in issue_numbers:
+                    item = project_items[str(number)]
+                    pull_items.append(
+                        {
+                            "number": item.get("number"),
+                            "title": item.get("title"),
+                            "url": item.get("issue_url") or item.get("url"),
+                            "pr": {**deepcopy(pull), "url": pull.get("url")},
+                            "ci": {"status": "success"},
+                            "usage": deepcopy(item.get("usage")),
+                        }
+                    )
+            wave_item_groups.append(pull_items)
 
         canonical_ci = str(((canonical.get("ci") or {}).get("status") or "unknown")).casefold()
         if active_run is not None:
@@ -318,18 +323,25 @@ class SnapshotBuilder:
         waves = []
         if queued or active_run is not None:
             run_number = (active_run or (runs[0] if runs else {})).get("run_number")
-            waves.append(
-                {
-                    "number": run_number,
-                    "status": status,
-                    "ready_prs": len(queued),
-                    "target_prs": limit,
-                    "progress_percent": progress,
-                    "summary": summary,
-                    "issues": wave_items,
-                    "run": deepcopy(active_run),
-                }
-            )
+            chunks = [
+                wave_item_groups[index : index + limit]
+                for index in range(0, len(wave_item_groups), limit)
+            ] or [[]]
+            for position, chunk in enumerate(chunks, start=1):
+                first = position == 1
+                waves.append(
+                    {
+                        "number": run_number if first else None,
+                        "position": position,
+                        "status": status if first else "queued",
+                        "ready_prs": len(chunk),
+                        "target_prs": limit,
+                        "progress_percent": progress if first else 0,
+                        "summary": summary if first else f"Queued behind wave {position - 1}.",
+                        "issues": [item for group in chunk for item in group],
+                        "run": deepcopy(active_run) if first else None,
+                    }
+                )
 
         candidates = []
         queued_prs = {pull.get("number") for pull in queued}

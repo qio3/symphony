@@ -560,6 +560,23 @@ function renderReleaseWaves(snapshot) {
   hero.append(memberList);
   targets.waves.append(hero);
 
+  const queuedWaves = waves.slice(1);
+  if (queuedWaves.length) {
+    const queuePanel = el("section", "panel queued-waves");
+    const queueHeading = el("div", "section-heading compact");
+    const queueCopy = el("div");
+    queueCopy.append(
+      el("h2", "", "Queued waves"),
+      el("p", "muted", `Fixed groups of ${number(release.limit || 1)} PRs, in the same order the landing valve will use.`),
+    );
+    queueHeading.append(queueCopy, badge(`${queuedWaves.length} queued`, "neutral"));
+    queuePanel.append(queueHeading);
+    const queueGrid = el("div", "wave-queue-grid");
+    for (const wave of queuedWaves) queueGrid.append(waveCard(wave));
+    queuePanel.append(queueGrid);
+    targets.waves.append(queuePanel);
+  }
+
   const recent = Array.isArray(release.recent) ? release.recent : [];
   const recentPanel = el("section", "panel recent-waves");
   const recentHeading = el("div", "section-heading compact");
@@ -573,9 +590,14 @@ function renderReleaseWaves(snapshot) {
 
 function waveCard(wave) {
   const card = el("article", "wave-card");
+  const label = wave.number
+    ? `Wave #${wave.number}`
+    : wave.position
+      ? `Queued wave ${wave.position}`
+      : "Queued wave";
   card.append(
     badge(titleCase(wave.status || "queued"), statusTone(wave.status)),
-    el("h3", "", `Wave #${wave.number || "—"} · ${number(wave.ready_prs)} / ${number(wave.target_prs || 1)} PR`),
+    el("h3", "", `${label} · ${number(wave.ready_prs)} / ${number(wave.target_prs || 1)} PR`),
     el("p", "", wave.summary || wave.blocker || "Waiting for deterministic delivery evidence."),
   );
   const progress = el("div", "task-progress");

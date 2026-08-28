@@ -600,6 +600,9 @@ body { font-size: 12px; line-height: 1.42; }
 a.wave-member-title:hover { color: var(--oc-focus); text-decoration: underline; text-underline-offset: 3px; }
 .wave-member-impact { color: var(--oc-muted); font-size: 10px; text-align: right; }
 .recent-waves { padding: 14px 18px; }
+.queued-waves { padding: 14px 18px; }
+.wave-queue-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.wave-queue-grid .wave-card { background: var(--oc-surface-raised); }
 .recent-wave-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 0; border-top: 1px solid var(--oc-line); }
 .recent-wave-row > div { display: grid; min-width: 0; gap: 2px; }
 .recent-wave-link { color: var(--oc-text); font-size: 11px; font-weight: 760; text-decoration: none; }
@@ -631,6 +634,7 @@ a.machine-job:hover { border-color: var(--oc-focus); color: var(--oc-focus); }
   .wave-stage-rail { overflow-x: auto; grid-template-columns: repeat(5, minmax(92px, 1fr)); padding: 0 14px; }
   .wave-member { grid-template-columns: 66px minmax(0, 1fr); padding: 10px 14px; }
   .wave-member-impact { grid-column: 2; text-align: left; }
+  .wave-queue-grid { grid-template-columns: 1fr; }
   .machine-option { min-width: 160px; flex-basis: 160px; }
   .machine-chart-grid { grid-template-columns: 1fr; }
   .machine-chart-canvas { height: 190px; }

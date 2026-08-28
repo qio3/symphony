@@ -49,6 +49,7 @@ SNAPSHOT = {
         "waves": [
             {
                 "number": 28,
+                "position": 1,
                 "status": "collecting",
                 "ready_prs": 1,
                 "target_prs": 2,
@@ -56,6 +57,31 @@ SNAPSHOT = {
                 "summary": "1 of 2 pull requests is queued in the deterministic landing valve.",
                 "issues": [
                     {"number": 401, "title": "Stabilize article publishing", "url": "https://github.test/issues/401", "pr": {"number": 421}, "ci": {"status": "success"}, "usage": {"week_impact_percent": 0.7}},
+                ],
+            },
+            {
+                "number": None,
+                "position": 2,
+                "status": "queued",
+                "ready_prs": 2,
+                "target_prs": 2,
+                "progress_percent": 0,
+                "summary": "Queued behind wave 1.",
+                "issues": [
+                    {"number": 403, "title": "Queued delivery A", "url": "https://github.test/issues/403", "pr": {"number": 423}},
+                    {"number": 404, "title": "Queued delivery B", "url": "https://github.test/issues/404", "pr": {"number": 424}},
+                ],
+            },
+            {
+                "number": None,
+                "position": 3,
+                "status": "queued",
+                "ready_prs": 1,
+                "target_prs": 2,
+                "progress_percent": 0,
+                "summary": "Queued behind wave 2.",
+                "issues": [
+                    {"number": 405, "title": "Queued delivery C", "url": "https://github.test/issues/405", "pr": {"number": 425}},
                 ],
             },
         ],

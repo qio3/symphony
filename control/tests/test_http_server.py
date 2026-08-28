@@ -265,6 +265,7 @@ class ControlHttpServerTest(unittest.TestCase):
         self.assertIn('infrastructure-memory-chart', javascript)
         self.assertIn('fill: true', javascript)
         self.assertIn("Landing valve unavailable", javascript)
+        self.assertIn("Queued waves", javascript)
         self.assertIn("Infrastructure metrics unavailable", javascript)
         self.assertIn('["running", "Active"', javascript)
         self.assertIn('"Waiting delivery"', javascript)
