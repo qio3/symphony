@@ -452,6 +452,54 @@ class SnapshotServiceTest(unittest.TestCase):
         self.assertEqual(host["runners_busy"], 3)
         self.assertTrue(snapshot["stale"])
 
+    def test_stale_remote_cache_uses_fixed_config_roles_after_restart(self):
+        self.store.update(
+            {
+                "last_remote_infrastructure": {
+                    "hosts": [
+                        {
+                            "name": "Backup",
+                            "kind": "ci",
+                            "status": "online",
+                            "cpu_percent": 15.0,
+                            "memory_percent": 20.0,
+                            "runners_busy": 1,
+                            "runners_online": 1,
+                            "runners_total": 1,
+                            "jobs": [{"issue": None, "name": "Landing valve"}],
+                        }
+                    ],
+                    "queued_jobs": 0,
+                    "alerts": 0,
+                }
+            }
+        )
+
+        class OfflineInfrastructure:
+            def host_roles(self):
+                return {"Backup": "control-only"}
+
+            def snapshot(self):
+                raise OSError("GitHub temporarily unavailable")
+
+        service = SnapshotService(
+            symphony=FakeSymphony(),
+            github=FakeGitHub(),
+            test_environment=FakeTest(),
+            supervisor=FakeSupervisor(),
+            infrastructure=OfflineInfrastructure(),
+            state_store=self.store,
+            worker_limit=2,
+            canonical_ref="rebrand/stanina",
+        )
+
+        snapshot = service.snapshot(fresh=True)
+        backup = snapshot["infrastructure"]["hosts"][0]
+
+        self.assertEqual(backup["role"], "control-only")
+        self.assertEqual(snapshot["infrastructure"]["capacity"]["primary_ci"]["total"], 0)
+        self.assertEqual(snapshot["infrastructure"]["capacity"]["control"]["total"], 1)
+
     def test_ready_issue_is_accepted_by_merge_containment_not_moving_canonical_head(self):
         github = ContainmentGitHub()
         service = SnapshotService(
@@ -736,6 +784,7 @@ class SnapshotServiceTest(unittest.TestCase):
             service.snapshot()
             deadline = time.time() + 1
             while github.project_calls == calls_after_failure and time.time() < deadline:
+                service.snapshot()
                 time.sleep(0.01)
 
             self.assertGreater(github.project_calls, calls_after_failure)
@@ -746,6 +795,7 @@ class SnapshotServiceTest(unittest.TestCase):
                 recovered = service.snapshot()
             self.assertEqual(recovered["canonical"]["sha"], "recoveredsha")
             self.assertEqual(recovered["sources"]["github"]["status"], "fresh")
+            service.snapshot(fresh=True)
 
     def test_invalidate_immediately_patches_owner_truth_after_expected_stop(self):
         github = BlockingGitHub()

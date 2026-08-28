@@ -248,6 +248,11 @@ class InfrastructureClientTest(unittest.TestCase):
             ):
                 snapshot = wait_snapshot(client)
 
+            self.assertEqual(
+                client.host_roles(),
+                {"CI_1": "primary-ci", "Backup": "control-only"},
+            )
+
         self.assertEqual(snapshot["queued_jobs"], 2)
         self.assertEqual(snapshot["alerts"], 0)
         self.assertEqual(

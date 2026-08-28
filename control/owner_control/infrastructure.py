@@ -69,6 +69,9 @@ class InfrastructureClient:
         self._refreshing = False
         self._last_error: Exception | None = None
 
+    def host_roles(self) -> dict[str, str]:
+        return {host["name"]: host["role"] for host in self._hosts}
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             now = time.monotonic()

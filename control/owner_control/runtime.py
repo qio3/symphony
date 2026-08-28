@@ -463,12 +463,29 @@ class SnapshotService:
                     alerts += int(stored_remote.get("alerts") or 0)
                 alerts += 1
                 stale = True
+        configured_roles: dict[str, str] = {}
+        role_provider = getattr(self._infrastructure, "host_roles", None)
+        if callable(role_provider):
+            try:
+                provided = role_provider()
+                if isinstance(provided, dict):
+                    configured_roles = {
+                        str(name): str(role)
+                        for name, role in provided.items()
+                        if name and role
+                    }
+            except Exception:
+                configured_roles = {}
         for host in hosts:
             if isinstance(host, dict):
-                host.setdefault(
-                    "role",
-                    "runtime" if host.get("kind") == "local" else "primary-ci",
-                )
+                configured = configured_roles.get(str(host.get("name") or ""))
+                if configured:
+                    host["role"] = configured
+                else:
+                    host.setdefault(
+                        "role",
+                        "runtime" if host.get("kind") == "local" else "primary-ci",
+                    )
         history = self._state_store.record_infrastructure_sample(
             {
                 "recorded_at": refreshed_at,
