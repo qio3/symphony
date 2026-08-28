@@ -62,19 +62,64 @@ defmodule SymphonyElixir.AgentRunner do
       {:error, {:workspace_hook_failed, "before_run", status, output}}
       when is_binary(output) ->
         if corrupt_workspace_output?(output) do
-          Logger.warning(
-            "Rebuilding corrupt workspace once for #{issue_context(issue)} " <>
-              "worker_host=#{worker_host_for_log(worker_host)}"
+          recover_corrupt_workspace(
+            issue,
+            recipient,
+            opts,
+            worker_host,
+            model_route,
+            status,
+            output
           )
-
-          :ok = Workspace.remove_issue_workspaces(issue, worker_host)
-          run_on_worker_host(issue, recipient, opts, worker_host, model_route)
         else
           {:error, {:workspace_hook_failed, "before_run", status, output}}
         end
 
       result ->
         result
+    end
+  end
+
+  defp recover_corrupt_workspace(
+         issue,
+         recipient,
+         opts,
+         worker_host,
+         model_route,
+         status,
+         output
+       ) do
+    case Workspace.recover_issue_workspace(issue, worker_host) do
+      {:ok, {:rebuild, archived_workspace}} ->
+        Logger.warning(
+          "Rebuilding corrupt workspace once for #{issue_context(issue)} " <>
+            "worker_host=#{worker_host_for_log(worker_host)} archived_workspace=#{archived_workspace}"
+        )
+
+        run_on_worker_host(issue, recipient, opts, worker_host, model_route)
+
+      {:ok, {:already_integrated, workspace}} ->
+        Logger.info(
+          "Skipping stale workspace already integrated into canonical for #{issue_context(issue)} " <>
+            "worker_host=#{worker_host_for_log(worker_host)} workspace=#{workspace}"
+        )
+
+        :ok
+
+      {:error, {:workspace_preservation_required, workspace, reason}} ->
+        preservation_output =
+          output <>
+            "\nworkspace preservation required: #{reason}; workspace=#{workspace}"
+
+        {:error, {:workspace_hook_failed, "before_run", status, preservation_output}}
+
+      {:error, recovery_reason} ->
+        Logger.warning(
+          "Could not inspect corrupt workspace for #{issue_context(issue)} " <>
+            "worker_host=#{worker_host_for_log(worker_host)} reason=#{inspect(recovery_reason)}"
+        )
+
+        {:error, {:workspace_hook_failed, "before_run", status, output}}
     end
   end
 

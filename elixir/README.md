@@ -193,6 +193,12 @@ Notes:
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run
   `git clone ... .` there, along with any other setup commands you need.
+- A recognized corrupt local workspace is never deleted in place. If it contains only broken
+  `.git` metadata, Symphony atomically moves it to the timestamped sibling
+  `<workspace-root>-quarantine` directory and performs one clean bootstrap. A valid stale Git
+  workspace is inspected first: uncommitted or unique commits stop in system quarantine with the
+  exact path, while work already contained in canonical completes through normal reconciliation
+  without starting Codex again. Remote workspace recovery fails closed and preserves the path.
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
 - For the Linear adapter, `tracker.provider.api_key` reads from `LINEAR_API_KEY` when unset or
