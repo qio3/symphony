@@ -525,6 +525,7 @@ class GitHubClient:
             "status": status or "Backlog",
             "status_missing": status is None,
             "state": content.get("state"),
+            "closed_at": content.get("closedAt"),
             "labels": [label.get("name") for label in (content.get("labels") or {}).get("nodes") or [] if label.get("name")],
             "owner_question": extract_owner_question(comments),
             "project_item_id": node.get("id"),
@@ -701,7 +702,7 @@ query OwnerControlProject($projectId: ID!, $cursor: String) {
           content {
             __typename
             ... on Issue {
-              number title url state
+              number title url state closedAt
               labels(first: 30) { nodes { name } }
               comments(last: 20) { nodes { body } }
               closedByPullRequestsReferences(first: 10) {

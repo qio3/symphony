@@ -230,6 +230,24 @@ SNAPSHOT = {
         ],
         "done": [
             {
+                "number": 397,
+                "title": "Historical task without Symphony accounting",
+                "issue_url": "https://github.test/issues/397",
+                "status": "Done",
+                "stage": "Done",
+                "completed_at": "2026-08-18T08:48:00Z",
+                "usage": {"week_impact_percent": None, "week_impact_availability": "not-recorded"},
+            },
+            {
+                "number": 396,
+                "title": "Recorded task below display precision",
+                "issue_url": "https://github.test/issues/396",
+                "status": "Done",
+                "stage": "Done",
+                "completed_at": "2026-08-24T08:47:00Z",
+                "usage": {"total_tokens": 18, "estimated_credits_micros": 1, "week_impact_percent": 0.0},
+            },
+            {
                 "number": 398,
                 "title": "Persist task usage across service restarts",
                 "issue_url": "https://github.test/issues/398",

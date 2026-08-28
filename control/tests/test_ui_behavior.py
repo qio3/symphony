@@ -102,6 +102,31 @@ class OwnerControlUiBehaviorTest(unittest.TestCase):
         finally:
             page.close()
 
+    def test_done_usage_distinguishes_unrecorded_history_and_always_shows_complete_progress(self):
+        page = self.open_page()
+        try:
+            page.locator('[data-owner-tab="done"]').click()
+            page.locator('#work-sort').select_option('impact')
+            rows = page.locator('[data-issue-row]')
+            self.assertEqual(rows.nth(0).get_attribute('data-issue-row'), '398')
+            self.assertEqual(rows.nth(1).get_attribute('data-issue-row'), '396')
+            self.assertEqual(rows.nth(2).get_attribute('data-issue-row'), '397')
+            self.assertEqual(
+                page.locator('[data-issue-row="397"] .week-impact').inner_text(),
+                '—\nNo recorded Symphony usage',
+            )
+            for issue in ('396', '397', '398'):
+                self.assertIn(
+                    '100%',
+                    page.locator(f'[data-issue-row="{issue}"] .progress-label').inner_text(),
+                )
+            page.locator('[data-issue-select="397"]').click()
+            usage = page.locator('[data-issue-row="397"] .usage-row').inner_text()
+            self.assertEqual(usage, 'No recorded Symphony usage')
+            self.assertNotIn('tokens', usage)
+        finally:
+            page.close()
+
 
 if __name__ == "__main__":
     unittest.main()

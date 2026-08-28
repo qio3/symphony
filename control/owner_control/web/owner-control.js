@@ -884,6 +884,7 @@ function escalationChain(model) {
 function taskProgress(item) {
   const phase = String(item.display_phase || item.stage || item.status || "").toLowerCase();
   const active = item.lane === "running" || String(item.status || "").toLowerCase() === "running";
+  if (phase === "done" || String(item.status || "").toLowerCase() === "done") return 100;
   if (!active && hasVerifiedIssueDelivery(item)) return 100;
   if (phase.includes("test")) return 92;
   if (phase.includes("cod") || phase.includes("implement")) return 45;
@@ -1089,7 +1090,14 @@ function filteredWorkItems(snapshot, tab) {
   };
   return items.sort((left, right) => {
     if (workOrder === "newest") return timestamp(right) - timestamp(left);
-    if (workOrder === "impact") return number(right.usage?.week_impact_percent) - number(left.usage?.week_impact_percent);
+    if (workOrder === "impact") {
+      const leftImpact = optionalNumber(left.usage?.week_impact_percent);
+      const rightImpact = optionalNumber(right.usage?.week_impact_percent);
+      if (leftImpact === null && rightImpact === null) return 0;
+      if (leftImpact === null) return 1;
+      if (rightImpact === null) return -1;
+      return rightImpact - leftImpact;
+    }
     return timestamp(left) - timestamp(right);
   });
 }
@@ -1157,16 +1165,42 @@ function workWeekImpact(usage) {
   const impact = optionalNumber(usage?.week_impact_percent);
   const wrap = el("div", "week-impact");
   const creditShare = usage?.week_impact_basis === "recorded-credit-share";
+  const unavailable = weekImpactUnavailableCopy(usage);
   wrap.title = impact === null
-    ? "Weekly impact is unavailable because this task has no comparable credit ledger in the current weekly window."
+    ? unavailable.title
     : creditShare
       ? "Approximate share of the account-wide weekly percent used, allocated by recorded task credits. Other Codex activity and rounded account limits make exact attribution impossible."
       : "Approximate attribution based on this task's usage ledger and observed account-wide weekly quota movement.";
   wrap.append(
     el("strong", "", impact === null ? "—" : `≈ ${formatPercent(impact)}`),
-    el("small", "", impact === null ? "impact unavailable" : "week impact"),
+    el("small", "", impact === null ? unavailable.label : "week impact"),
   );
   return wrap;
+}
+
+function weekImpactUnavailableCopy(usage) {
+  if (usage?.week_impact_availability === "not-recorded") {
+    return {
+      label: "No recorded Symphony usage",
+      title: "This Issue has no persisted Symphony token or credit record, so no task impact is claimed.",
+    };
+  }
+  if (usage?.week_impact_availability === "outside-current-week") {
+    return {
+      label: "Outside current weekly window",
+      title: "The task completed before the current Codex weekly quota window and is excluded from its impact.",
+    };
+  }
+  if (usage?.week_impact_availability === "completion-time-unavailable") {
+    return {
+      label: "Completion time unavailable",
+      title: "Usage exists, but a reliable completion time is unavailable, so it is not attributed to the current week.",
+    };
+  }
+  return {
+    label: "impact unavailable",
+    title: "Weekly impact is unavailable because this task has no comparable credit ledger in the current weekly window.",
+  };
 }
 
 function taskInlineDetails(item) {
@@ -1382,6 +1416,10 @@ function usageRow(usage) {
     row.append(el("span", "muted", "Task usage unavailable"));
     return row;
   }
+  if (usage.week_impact_availability === "not-recorded") {
+    row.append(el("span", "muted", "No recorded Symphony usage"));
+    return row;
+  }
   row.append(el("span", "", `${formatNumber(usage.total_tokens)} tokens`), el("span", "", estimatedCredits(usage.estimated_credits_micros)));
   const impact = el("span", "week-impact");
   if (typeof usage.week_impact_percent === "number") {
@@ -1390,8 +1428,9 @@ function usageRow(usage) {
       ? "Approximate share of the account-wide weekly percent used, allocated by recorded task credits. Other Codex activity and rounded account limits make exact attribution impossible."
       : "Approximation from observed account-wide weekly quota movement, allocated by task credits. Concurrency prevents exact attribution.";
   } else {
-    impact.textContent = "Weekly impact unavailable";
-    impact.title = "Account-wide quota observations are insufficient for a responsible task attribution.";
+    const unavailable = weekImpactUnavailableCopy(usage);
+    impact.textContent = unavailable.label;
+    impact.title = unavailable.title;
   }
   row.append(impact);
   const details = el("details", "usage-details");
