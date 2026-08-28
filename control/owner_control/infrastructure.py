@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import subprocess
 import threading
@@ -229,6 +230,7 @@ class InfrastructureClient:
         completed = self._run(
             [self._gh_executable, "api", endpoint, "--paginate", "--slurp"],
             timeout=20,
+            environment=_gh_cli_environment(),
         )
         value = json.loads(completed.stdout)
         if isinstance(value, dict):
@@ -266,18 +268,24 @@ class InfrastructureClient:
         }
 
     def _run(
-        self, command: list[str], *, timeout: int
+        self,
+        command: list[str],
+        *,
+        timeout: int,
+        environment: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        completed = self._runner(
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            shell=False,
-            check=False,
-        )
+        arguments: dict[str, Any] = {
+            "capture_output": True,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "timeout": timeout,
+            "shell": False,
+            "check": False,
+        }
+        if environment is not None:
+            arguments["env"] = environment
+        completed = self._runner(command, **arguments)
         if completed.returncode != 0:
             raise RuntimeError(f"infrastructure command failed with {completed.returncode}")
         return completed
@@ -319,6 +327,13 @@ def _load_hosts(config_path: Path) -> list[dict[str, Any]]:
             }
         )
     return hosts
+
+
+def _gh_cli_environment() -> dict[str, str]:
+    environment = dict(os.environ)
+    environment.pop("GITHUB_TOKEN", None)
+    environment.pop("GH_TOKEN", None)
+    return environment
 
 
 def _issue_number(run: dict[str, Any]) -> int | None:

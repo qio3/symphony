@@ -1,10 +1,12 @@
 import importlib
 import json
+import os
 import subprocess
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 def wait_snapshot(client, predicate=lambda _snapshot: True):
@@ -151,6 +153,10 @@ class InfrastructureClientTest(unittest.TestCase):
             def runner(command, **kwargs):
                 calls.append(command)
                 endpoint = command[2] if command[:2] == ["gh", "api"] else ""
+                if endpoint:
+                    self.assertIn("env", kwargs)
+                    self.assertNotIn("GITHUB_TOKEN", kwargs["env"])
+                    self.assertNotIn("GH_TOKEN", kwargs["env"])
                 if endpoint.endswith("actions/runners?per_page=100"):
                     output = [
                         {
@@ -234,7 +240,11 @@ class InfrastructureClientTest(unittest.TestCase):
                 cache_seconds=60,
             )
 
-            snapshot = wait_snapshot(client)
+            with patch.dict(
+                os.environ,
+                {"GITHUB_TOKEN": "must-not-leak", "GH_TOKEN": "must-not-leak"},
+            ):
+                snapshot = wait_snapshot(client)
 
         self.assertEqual(snapshot["queued_jobs"], 2)
         self.assertEqual(snapshot["alerts"], 0)
