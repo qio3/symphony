@@ -23,7 +23,7 @@ class SnapshotService:
         worker_limit: int,
         canonical_ref: str,
         cache_seconds: float = 5.0,
-        github_cache_seconds: float = 60.0,
+        github_cache_seconds: float = 300.0,
         github_retry_seconds: float = 60.0,
     ):
         self._symphony = symphony

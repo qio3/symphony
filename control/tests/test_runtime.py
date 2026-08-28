@@ -623,6 +623,41 @@ class SnapshotServiceTest(unittest.TestCase):
         self.assertEqual(github.project_calls, 1)
         self.assertEqual(github.canonical_calls, 1)
 
+    def test_default_github_ttl_avoids_exhausting_project_graphql_quota(self):
+        clock = FakeClock()
+        symphony = CountingSymphony()
+        github = CountingGitHub()
+        service = SnapshotService(
+            symphony=symphony,
+            github=github,
+            test_environment=FakeTest(),
+            supervisor=FakeSupervisor(),
+            state_store=self.store,
+            worker_limit=5,
+            canonical_ref="rebrand/stanina",
+            cache_seconds=0,
+        )
+
+        with patch("owner_control.runtime.time.monotonic", clock):
+            service.snapshot()
+            clock.advance(61)
+            service.snapshot()
+
+            deadline = time.time() + 1
+            while symphony.calls < 2 and time.time() < deadline:
+                time.sleep(0.01)
+
+            self.assertGreaterEqual(symphony.calls, 2)
+            self.assertEqual(github.project_calls, 1)
+
+            clock.advance(240)
+            service.snapshot()
+            deadline = time.time() + 1
+            while github.project_calls < 2 and time.time() < deadline:
+                time.sleep(0.01)
+
+            self.assertEqual(github.project_calls, 2)
+
     def test_forced_snapshot_bypasses_github_ttl_for_action_preflight(self):
         github = CountingGitHub()
         service = SnapshotService(
