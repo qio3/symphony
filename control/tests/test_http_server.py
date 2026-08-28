@@ -268,6 +268,8 @@ class ControlHttpServerTest(unittest.TestCase):
 
         self.assertIn('host.status || "online"', javascript)
         self.assertIn("Last confirmed metrics", javascript)
+        self.assertIn("suggestedMax: 100", javascript)
+        self.assertNotIn("beginAtZero: true, max: 100", javascript)
 
     def test_workbench_has_a_bounded_expandable_table(self):
         with self.request("/assets/owner-control.js", authorized=False) as response:
