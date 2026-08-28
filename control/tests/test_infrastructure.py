@@ -151,6 +151,10 @@ class InfrastructureClientTest(unittest.TestCase):
             def runner(command, **kwargs):
                 calls.append(command)
                 endpoint = command[2] if command[:2] == ["gh", "api"] else ""
+                if endpoint:
+                    self.assertIn("env", kwargs)
+                    self.assertNotIn("GITHUB_TOKEN", kwargs["env"])
+                    self.assertNotIn("GH_TOKEN", kwargs["env"])
                 if endpoint.endswith("actions/runners?per_page=100"):
                     output = [
                         {
