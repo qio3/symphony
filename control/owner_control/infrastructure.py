@@ -65,24 +65,49 @@ class InfrastructureClient:
         self._lock = threading.Lock()
         self._cached: dict[str, Any] | None = None
         self._cached_at = 0.0
+        self._refreshing = False
+        self._last_error: Exception | None = None
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             now = time.monotonic()
-            if self._cached is not None and now - self._cached_at < self._cache_seconds:
-                return deepcopy(self._cached)
-            value = self._collect()
-            self._cached = value
-            self._cached_at = now
-            return deepcopy(value)
+            cached = self._cached
+            expired = cached is None or now - self._cached_at >= self._cache_seconds
+            if expired and not self._refreshing:
+                self._refreshing = True
+                threading.Thread(
+                    target=self._refresh,
+                    name="owner-control-infrastructure-refresh",
+                    daemon=True,
+                ).start()
+            if cached is None:
+                reason = str(self._last_error) if self._last_error else "loading"
+                raise RuntimeError(f"infrastructure metrics are {reason}")
+            return deepcopy(cached)
 
-    def _collect(self) -> dict[str, Any]:
+    def _refresh(self) -> None:
+        with self._lock:
+            previous = deepcopy(self._cached)
+        try:
+            value = self._collect(previous)
+        except Exception as error:
+            with self._lock:
+                self._last_error = error
+                self._refreshing = False
+            return
+        with self._lock:
+            self._cached = value
+            self._cached_at = time.monotonic()
+            self._last_error = None
+            self._refreshing = False
+
+    def _collect(self, previous: dict[str, Any] | None) -> dict[str, Any]:
         alerts = 0
         stale = False
         runners, jobs, queued_jobs = self._github_state()
         cached_hosts = {
             str(host.get("name")): host
-            for host in ((self._cached or {}).get("hosts") or [])
+            for host in ((previous or {}).get("hosts") or [])
             if isinstance(host, dict) and host.get("name")
         }
 
@@ -140,34 +165,40 @@ class InfrastructureClient:
     def _github_state(
         self,
     ) -> tuple[dict[str, dict[str, Any]], dict[str, list[dict[str, Any]]], int]:
-        runner_value = self._gh_api(
+        runner_pages = self._gh_pages(
             f"repos/{self._repository}/actions/runners?per_page=100"
         )
         runners = {
             str(runner.get("name")): runner
-            for runner in runner_value.get("runners") or []
+            for page in runner_pages
+            for runner in page.get("runners") or []
             if isinstance(runner, dict) and runner.get("name")
         }
         jobs: dict[str, list[dict[str, Any]]] = {}
         queued_jobs = 0
         workflow_runs: list[dict[str, Any]] = []
         for status in ("in_progress", "queued"):
-            run_value = self._gh_api(
+            run_pages = self._gh_pages(
                 f"repos/{self._repository}/actions/runs?status={status}&per_page=30"
             )
             workflow_runs.extend(
                 run
-                for run in (run_value.get("workflow_runs") or [])
+                for page in run_pages
+                for run in (page.get("workflow_runs") or [])
                 if isinstance(run, dict)
             )
         for run in workflow_runs:
             if not isinstance(run, dict) or run.get("id") is None:
                 continue
             issue = _issue_number(run)
-            job_value = self._gh_api(
+            job_pages = self._gh_pages(
                 f"repos/{self._repository}/actions/runs/{run['id']}/jobs?per_page=100"
             )
-            for job in job_value.get("jobs") or []:
+            for job in (
+                job
+                for page in job_pages
+                for job in (page.get("jobs") or [])
+            ):
                 if not isinstance(job, dict):
                     continue
                 status = str(job.get("status") or "").casefold()
@@ -185,15 +216,17 @@ class InfrastructureClient:
                 )
         return runners, jobs, queued_jobs
 
-    def _gh_api(self, endpoint: str) -> dict[str, Any]:
+    def _gh_pages(self, endpoint: str) -> list[dict[str, Any]]:
         completed = self._run(
-            [self._gh_executable, "api", endpoint],
+            [self._gh_executable, "api", endpoint, "--paginate", "--slurp"],
             timeout=20,
         )
         value = json.loads(completed.stdout)
-        if not isinstance(value, dict):
-            raise RuntimeError("GitHub infrastructure response must be an object")
-        return value
+        if isinstance(value, dict):
+            return [value]
+        if isinstance(value, list) and all(isinstance(page, dict) for page in value):
+            return value
+        raise RuntimeError("GitHub infrastructure response must contain object pages")
 
     def _host_metrics(self, host: dict[str, Any]) -> dict[str, Any]:
         completed = self._run(

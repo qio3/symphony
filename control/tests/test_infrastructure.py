@@ -2,8 +2,23 @@ import importlib
 import json
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
+
+
+def wait_snapshot(client, predicate=lambda _snapshot: True):
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        try:
+            snapshot = client.snapshot()
+        except RuntimeError:
+            time.sleep(0.01)
+            continue
+        if predicate(snapshot):
+            return snapshot
+        time.sleep(0.01)
+    raise AssertionError("infrastructure snapshot did not become ready")
 
 
 class InfrastructureClientTest(unittest.TestCase):
@@ -48,10 +63,10 @@ class InfrastructureClientTest(unittest.TestCase):
                 runner=runner,
                 cache_seconds=0,
             )
-            client.snapshot()
+            wait_snapshot(client)
             fail_ssh = True
 
-            stale = client.snapshot()
+            stale = wait_snapshot(client, lambda value: value.get("stale") is True)
 
         self.assertTrue(stale["stale"])
         self.assertEqual(stale["hosts"][0]["status"], "stale")
@@ -89,8 +104,10 @@ class InfrastructureClientTest(unittest.TestCase):
                 cache_seconds=0,
             )
 
-            with self.assertRaisesRegex(RuntimeError, "infrastructure command failed"):
+            started_at = time.monotonic()
+            with self.assertRaisesRegex(RuntimeError, "infrastructure metrics are"):
                 client.snapshot()
+            self.assertLess(time.monotonic() - started_at, 0.1)
 
     def test_groups_fixed_hosts_with_runner_jobs_and_live_cpu_memory(self):
         try:
@@ -132,13 +149,19 @@ class InfrastructureClientTest(unittest.TestCase):
                 calls.append(command)
                 endpoint = command[2] if command[:2] == ["gh", "api"] else ""
                 if endpoint.endswith("actions/runners?per_page=100"):
-                    output = {
-                        "runners": [
-                            {"name": "zavod-r1", "status": "online", "busy": True},
-                            {"name": "zavod-r2", "status": "online", "busy": False},
-                            {"name": "zavod-light-backup", "status": "online", "busy": False},
-                        ]
-                    }
+                    output = [
+                        {
+                            "runners": [
+                                {"name": "zavod-r1", "status": "online", "busy": True},
+                                {"name": "zavod-r2", "status": "online", "busy": False},
+                            ]
+                        },
+                        {
+                            "runners": [
+                                {"name": "zavod-light-backup", "status": "online", "busy": False},
+                            ]
+                        },
+                    ]
                 elif endpoint.endswith("actions/runs?status=in_progress&per_page=30"):
                     output = {
                         "workflow_runs": [
@@ -208,7 +231,7 @@ class InfrastructureClientTest(unittest.TestCase):
                 cache_seconds=0,
             )
 
-            snapshot = client.snapshot()
+            snapshot = wait_snapshot(client)
 
         self.assertEqual(snapshot["queued_jobs"], 2)
         self.assertEqual(snapshot["alerts"], 0)
