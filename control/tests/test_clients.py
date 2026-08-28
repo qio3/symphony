@@ -200,6 +200,53 @@ class GitHubClientTest(unittest.TestCase):
         self.assertEqual(canonical["ci"]["total"], 2)
         self.assertEqual(canonical["ci"]["failed"], 0)
 
+    def test_canonical_uses_only_the_latest_attempt_of_each_check(self):
+        transport = FakeTransport([
+            {"object": {"sha": "canonical-sha"}},
+            {
+                "total_count": 4,
+                "check_runs": [
+                    {
+                        "id": 10,
+                        "name": "merge-gate",
+                        "status": "completed",
+                        "conclusion": "failure",
+                    },
+                    {
+                        "id": 20,
+                        "name": "merge-gate",
+                        "status": "completed",
+                        "conclusion": "success",
+                    },
+                    {
+                        "id": 11,
+                        "name": "vitest + tsc + build",
+                        "status": "completed",
+                        "conclusion": "cancelled",
+                    },
+                    {
+                        "id": 21,
+                        "name": "vitest + tsc + build",
+                        "status": "in_progress",
+                        "conclusion": None,
+                    },
+                ],
+            },
+        ])
+        client = GitHubClient(
+            token="token",
+            repository="qio3/zavod",
+            project_id="project-id",
+            transport=transport,
+        )
+
+        canonical = client.canonical("main")
+
+        self.assertEqual(canonical["ci"]["status"], "pending")
+        self.assertEqual(canonical["ci"]["total"], 2)
+        self.assertEqual(canonical["ci"]["failed"], 0)
+        self.assertEqual(canonical["ci"]["pending"], 1)
+
     def test_normalizes_project_issue_pr_ci_and_owner_question(self):
         transport = FakeTransport([project_response()])
         client = GitHubClient(
