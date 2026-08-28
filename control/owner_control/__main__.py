@@ -55,6 +55,7 @@ def main() -> None:
     actions = ActionService(
         snapshot_provider=snapshots.cached_snapshot,
         fresh_snapshot_provider=lambda: snapshots.snapshot(fresh=True),
+        completion_snapshot_provider=snapshots.completion_snapshot,
         lifecycle=github,
         supervisor=supervisor,
         state_store=store,

@@ -347,6 +347,41 @@ class ActionServiceTest(unittest.TestCase):
             [("set_status", 404, "Ready for Acceptance")],
         )
 
+    def test_internal_complete_run_does_not_read_runtime_while_runtime_waits_for_callback(self):
+        def runtime_snapshot():
+            raise AssertionError("complete_run must not call back into the waiting runtime")
+
+        completion_snapshot = {
+            "sources": {"github": {"status": "fresh"}},
+            "issues": {
+                "404": {
+                    "number": 404,
+                    "status": "In Progress",
+                    "state": "OPEN",
+                    "labels": [],
+                }
+            },
+        }
+        actions = ActionService(
+            snapshot_provider=lambda: self.snapshot,
+            fresh_snapshot_provider=runtime_snapshot,
+            completion_snapshot_provider=lambda: completion_snapshot,
+            lifecycle=self.lifecycle,
+            supervisor=self.supervisor,
+            state_store=self.store,
+        )
+
+        result = actions.execute_internal("complete_run", {"issue": 404})
+
+        self.assertEqual(
+            result,
+            {"status": "accepted", "action": "complete_run", "issue": 404},
+        )
+        self.assertEqual(
+            self.lifecycle.calls,
+            [("set_status", 404, "Ready for Acceptance")],
+        )
+
     def test_internal_complete_run_is_idempotent_for_already_non_active_issue_states(self):
         cases = [
             ("ready", {"status": "Ready for AI"}),
@@ -386,31 +421,10 @@ class ActionServiceTest(unittest.TestCase):
             self.actions.execute_internal("complete_run", {"issue": 404})
         self.snapshot["issues"]["404"]["labels"] = []
 
-        for lane in ("running", "retrying", "blocked"):
-            with self.subTest(lane=lane):
-                self.snapshot[lane] = [{"issue_id": "404"}]
-                self.lifecycle.calls.clear()
-                with self.assertRaisesRegex(RetryableActionError, "runtime"):
-                    self.actions.execute_internal("complete_run", {"issue": 404})
-                self.assertEqual(self.lifecycle.calls, [])
-                self.snapshot[lane] = []
-
-        self.snapshot["running"] = [{}]
-        with self.assertRaisesRegex(RetryableActionError, "runtime"):
-            self.actions.execute_internal("complete_run", {"issue": 404})
-        self.snapshot["running"] = []
-
-        self.snapshot["running"] = [{"issue_id": "499"}]
-        self.actions.execute_internal("complete_run", {"issue": 404})
-        self.assertEqual(
-            self.lifecycle.calls,
-            [("set_status", 404, "Ready for Acceptance")],
-        )
-
     def test_internal_complete_run_marks_unfresh_control_state_retryable(self):
-        self.snapshot["sources"]["runtime"] = {"status": "unavailable"}
+        self.snapshot["sources"]["github"] = {"status": "unavailable"}
 
-        with self.assertRaisesRegex(RetryableActionError, "fresh runtime"):
+        with self.assertRaisesRegex(RetryableActionError, "fresh github"):
             self.actions.execute_internal("complete_run", {"issue": 404})
 
     def test_internal_quarantine_persists_across_owner_control_restart_before_releasing_lease(self):

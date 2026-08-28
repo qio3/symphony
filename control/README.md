@@ -85,7 +85,8 @@ authoritative intake gate, one fresh Ready-for-AI projection per dispatch cycle,
 `lease` action. A lease only adds the durable `symphony` label; it never promotes Backlog work.
 When configured control or its GitHub source is unavailable, new unleased dispatch fails closed
 while already-running workers continue. The native Phoenix page remains a runtime diagnostics
-surface.
+surface. The runtime completion callback refreshes only GitHub lifecycle state; it never calls the
+runtime observability endpoint that is waiting for that callback.
 
 The static Owner Control presentation adapts dashboard patterns from Rondo and vendors Chart.js
 locally so the localhost UI has no CDN dependency. Attribution and pinned versions are recorded in
