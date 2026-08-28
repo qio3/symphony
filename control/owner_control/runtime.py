@@ -75,24 +75,16 @@ class SnapshotService:
             return self._cached
 
     def completion_snapshot(self) -> dict[str, Any]:
-        """Read fresh GitHub lifecycle state without calling the waiting runtime."""
-        refreshed_at = datetime.now(timezone.utc).isoformat()
-        project = self._github.project_snapshot(reconcile_intake=False)
-        snapshot = self._builder.build(
-            service={},
-            intake_active=self._state_store.intake_active(),
-            worker_limit=self._state_store.worker_limit(self._worker_limit),
-            worker_max=self._worker_limit,
-            runtime=_empty_runtime(),
-            project=project,
-            canonical={},
-            test={},
-            landing=None,
-            quarantines=self._state_store.quarantines(),
-        )
-        snapshot["sources"] = {"github": _fresh_source(refreshed_at)}
-        snapshot["refreshed_at"] = refreshed_at
-        snapshot["stale"] = False
+        """Return confirmed lifecycle state and refresh sources outside the callback."""
+        snapshot = self.cached_snapshot()
+        now = time.monotonic()
+        with self._source_lock:
+            github_in_cooldown = (
+                self._github_last_error is not None and self._github_retry_at > now
+            )
+            if not github_in_cooldown:
+                self._github_cached_at = 0.0
+        self._start_refresh(force_github=not github_in_cooldown)
         return snapshot
 
     def invalidate(self) -> None:
