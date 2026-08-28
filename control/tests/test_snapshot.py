@@ -23,7 +23,7 @@ class SnapshotBuilderTest(unittest.TestCase):
         self.assertEqual([1, 2], [item["number"] for item in snapshot["owner_view"]["done"]])
         self.assertEqual(2, snapshot["counts"]["done"])
 
-    def test_projects_deterministic_release_waves_from_delivery_evidence(self):
+    def test_release_wave_contains_only_github_landing_queue_members(self):
         snapshot = SnapshotBuilder().build(
             service={"live": True},
             intake_active=True,
@@ -59,14 +59,85 @@ class SnapshotBuilderTest(unittest.TestCase):
                     },
                 ]
             },
+            landing={
+                "limit": 2,
+                "queued": [
+                    {
+                        "number": 12,
+                        "title": "CI is still running",
+                        "url": "https://github.test/pull/12",
+                        "issue_numbers": [2],
+                        "intent": "ready",
+                    }
+                ],
+                "runs": [
+                    {
+                        "id": 9001,
+                        "run_number": 28,
+                        "status": "queued",
+                        "conclusion": None,
+                        "url": "https://github.test/actions/runs/9001",
+                    }
+                ],
+            },
             canonical={"sha": "b" * 40},
             test={"sha": "b" * 40},
         )
 
         waves = snapshot["release_waves"]["waves"]
-        self.assertEqual([wave["status"] for wave in waves], ["on TEST", "waiting CI"])
-        self.assertEqual(waves[0]["issues"][0]["number"], 1)
-        self.assertEqual(waves[1]["issues"][0]["number"], 2)
+        self.assertEqual(len(waves), 1)
+        self.assertEqual(waves[0]["number"], 28)
+        self.assertEqual(waves[0]["target_prs"], 2)
+        self.assertEqual(waves[0]["ready_prs"], 1)
+        self.assertEqual([item["number"] for item in waves[0]["issues"]], [2])
+        self.assertNotIn(1, [item["number"] for item in waves[0]["issues"]])
+
+    def test_allocates_weekly_percent_by_recorded_task_credits_as_an_approximation(self):
+        snapshot = SnapshotBuilder().build(
+            service={"live": True},
+            intake_active=True,
+            worker_limit=2,
+            runtime={
+                "running": [],
+                "retrying": [],
+                "blocked": [],
+                "rate_limits": {
+                    "weekly": {
+                        "usedPercent": 20,
+                        "windowDurationMins": 10080,
+                    }
+                },
+                "issue_usage": {
+                    "1": {
+                        "aggregate": {
+                            "token_usage": {"total_tokens": 750},
+                            "estimated_usage_credits_micros": 750,
+                            "week_impact_percent": None,
+                        }
+                    },
+                    "2": {
+                        "aggregate": {
+                            "token_usage": {"total_tokens": 250},
+                            "estimated_usage_credits_micros": 250,
+                            "week_impact_percent": None,
+                        }
+                    },
+                },
+            },
+            project={
+                "items": [
+                    {"number": 1, "status": "Done", "state": "CLOSED"},
+                    {"number": 2, "status": "Ready for Acceptance", "state": "OPEN"},
+                ]
+            },
+            canonical={"sha": "a" * 40},
+            test={"sha": "a" * 40},
+        )
+
+        self.assertEqual(snapshot["issue_usage"]["1"]["week_impact_percent"], 15.0)
+        self.assertEqual(snapshot["issue_usage"]["2"]["week_impact_percent"], 5.0)
+        self.assertEqual(snapshot["issue_usage"]["1"]["week_impact_basis"], "recorded-credit-share")
+        self.assertEqual(snapshot["owner_view"]["done"][0]["usage"]["week_impact_percent"], 15.0)
 
     def test_red_canonical_ci_blocks_effective_intake_without_losing_owner_intent(self):
         snapshot = SnapshotBuilder().build(
@@ -171,9 +242,9 @@ class SnapshotBuilderTest(unittest.TestCase):
                 601: "Waiting CI",
                 602: "Waiting merge",
                 603: "Waiting TEST",
-                604: "Agent active",
-                605: "Agent active",
-                606: "Agent active",
+                604: "Coding",
+                605: "Coding",
+                606: "Coding",
                 607: "Retrying",
             },
         )

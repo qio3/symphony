@@ -22,6 +22,7 @@ class SnapshotBuilder:
         project: dict[str, Any],
         canonical: dict[str, Any],
         test: dict[str, Any],
+        landing: dict[str, Any] | None = None,
         quarantines: dict[str, Any] | None = None,
         worker_max: int | None = None,
     ) -> dict[str, Any]:
@@ -34,11 +35,13 @@ class SnapshotBuilder:
         retrying = self._runtime_by_issue(runtime.get("retrying", []))
         blocked = self._runtime_by_issue(runtime.get("blocked", []))
         system_quarantines = self._quarantines_by_issue(quarantines)
+        quota = _quota_windows(runtime.get("rate_limits"))
         issue_usage = {
             str(issue_key): self._normalize_issue_usage(value)
             for issue_key, value in (runtime.get("issue_usage") or {}).items()
             if isinstance(value, dict)
         }
+        self._allocate_week_impacts(issue_usage, quota.get("weekly"))
 
         for issue_key, entry in {**running, **retrying, **blocked}.items():
             items.setdefault(issue_key, self._runtime_only_item(issue_key, entry))
@@ -170,7 +173,13 @@ class SnapshotBuilder:
                 "done": counts["done"],
             },
         }
-        release_waves = self._release_waves(lanes)
+        release_waves = self._release_waves(
+            landing,
+            items,
+            lanes,
+            canonical,
+            normalized_test,
+        )
         return {
             "version": 1,
             "generated_at": runtime.get("generated_at") or datetime.now(timezone.utc).isoformat(),
@@ -197,7 +206,7 @@ class SnapshotBuilder:
                 ),
             },
             "models": deepcopy(runtime.get("models") or {}),
-            "quota": _quota_windows(runtime.get("rate_limits")),
+            "quota": quota,
             "counts": counts,
             "canonical": canonical,
             "test": normalized_test,
@@ -217,52 +226,165 @@ class SnapshotBuilder:
         }
 
     @staticmethod
-    def _release_waves(lanes: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
-        buckets: list[tuple[str, int, str, list[dict[str, Any]]]] = []
-        ready = lanes.get("ready_for_acceptance") or []
-        on_test = [item for item in ready if (item.get("test") or {}).get("contains_merge") is True]
-        waiting_test = [item for item in ready if item not in on_test]
-        delivery = [*(lanes.get("work_items") or []), *(lanes.get("follow_ups") or [])]
-        ready_to_land = [
-            item
-            for item in delivery
-            if item.get("pr") and str((item.get("ci") or {}).get("status") or "").casefold() == "success"
-        ]
-        waiting_ci = [item for item in delivery if item.get("pr") and item not in ready_to_land]
-        buckets.extend(
+    def _release_waves(
+        landing: dict[str, Any] | None,
+        project_items: dict[str, dict[str, Any]],
+        lanes: dict[str, list[dict[str, Any]]],
+        canonical: dict[str, Any],
+        test: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(landing, dict) or landing.get("available") is False:
+            return {"mode": "landing-valve", "available": False, "waves": [], "recent": []}
+
+        limit = landing.get("limit") if landing.get("limit") in {1, 2} else 1
+        queued = [item for item in landing.get("queued") or [] if isinstance(item, dict)]
+        runs = [item for item in landing.get("runs") or [] if isinstance(item, dict)]
+        active_run = next(
             (
-                ("on TEST", 100, "Deployed and ready for owner acceptance.", on_test),
-                ("waiting TEST", 82, "Merged work is waiting for deterministic TEST containment.", waiting_test),
-                ("ready to land", 68, "Green pull requests are queued for the next small landing wave.", ready_to_land),
-                ("waiting CI", 42, "Pull requests are waiting for required CI evidence.", waiting_ci),
-            )
+                run
+                for run in runs
+                if str(run.get("status") or "").casefold() in {"queued", "in_progress", "waiting"}
+            ),
+            None,
         )
-        waves = []
-        for status, progress, summary, items in buckets:
-            if not items:
-                continue
-            wave_items = [
-                {
-                    "number": item.get("number"),
-                    "title": item.get("title"),
-                    "url": item.get("issue_url") or item.get("url"),
-                    "pr": deepcopy(item.get("pr")),
-                    "ci": deepcopy(item.get("ci")),
-                }
-                for item in items
+        issues_by_pr = {
+            (item.get("pr") or {}).get("number"): item
+            for item in project_items.values()
+            if isinstance(item.get("pr"), dict) and (item.get("pr") or {}).get("number")
+        }
+        wave_items = []
+        for pull in queued:
+            issue_numbers = [
+                number for number in pull.get("issue_numbers") or [] if str(number) in project_items
             ]
+            if not issue_numbers and pull.get("number") in issues_by_pr:
+                issue_numbers = [issues_by_pr[pull["number"]]["number"]]
+            if not issue_numbers:
+                wave_items.append(
+                    {
+                        "number": None,
+                        "title": pull.get("title"),
+                        "url": None,
+                        "pr": deepcopy(pull),
+                        "ci": {"status": "success"},
+                    }
+                )
+                continue
+            for number in issue_numbers:
+                item = project_items[str(number)]
+                wave_items.append(
+                    {
+                        "number": item.get("number"),
+                        "title": item.get("title"),
+                        "url": item.get("issue_url") or item.get("url"),
+                        "pr": {**deepcopy(pull), "url": pull.get("url")},
+                        "ci": {"status": "success"},
+                        "usage": deepcopy(item.get("usage")),
+                    }
+                )
+
+        canonical_ci = str(((canonical.get("ci") or {}).get("status") or "unknown")).casefold()
+        if active_run is not None:
+            status, progress, summary = (
+                "landing",
+                58,
+                "The fixed GitHub landing valve is processing the queued pull requests.",
+            )
+        elif canonical_ci in {"pending", "queued", "in_progress", "waiting"}:
+            status, progress, summary = (
+                "wave CI",
+                72,
+                "Queued pull requests are waiting for the current canonical CI gate.",
+            )
+        elif canonical_ci == "failure":
+            status, progress, summary = (
+                "blocked",
+                72,
+                "Canonical CI is failing; the landing valve remains fail closed.",
+            )
+        elif canonical.get("sha") and test.get("sha") and canonical.get("sha") != test.get("sha"):
+            status, progress, summary = (
+                "waiting TEST",
+                88,
+                "The landed canonical SHA is waiting for exact-SHA TEST delivery.",
+            )
+        else:
+            status, progress, summary = (
+                "collecting",
+                min(50, round(50 * len(queued) / limit)),
+                f"{len(queued)} of {limit} pull requests are queued in the deterministic landing valve.",
+            )
+
+        waves = []
+        if queued or active_run is not None:
+            run_number = (active_run or (runs[0] if runs else {})).get("run_number")
             waves.append(
                 {
-                    "number": len(waves) + 1,
+                    "number": run_number,
                     "status": status,
-                    "ready_prs": sum(1 for item in items if item.get("pr")),
-                    "target_prs": 4,
+                    "ready_prs": len(queued),
+                    "target_prs": limit,
                     "progress_percent": progress,
                     "summary": summary,
                     "issues": wave_items,
+                    "run": deepcopy(active_run),
                 }
             )
-        return {"mode": "small-waves", "waves": waves}
+
+        candidates = []
+        queued_prs = {pull.get("number") for pull in queued}
+        for item in [*(lanes.get("work_items") or []), *(lanes.get("follow_ups") or [])]:
+            pr = item.get("pr") or {}
+            if pr.get("number") in queued_prs:
+                continue
+            if pr.get("number"):
+                candidates.append(
+                    {
+                        "number": item.get("number"),
+                        "title": item.get("title"),
+                        "url": item.get("issue_url") or item.get("url"),
+                        "pr": deepcopy(pr),
+                        "ci": deepcopy(item.get("ci")),
+                        "phase": item.get("display_phase") or item.get("stage"),
+                        "usage": deepcopy(item.get("usage")),
+                    }
+                )
+
+        recent = [
+            run
+            for run in runs
+            if str(run.get("status") or "").casefold() == "completed"
+        ][:5]
+        return {
+            "mode": "landing-valve",
+            "available": True,
+            "limit": limit,
+            "waves": waves,
+            "candidates": candidates,
+            "recent": recent,
+        }
+
+    @staticmethod
+    def _allocate_week_impacts(
+        issue_usage: dict[str, dict[str, Any]], weekly: dict[str, Any] | None
+    ) -> None:
+        used = weekly.get("used_percent") if isinstance(weekly, dict) else None
+        if not isinstance(used, (int, float)) or used < 0:
+            return
+        credits = {
+            key: value.get("estimated_credits_micros")
+            for key, value in issue_usage.items()
+            if isinstance(value.get("estimated_credits_micros"), int)
+            and value.get("estimated_credits_micros") > 0
+        }
+        total = sum(credits.values())
+        if total <= 0:
+            return
+        for key, value in credits.items():
+            if issue_usage[key].get("week_impact_percent") is not None:
+                continue
+            issue_usage[key]["week_impact_percent"] = round(used * value / total, 2)
+            issue_usage[key]["week_impact_basis"] = "recorded-credit-share"
 
     @staticmethod
     def _project_item(item: dict[str, Any]) -> dict[str, Any]:
@@ -314,17 +436,17 @@ class SnapshotBuilder:
     def _display_phase(item: dict[str, Any]) -> str:
         pr = item.get("pr")
         if not isinstance(pr, dict):
-            return "Agent active"
+            return "Coding"
 
         if pr.get("merged") is True:
             test = item.get("test")
             if not isinstance(test, dict) or test.get("contains_merge") is not True:
                 return "Waiting TEST"
-            return "Agent active"
+            return "Coding"
 
         state = str(pr.get("state") or "").casefold()
         if state not in {"", "open"}:
-            return "Agent active"
+            return "Coding"
 
         ci = item.get("ci")
         ci_status = str(ci.get("status") or "").casefold() if isinstance(ci, dict) else ""
@@ -332,7 +454,7 @@ class SnapshotBuilder:
             return "Waiting CI"
         if ci_status == "success":
             return "Waiting merge"
-        return "Agent active"
+        return "Coding"
 
     @staticmethod
     def _with_system_quarantine(item: dict[str, Any], quarantine: dict[str, Any]) -> dict[str, Any]:

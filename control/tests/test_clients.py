@@ -96,6 +96,60 @@ def project_response():
 
 
 class GitHubClientTest(unittest.TestCase):
+    def test_landing_snapshot_uses_valve_labels_and_configured_limit(self):
+        transport = FakeTransport(
+            [
+                {"name": "LANDING_WAVE_LIMIT", "value": "2"},
+                [
+                    {
+                        "number": 683,
+                        "title": "Ready task",
+                        "html_url": "https://github.test/pull/683",
+                        "body": "Closes #524",
+                        "head": {"sha": "a" * 40},
+                        "labels": [{"name": "landing:ready"}],
+                        "mergeable_state": "clean",
+                    },
+                    {
+                        "number": 687,
+                        "title": "Still in PR CI",
+                        "html_url": "https://github.test/pull/687",
+                        "body": "Closes #525",
+                        "head": {"sha": "b" * 40},
+                        "labels": [],
+                        "mergeable_state": "blocked",
+                    },
+                ],
+                {
+                    "workflow_runs": [
+                        {
+                            "id": 9001,
+                            "run_number": 28,
+                            "status": "in_progress",
+                            "conclusion": None,
+                            "html_url": "https://github.test/actions/runs/9001",
+                            "head_sha": "c" * 40,
+                            "created_at": "2026-08-28T09:00:00Z",
+                        }
+                    ]
+                },
+            ]
+        )
+        client = GitHubClient(
+            token="token",
+            repository="qio3/zavod",
+            project_id="project-id",
+            transport=transport,
+        )
+
+        landing = client.landing_snapshot()
+
+        self.assertEqual(landing["limit"], 2)
+        self.assertEqual([pull["number"] for pull in landing["queued"]], [683])
+        self.assertEqual(landing["queued"][0]["issue_numbers"], [524])
+        self.assertEqual(landing["runs"][0]["run_number"], 28)
+        self.assertEqual(landing["runs"][0]["status"], "in_progress")
+
     def test_canonical_includes_deterministic_check_run_health(self):
         transport = FakeTransport([
             {"object": {"sha": "canonical-sha"}},

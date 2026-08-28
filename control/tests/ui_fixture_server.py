@@ -43,19 +43,36 @@ SNAPSHOT = {
         {"recorded_at": "2026-08-24T09:30:00Z", "counts": {"ready_for_ai": 2, "running": 2, "blocked": 1, "ready_for_acceptance": 1, "done": 18}, "workers": {"running": 2, "limit": 5}},
     ],
     "release_waves": {
+        "mode": "landing-valve",
+        "available": True,
+        "limit": 2,
         "waves": [
-            {"number": 28, "status": "testing", "ready_prs": 3, "target_prs": 4, "progress_percent": 78, "summary": "Canonical CI is running for the active release wave."},
-            {"number": 29, "status": "queued", "ready_prs": 4, "target_prs": 4, "progress_percent": 100, "summary": "Queued behind wave #28."},
-            {"number": 30, "status": "forming", "ready_prs": 2, "target_prs": 4, "progress_percent": 50, "summary": "Collecting two more compatible PRs."},
-        ]
+            {
+                "number": 28,
+                "status": "collecting",
+                "ready_prs": 1,
+                "target_prs": 2,
+                "progress_percent": 25,
+                "summary": "1 of 2 pull requests is queued in the deterministic landing valve.",
+                "issues": [
+                    {"number": 401, "title": "Stabilize article publishing", "url": "https://github.test/issues/401", "pr": {"number": 421}, "ci": {"status": "success"}, "usage": {"week_impact_percent": 0.7}},
+                ],
+            },
+        ],
+        "candidates": [
+            {"number": 402, "title": "Add owner-safe delivery evidence", "url": "https://github.test/issues/402", "phase": "Coding", "usage": {"week_impact_percent": 0.2}},
+        ],
+        "recent": [
+            {"id": 2700, "run_number": 27, "status": "completed", "conclusion": "success", "url": "https://github.test/actions/runs/2700", "head_sha": "be44cf15a1234567", "created_at": "2026-08-24T08:45:00Z"},
+        ],
     },
     "infrastructure": {
         "queued_jobs": 3,
         "alerts": 0,
         "hosts": [
-            {"name": "Local Symphony", "kind": "local", "cpu_percent": 31, "memory_percent": 48, "runners_busy": 0, "runners_total": 0, "jobs": [{"issue": 401, "name": "Terra session"}]},
-            {"name": "CI_1", "kind": "ci", "cpu_percent": 57, "memory_percent": 62, "runners_busy": 3, "runners_total": 3, "jobs": [{"issue": 401, "name": "Backend"}, {"issue": 402, "name": "Frontend"}]},
-            {"name": "CI_2", "kind": "ci", "cpu_percent": 84, "memory_percent": 71, "runners_busy": 4, "runners_total": 5, "jobs": [{"issue": 399, "name": "E2E"}]},
+            {"name": "Local Symphony", "kind": "local", "status": "online", "cpu_percent": 31, "memory_percent": 48, "runners_busy": 0, "runners_online": 0, "runners_total": 0, "jobs": [{"issue": 401, "name": "Terra session"}]},
+            {"name": "CI_1", "kind": "ci", "status": "online", "cpu_percent": 57, "memory_percent": 62, "runners_busy": 2, "runners_online": 3, "runners_total": 3, "jobs": [{"issue": 401, "name": "Backend"}, {"issue": 402, "name": "Frontend"}]},
+            {"name": "CI_2", "kind": "ci", "status": "online", "cpu_percent": 84, "memory_percent": 71, "runners_busy": 2, "runners_online": 3, "runners_total": 3, "jobs": [{"issue": 399, "name": "E2E"}]},
         ],
         "history": [
             {"recorded_at": "2026-08-24T08:30:00Z", "hosts": {"Local Symphony": {"cpu_percent": 12, "memory_percent": 41}, "CI_1": {"cpu_percent": 24, "memory_percent": 46}, "CI_2": {"cpu_percent": 38, "memory_percent": 58}}},
@@ -115,8 +132,8 @@ SNAPSHOT = {
                 "number": 402,
                 "title": "Add owner-safe delivery evidence",
                 "issue_url": "https://github.test/issues/402",
-                "stage": "Reviewing CI",
-                "display_phase": "Waiting merge",
+                "stage": "Implementing",
+                "display_phase": "Coding",
                 "status": "running",
                 "started_at": "2026-08-24T09:18:00Z",
                 "turn_count": 3,
