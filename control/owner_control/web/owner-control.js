@@ -679,7 +679,7 @@ function renderInfrastructureChart(snapshot) {
   const signature = JSON.stringify([historyRange, labels, datasets.map((item) => item.data), document.documentElement.dataset.theme]);
   if (signature === infrastructureChartSignature) return;
   infrastructureChart?.destroy();
-  infrastructureChart = new Chart(canvas, { type: "line", data: { labels, datasets }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 100 } }, plugins: { legend: { position: "bottom" } } } });
+  infrastructureChart = new Chart(canvas, { type: "line", data: { labels, datasets }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, suggestedMax: 100 } }, plugins: { legend: { position: "bottom" } } } });
   infrastructureChartSignature = signature;
 }
 
