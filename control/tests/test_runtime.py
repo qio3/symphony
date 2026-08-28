@@ -163,6 +163,26 @@ class ToggleGitHub(FakeGitHub):
         }
 
 
+class RestLandingDuringProjectFailure(ToggleGitHub):
+    def __init__(self):
+        super().__init__()
+        self.landing_ready = False
+
+    def landing_snapshot(self):
+        return {
+            "limit": 2,
+            "queued": [
+                {
+                    "number": 700,
+                    "title": "Ready landing PR",
+                    "url": "https://github.test/pull/700",
+                    "issue_numbers": [401],
+                }
+            ] if self.landing_ready else [],
+            "runs": [],
+        }
+
+
 class ToggleSymphony(FakeSymphony):
     def __init__(self):
         self.fail = False
@@ -1143,6 +1163,29 @@ class SnapshotServiceTest(unittest.TestCase):
         self.assertTrue(stale["stale"])
         self.assertEqual(stale["sources"]["github"]["status"], "stale")
         self.assertIn("temporary GitHub outage", stale["sources"]["github"]["error"])
+
+    def test_rest_landing_queue_remains_visible_when_project_graphql_is_stale(self):
+        github = RestLandingDuringProjectFailure()
+        with tempfile.TemporaryDirectory() as directory:
+            service = SnapshotService(
+                symphony=FakeSymphony(),
+                github=github,
+                test_environment=FakeTest(),
+                supervisor=FakeSupervisor(),
+                state_store=StateStore(Path(directory) / "state.json"),
+                worker_limit=2,
+                canonical_ref="main",
+            )
+            service.snapshot(fresh=True)
+            github.fail = True
+            github.landing_ready = True
+
+            stale = service.snapshot(fresh=True)
+
+        self.assertEqual(stale["sources"]["github"]["status"], "stale")
+        self.assertTrue(stale["release_waves"]["available"])
+        self.assertEqual(stale["release_waves"]["limit"], 2)
+        self.assertEqual(stale["release_waves"]["waves"][0]["issues"][0]["number"], 401)
 
     def test_runtime_restart_does_not_turn_a_running_container_or_counters_into_down_zeroes(self):
         symphony = ToggleSymphony()

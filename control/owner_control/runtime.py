@@ -499,16 +499,35 @@ class SnapshotService:
         self,
         refreshed_at: str,
     ) -> tuple[dict[str, Any], dict[str, Any], Exception | None]:
+        landing_reader = getattr(self._github, "landing_snapshot", None)
         try:
-            landing_reader = getattr(self._github, "landing_snapshot", None)
+            landing = (
+                landing_reader()
+                if callable(landing_reader)
+                else {"available": False, "limit": 1, "queued": [], "runs": []}
+            )
+        except Exception as landing_error:
+            stored = self._stored_source("github")
+            stored_value = stored.get("value") if isinstance(stored, dict) else None
+            stored_landing = (
+                stored_value.get("landing") if isinstance(stored_value, dict) else None
+            )
+            landing = (
+                {**deepcopy(stored_landing), "stale": True, "error": str(landing_error)}
+                if isinstance(stored_landing, dict)
+                else {
+                    "available": False,
+                    "limit": 1,
+                    "queued": [],
+                    "runs": [],
+                    "error": str(landing_error),
+                }
+            )
+        try:
             value = {
                 "project": self._github.project_snapshot(reconcile_intake=True),
                 "canonical": self._github.canonical(self._canonical_ref),
-                "landing": (
-                    landing_reader()
-                    if callable(landing_reader)
-                    else {"available": False, "limit": 1, "queued": [], "runs": []}
-                ),
+                "landing": landing,
             }
         except Exception as error:
             with self._source_lock:
@@ -520,6 +539,7 @@ class SnapshotService:
                 self._empty_github(),
                 error,
             )
+            stale["landing"] = landing
             return stale, source, error
 
         changed = self._remember_source("github", value, refreshed_at)
