@@ -2,6 +2,7 @@
 
 const THEME_STORAGE_KEY = "owner-control-v5-theme";
 const TABLE_PAGE_SIZE = 12;
+const coreSourceNames = new Set(["supervisor", "runtime", "github", "test"]);
 const csrf = document.querySelector('meta[name="owner-control-csrf"]').content;
 const runtimeUrl = document.querySelector('meta[name="runtime-diagnostics-url"]').content;
 const app = document.getElementById("app");
@@ -231,9 +232,17 @@ function render(snapshot, options = {}) {
   renderedSignature = signature;
 }
 
+function coreStaleSources(snapshot) {
+  const sources = Object.entries(snapshot.sources || {});
+  const coreSources = sources.filter(([name]) => coreSourceNames.has(name));
+  const staleSources = coreSources.filter(([, value]) => value?.status !== "fresh");
+  if (!coreSources.length && snapshot.stale) return [["source", { status: "stale" }]];
+  return staleSources;
+}
+
 function renderFreshness(snapshot) {
-  const staleSources = Object.entries(snapshot.sources || {}).filter(([, value]) => value?.status !== "fresh");
-  const stale = Boolean(snapshot.stale || staleSources.length);
+  const staleSources = coreStaleSources(snapshot);
+  const stale = staleSources.length > 0;
   const refreshedAt = snapshot.refreshed_at || snapshot.generated_at;
   snapshotStatus.textContent = stale ? `Stale · ${relativeTime(refreshedAt)}` : `Updated ${relativeTime(refreshedAt)}`;
   snapshotStatus.className = `status-chip ${stale ? "is-stale" : "is-live"}`;
@@ -412,7 +421,7 @@ function renderOverview(snapshot) {
   document.getElementById("nav-quarantine").textContent = number(counts.quarantined);
 
   clear(targets.overviewCounters);
-  const stale = Boolean(snapshot.stale || Object.values(snapshot.sources || {}).some((source) => source?.status !== "fresh"));
+  const stale = coreStaleSources(snapshot).length > 0;
   overviewHistoryState.classList.toggle("is-stale", stale);
   overviewHistoryState.textContent = stale ? "Last confirmed" : "Live";
   overviewHistoryState.prepend(icon(stale ? "history" : "radio"));

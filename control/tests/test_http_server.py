@@ -276,6 +276,8 @@ class ControlHttpServerTest(unittest.TestCase):
         self.assertIn("function workStageKey", javascript)
         self.assertIn('phase.includes("merge")', javascript)
         self.assertIn('return "landing"', javascript)
+        self.assertIn('const coreSourceNames = new Set(["supervisor", "runtime", "github", "test"])', javascript)
+        self.assertIn("coreStaleSources", javascript)
 
     def test_service_action_menu_stacks_above_service_facts(self):
         with self.request("/assets/owner-control.css", authorized=False) as response:
