@@ -312,6 +312,7 @@ class SnapshotService:
                 hosts.extend(remote_hosts)
                 queued_jobs = int(remote.get("queued_jobs") or 0)
                 alerts += int(remote.get("alerts") or 0)
+                stale = stale or bool(remote.get("stale"))
                 self._state_store.update(
                     {
                         "last_remote_infrastructure": {

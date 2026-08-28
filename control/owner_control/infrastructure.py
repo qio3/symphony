@@ -78,13 +78,13 @@ class InfrastructureClient:
 
     def _collect(self) -> dict[str, Any]:
         alerts = 0
-        runners: dict[str, dict[str, Any]] = {}
-        jobs: dict[str, list[dict[str, Any]]] = {}
-        queued_jobs = 0
-        try:
-            runners, jobs, queued_jobs = self._github_state()
-        except Exception:
-            alerts += 1
+        stale = False
+        runners, jobs, queued_jobs = self._github_state()
+        cached_hosts = {
+            str(host.get("name")): host
+            for host in ((self._cached or {}).get("hosts") or [])
+            if isinstance(host, dict) and host.get("name")
+        }
 
         hosts: list[dict[str, Any]] = []
         for configured in self._hosts:
@@ -102,13 +102,23 @@ class InfrastructureClient:
                 metrics = self._host_metrics(configured)
                 status = "online"
             except Exception:
-                metrics = {
-                    "cpu_percent": None,
-                    "memory_percent": None,
-                    "memory_usage": None,
-                }
-                status = "degraded" if host_runners else "unavailable"
+                previous = cached_hosts.get(configured["name"])
+                if isinstance(previous, dict) and previous.get("cpu_percent") is not None:
+                    metrics = {
+                        "cpu_percent": previous.get("cpu_percent"),
+                        "memory_percent": previous.get("memory_percent"),
+                        "memory_usage": previous.get("memory_usage"),
+                    }
+                    status = "stale"
+                else:
+                    metrics = {
+                        "cpu_percent": None,
+                        "memory_percent": None,
+                        "memory_usage": None,
+                    }
+                    status = "degraded" if host_runners else "unavailable"
                 alerts += 1
+                stale = True
             hosts.append(
                 {
                     "name": configured["name"],
@@ -120,7 +130,12 @@ class InfrastructureClient:
                     "jobs": host_jobs,
                 }
             )
-        return {"hosts": hosts, "queued_jobs": queued_jobs, "alerts": alerts}
+        return {
+            "hosts": hosts,
+            "queued_jobs": queued_jobs,
+            "alerts": alerts,
+            "stale": stale,
+        }
 
     def _github_state(
         self,
@@ -133,12 +148,19 @@ class InfrastructureClient:
             for runner in runner_value.get("runners") or []
             if isinstance(runner, dict) and runner.get("name")
         }
-        run_value = self._gh_api(
-            f"repos/{self._repository}/actions/runs?status=in_progress&per_page=30"
-        )
         jobs: dict[str, list[dict[str, Any]]] = {}
         queued_jobs = 0
-        for run in run_value.get("workflow_runs") or []:
+        workflow_runs: list[dict[str, Any]] = []
+        for status in ("in_progress", "queued"):
+            run_value = self._gh_api(
+                f"repos/{self._repository}/actions/runs?status={status}&per_page=30"
+            )
+            workflow_runs.extend(
+                run
+                for run in (run_value.get("workflow_runs") or [])
+                if isinstance(run, dict)
+            )
+        for run in workflow_runs:
             if not isinstance(run, dict) or run.get("id") is None:
                 continue
             issue = _issue_number(run)
