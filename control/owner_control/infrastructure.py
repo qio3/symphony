@@ -83,7 +83,16 @@ class InfrastructureClient:
             if cached is None:
                 reason = str(self._last_error) if self._last_error else "loading"
                 raise RuntimeError(f"infrastructure metrics are {reason}")
-            return deepcopy(cached)
+            result = deepcopy(cached)
+            if expired or self._refreshing or self._last_error is not None:
+                result["stale"] = True
+                result["alerts"] = int(result.get("alerts") or 0) + 1
+                for host in result.get("hosts") or []:
+                    if isinstance(host, dict) and str(
+                        host.get("status") or "online"
+                    ).casefold() == "online":
+                        host["status"] = "stale"
+            return result
 
     def _refresh(self) -> None:
         with self._lock:

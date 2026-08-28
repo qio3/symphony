@@ -61,12 +61,15 @@ class InfrastructureClientTest(unittest.TestCase):
                 config_path=config_path,
                 repository="qio3/zavod",
                 runner=runner,
-                cache_seconds=0,
+                cache_seconds=0.01,
             )
             wait_snapshot(client)
+            time.sleep(0.02)
             fail_ssh = True
 
-            stale = wait_snapshot(client, lambda value: value.get("stale") is True)
+            wait_snapshot(client, lambda value: value.get("stale") is True)
+            time.sleep(0.05)
+            stale = client.snapshot()
 
         self.assertTrue(stale["stale"])
         self.assertEqual(stale["hosts"][0]["status"], "stale")
@@ -101,7 +104,7 @@ class InfrastructureClientTest(unittest.TestCase):
                 config_path=config_path,
                 repository="qio3/zavod",
                 runner=runner,
-                cache_seconds=0,
+                cache_seconds=60,
             )
 
             started_at = time.monotonic()
@@ -228,7 +231,7 @@ class InfrastructureClientTest(unittest.TestCase):
                 config_path=config_path,
                 repository="qio3/zavod",
                 runner=runner,
-                cache_seconds=0,
+                cache_seconds=60,
             )
 
             snapshot = wait_snapshot(client)
