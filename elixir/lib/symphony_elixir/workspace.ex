@@ -9,6 +9,7 @@ defmodule SymphonyElixir.Workspace do
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
 
   @type worker_host :: String.t() | nil
+  @type recovery_action :: {:rebuild, Path.t()} | {:already_integrated, Path.t()}
 
   @spec create_for_issue(map() | String.t() | nil, worker_host()) ::
           {:ok, Path.t()} | {:error, term()}
@@ -215,6 +216,160 @@ defmodule SymphonyElixir.Workspace do
   end
 
   def remove_issue_workspaces(_identifier, _worker_host), do: :ok
+
+  @doc """
+  Preserves a failed issue workspace before allowing one clean bootstrap.
+
+  Automatic recovery is limited to invalid Git workspaces that contain no
+  user files. Anything ambiguous fails closed and leaves the active path
+  untouched.
+  """
+  @spec recover_issue_workspace(map() | String.t()) ::
+          {:ok, recovery_action()} | {:error, term()}
+  def recover_issue_workspace(issue_or_identifier) do
+    recover_issue_workspace(issue_or_identifier, nil)
+  end
+
+  @spec recover_issue_workspace(map() | String.t(), worker_host()) ::
+          {:ok, recovery_action()} | {:error, term()}
+  def recover_issue_workspace(issue_or_identifier, nil) do
+    workspace_root = Config.local_workspace_root()
+
+    with {:ok, workspace} <- workspace_path_for_issue(workspace_key(issue_or_identifier), nil),
+         :ok <- validate_workspace_path(workspace, nil) do
+      recover_local_workspace(workspace, workspace_root)
+    end
+  end
+
+  def recover_issue_workspace(issue_or_identifier, worker_host) when is_binary(worker_host) do
+    with {:ok, workspace} <-
+           workspace_path_for_issue(workspace_key(issue_or_identifier), worker_host) do
+      {:error, {:workspace_preservation_required, workspace, "automatic recovery is unavailable for remote workspaces"}}
+    end
+  end
+
+  defp recover_local_workspace(workspace, workspace_root) do
+    cond do
+      not File.exists?(workspace) ->
+        {:ok, {:rebuild, workspace}}
+
+      valid_local_git_repository?(workspace) ->
+        inspect_local_git_workspace(workspace)
+
+      local_workspace_has_user_files?(workspace) ->
+        {:error, {:workspace_preservation_required, workspace, "invalid Git workspace contains user files"}}
+
+      true ->
+        archive_local_workspace(workspace, workspace_root)
+    end
+  end
+
+  defp inspect_local_git_workspace(workspace) do
+    case local_git_output(workspace, ["status", "--porcelain=v1", "--untracked-files=all"]) do
+      {:ok, status} when status == "" ->
+        inspect_local_git_commits(workspace)
+
+      {:ok, _dirty_status} ->
+        {:error, {:workspace_preservation_required, workspace, "workspace has uncommitted or untracked changes"}}
+
+      {:error, reason} ->
+        {:error, {:workspace_preservation_required, workspace, "could not inspect workspace changes: #{inspect(reason)}"}}
+    end
+  end
+
+  defp inspect_local_git_commits(workspace) do
+    with {:ok, canonical_ref} <- local_canonical_remote_ref(workspace),
+         {:ok, cherry} <- local_git_output(workspace, ["cherry", canonical_ref, "HEAD"]) do
+      unique_commits? =
+        cherry
+        |> String.split("\n", trim: true)
+        |> Enum.any?(&String.starts_with?(&1, "+ "))
+
+      if unique_commits? do
+        {:error, {:workspace_preservation_required, workspace, "workspace has unique commits not contained in #{canonical_ref}"}}
+      else
+        {:ok, {:already_integrated, workspace}}
+      end
+    else
+      {:error, reason} ->
+        {:error, {:workspace_preservation_required, workspace, "could not compare workspace with canonical: #{inspect(reason)}"}}
+    end
+  end
+
+  defp local_canonical_remote_ref(workspace) do
+    case local_git_output(workspace, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]) do
+      {:ok, ref} ->
+        {:ok, String.trim(ref)}
+
+      {:error, _reason} ->
+        local_origin_remote_ref(workspace)
+    end
+  end
+
+  defp local_origin_remote_ref(workspace) do
+    case local_git_output(workspace, [
+           "for-each-ref",
+           "--format=%(refname)",
+           "refs/remotes/origin"
+         ]) do
+      {:ok, refs} ->
+        refs
+        |> String.split("\n", trim: true)
+        |> Enum.reject(&(&1 == "refs/remotes/origin/HEAD"))
+        |> canonical_ref_from_candidates()
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp canonical_ref_from_candidates([canonical_ref]), do: {:ok, canonical_ref}
+  defp canonical_ref_from_candidates([]), do: {:error, :canonical_remote_ref_missing}
+  defp canonical_ref_from_candidates(_many), do: {:error, :canonical_remote_ref_ambiguous}
+
+  defp local_git_output(workspace, args) do
+    case System.cmd("git", ["-C", workspace | args], stderr_to_stdout: true) do
+      {output, 0} -> {:ok, output}
+      {output, status} -> {:error, {:git_failed, status, String.trim(output)}}
+    end
+  rescue
+    error -> {:error, {:git_unavailable, Exception.message(error)}}
+  end
+
+  defp valid_local_git_repository?(workspace) do
+    case local_git_output(workspace, ["rev-parse", "--is-inside-work-tree"]) do
+      {:ok, output} -> String.trim(output) == "true"
+      {:error, _reason} -> false
+    end
+  end
+
+  defp local_workspace_has_user_files?(workspace) do
+    case File.ls(workspace) do
+      {:ok, entries} -> Enum.any?(entries, &(&1 != ".git"))
+      {:error, _reason} -> true
+    end
+  end
+
+  defp archive_local_workspace(workspace, workspace_root) do
+    quarantine_root =
+      Path.join(Path.dirname(workspace_root), Path.basename(workspace_root) <> "-quarantine")
+
+    timestamp =
+      DateTime.utc_now()
+      |> DateTime.to_iso8601(:basic)
+      |> String.replace(~r/[^0-9TZ]/, "")
+
+    archived_workspace =
+      Path.join(
+        quarantine_root,
+        "#{Path.basename(workspace)}-#{timestamp}-#{System.unique_integer([:positive])}"
+      )
+
+    with :ok <- File.mkdir_p(quarantine_root),
+         :ok <- File.rename(workspace, archived_workspace) do
+      {:ok, {:rebuild, archived_workspace}}
+    end
+  end
 
   @spec run_before_run_hook(Path.t(), map() | String.t() | nil, worker_host()) ::
           :ok | {:error, term()}
