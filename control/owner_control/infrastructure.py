@@ -161,6 +161,10 @@ class InfrastructureClient:
                     "status": status,
                     **metrics,
                     "runners_busy": sum(bool(runner.get("busy")) for runner in host_runners),
+                    "runners_online": sum(
+                        str(runner.get("status") or "").casefold() == "online"
+                        for runner in host_runners
+                    ),
                     "runners_total": len(host_runners),
                     "jobs": host_jobs,
                 }

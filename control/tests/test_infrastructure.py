@@ -258,6 +258,7 @@ class InfrastructureClientTest(unittest.TestCase):
                 "memory_percent": 62.25,
                 "memory_usage": "9.9 / 16.0 GiB",
                 "runners_busy": 1,
+                "runners_online": 2,
                 "runners_total": 2,
                 "jobs": [
                     {

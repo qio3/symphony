@@ -142,7 +142,8 @@ class ControlHttpServerTest(unittest.TestCase):
             'data-history-range="3d"',
             'id="overview-status-chart"',
             'id="overview-history-state"',
-            'id="infrastructure-chart"',
+            'id="infrastructure-detail"',
+            'id="infrastructure-hosts"',
         ):
             self.assertIn(token, html)
 
@@ -259,8 +260,11 @@ class ControlHttpServerTest(unittest.TestCase):
         self.assertIn("snapshot.release_waves", javascript)
         self.assertIn("snapshot.infrastructure", javascript)
         self.assertIn('memory_percent', javascript)
-        self.assertIn('borderDash', javascript)
-        self.assertIn("Release wave data unavailable", javascript)
+        self.assertIn('function selectInfrastructureHost', javascript)
+        self.assertIn('infrastructure-cpu-chart', javascript)
+        self.assertIn('infrastructure-memory-chart', javascript)
+        self.assertIn('fill: true', javascript)
+        self.assertIn("Landing valve unavailable", javascript)
         self.assertIn("Infrastructure metrics unavailable", javascript)
         self.assertIn('["running", "Active"', javascript)
         self.assertIn('"Waiting delivery"', javascript)

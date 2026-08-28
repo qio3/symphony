@@ -157,6 +157,78 @@ class GitHubClient:
             "ci": _canonical_ci(check_runs),
         }
 
+    def landing_snapshot(self) -> dict[str, Any]:
+        """Read the existing GitHub-native landing valve without controlling it."""
+        limit = 1
+        try:
+            variable = self._rest(
+                "GET",
+                f"/repos/{self._repository}/actions/variables/LANDING_WAVE_LIMIT",
+            )
+            configured = int(variable.get("value") or 1)
+            if configured in {1, 2}:
+                limit = configured
+        except (RuntimeError, TypeError, ValueError):
+            # The workflow itself defaults to one when the Actions variable is absent.
+            limit = 1
+
+        pulls = self._rest_value(
+            "GET", f"/repos/{self._repository}/pulls?state=open&per_page=100"
+        )
+        if not isinstance(pulls, list):
+            raise RuntimeError("GitHub pull request response returned a non-list payload")
+        queued = []
+        for pull in pulls:
+            if not isinstance(pull, dict):
+                continue
+            labels = {
+                str(label.get("name") or "")
+                for label in pull.get("labels") or []
+                if isinstance(label, dict)
+            }
+            intent = (
+                "recovery"
+                if "landing:recovery" in labels
+                else "ready"
+                if "landing:ready" in labels
+                else None
+            )
+            if intent is None:
+                continue
+            queued.append(
+                {
+                    "number": pull.get("number"),
+                    "title": pull.get("title"),
+                    "url": pull.get("html_url"),
+                    "head_sha": (pull.get("head") or {}).get("sha"),
+                    "mergeable_state": pull.get("mergeable_state"),
+                    "intent": intent,
+                    "issue_numbers": _closing_issue_numbers(pull.get("body")),
+                }
+            )
+
+        runs_response = self._rest(
+            "GET",
+            f"/repos/{self._repository}/actions/workflows/landing-valve.yml/runs?per_page=10",
+        )
+        runs = []
+        for run in runs_response.get("workflow_runs") or []:
+            if not isinstance(run, dict):
+                continue
+            runs.append(
+                {
+                    "id": run.get("id"),
+                    "run_number": run.get("run_number"),
+                    "status": run.get("status"),
+                    "conclusion": run.get("conclusion"),
+                    "url": run.get("html_url"),
+                    "head_sha": run.get("head_sha"),
+                    "created_at": run.get("created_at"),
+                    "updated_at": run.get("updated_at"),
+                }
+            )
+        return {"limit": limit, "queued": queued, "runs": runs}
+
     def commit_contains(self, deployed_sha: str, merge_sha: str) -> bool:
         if not deployed_sha or not merge_sha:
             return False
@@ -467,6 +539,13 @@ _PROJECT_WORKFLOW_CONFIRM_SECONDS = 0.5
 _OWNER_GATE_FIELD = re.compile(
     r"(?ims)^###\s*Пригодность\s*\r?\n+(?P<answer>.*?)(?=^###\s|\Z)"
 )
+_CLOSING_ISSUE = re.compile(
+    r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+(?:qio3/zavod)?#(\d+)"
+)
+
+
+def _closing_issue_numbers(body: Any) -> list[int]:
+    return list(dict.fromkeys(int(value) for value in _CLOSING_ISSUE.findall(str(body or ""))))
 
 
 def _issue_labels(issue: dict[str, Any]) -> list[str]:

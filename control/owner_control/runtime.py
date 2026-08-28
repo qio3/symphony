@@ -211,6 +211,7 @@ class SnapshotService:
         )
         project = github_value["project"]
         canonical = github_value["canonical"]
+        landing = github_value.get("landing")
         if github_error is not None:
             failures.append(_source_failure("github", github_error))
 
@@ -238,6 +239,7 @@ class SnapshotService:
             project=project,
             canonical=canonical,
             test=test,
+            landing=landing,
             quarantines=self._state_store.quarantines(),
         )
         snapshot["failures"] = failures
@@ -498,9 +500,15 @@ class SnapshotService:
         refreshed_at: str,
     ) -> tuple[dict[str, Any], dict[str, Any], Exception | None]:
         try:
+            landing_reader = getattr(self._github, "landing_snapshot", None)
             value = {
                 "project": self._github.project_snapshot(reconcile_intake=True),
                 "canonical": self._github.canonical(self._canonical_ref),
+                "landing": (
+                    landing_reader()
+                    if callable(landing_reader)
+                    else {"available": False, "limit": 1, "queued": [], "runs": []}
+                ),
             }
         except Exception as error:
             with self._source_lock:
@@ -527,6 +535,7 @@ class SnapshotService:
         return {
             "project": {"items": []},
             "canonical": {"sha": None, "url": None, "ref": self._canonical_ref},
+            "landing": {"available": False, "limit": 1, "queued": [], "runs": []},
         }
 
     @staticmethod

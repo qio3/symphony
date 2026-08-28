@@ -61,8 +61,10 @@ let workChart = null;
 let workChartSignature = null;
 let overviewChart = null;
 let overviewChartSignature = null;
-let infrastructureChart = null;
+let infrastructureCpuChart = null;
+let infrastructureMemoryChart = null;
 let infrastructureChartSignature = null;
+let selectedInfrastructureHost = null;
 const actionErrors = new Map();
 
 const targets = {
@@ -81,6 +83,7 @@ const targets = {
   waves: document.getElementById("waves-content"),
   infrastructureCounters: document.getElementById("infrastructure-counters"),
   infrastructureHosts: document.getElementById("infrastructure-hosts"),
+  infrastructureDetail: document.getElementById("infrastructure-detail"),
   needsOwner: document.getElementById("needs-owner-content"),
   quarantine: document.getElementById("quarantine-content"),
 };
@@ -477,7 +480,10 @@ function renderOverviewWaves(snapshot) {
   clear(targets.overviewWaves);
   const waves = Array.isArray(snapshot.release_waves?.waves) ? snapshot.release_waves.waves : [];
   if (!waves.length) {
-    targets.overviewWaves.append(emptyState("Release wave data unavailable", "The UI is ready; the runtime has not exposed a deterministic wave queue yet."));
+    const release = snapshot.release_waves || {};
+    targets.overviewWaves.append(release.available === false
+      ? emptyState("Landing valve unavailable", "Last confirmed wave state remains visible while GitHub recovers.")
+      : emptyState("Collecting the next wave", `0 of ${number(release.limit || 1)} green pull requests are queued.`));
     return;
   }
   for (const wave of waves.slice(0, 4)) targets.overviewWaves.append(waveCard(wave));
@@ -524,21 +530,52 @@ function reviewCard(item) {
 
 function renderReleaseWaves(snapshot) {
   clear(targets.waves);
-  const waves = Array.isArray(snapshot.release_waves?.waves) ? snapshot.release_waves.waves : [];
-  if (!waves.length) {
-    targets.waves.append(emptyState("Release wave data unavailable", "No wave queue is present in the deterministic snapshot. Direct delivery remains unchanged."));
+  const release = snapshot.release_waves || {};
+  const waves = Array.isArray(release.waves) ? release.waves : [];
+  if (release.available === false) {
+    targets.waves.append(emptyState("Landing valve data unavailable", "Last confirmed delivery state remains visible when GitHub recovers."));
     return;
   }
-  const grid = el("div", "wave-strip");
-  for (const wave of waves) grid.append(waveCard(wave));
-  targets.waves.append(grid);
+  const current = waves[0];
+  const hero = el("section", "panel wave-hero");
+  const heading = el("div", "wave-hero-heading");
+  const headingCopy = el("div");
+  headingCopy.append(
+    el("p", "section-kicker", "GitHub landing valve"),
+    el("h2", "", current ? `Wave #${current.number || "—"} · ${titleCase(current.status)}` : "Collecting the next wave"),
+    el("p", "muted", current?.summary || `0 of ${number(release.limit || 1)} pull requests are queued for deterministic landing.`),
+  );
+  const valveState = current?.status === "blocked" ? "Blocked" : "Valve healthy";
+  heading.append(headingCopy, current?.run?.url ? externalLink(current.run.url, valveState, "button secondary") : badge(valveState, current?.status === "blocked" ? "danger" : "good"));
+  hero.append(heading);
+  hero.append(waveStageRail(current));
+  const members = current ? [...(current.issues || []), ...(release.candidates || [])] : (release.candidates || []);
+  const uniqueMembers = [...new Map(members.map((item) => [`${item.number || "pr"}-${item.pr?.number || "none"}`, item])).values()];
+  const memberList = el("div", "wave-member-list");
+  if (!uniqueMembers.length) {
+    memberList.append(emptyState("No candidates yet", "Green PRs receive landing:ready and appear here automatically."));
+  } else {
+    for (const item of uniqueMembers.slice(0, 12)) memberList.append(waveMemberRow(item));
+  }
+  hero.append(memberList);
+  targets.waves.append(hero);
+
+  const recent = Array.isArray(release.recent) ? release.recent : [];
+  const recentPanel = el("section", "panel recent-waves");
+  const recentHeading = el("div", "section-heading compact");
+  recentHeading.append(el("div", "", null));
+  recentHeading.firstChild.append(el("h2", "", "Recent valve runs"), el("p", "muted", "GitHub run result and exact head SHA"));
+  recentPanel.append(recentHeading);
+  if (!recent.length) recentPanel.append(emptyState("No completed valve runs", "Completed waves will appear here."));
+  for (const run of recent) recentPanel.append(recentWaveRow(run));
+  targets.waves.append(recentPanel);
 }
 
 function waveCard(wave) {
   const card = el("article", "wave-card");
   card.append(
     badge(titleCase(wave.status || "queued"), statusTone(wave.status)),
-    el("h3", "", `Wave #${wave.number || "—"} · ${number(wave.ready_prs)} / ${number(wave.target_prs || 4)} PR`),
+    el("h3", "", `Wave #${wave.number || "—"} · ${number(wave.ready_prs)} / ${number(wave.target_prs || 1)} PR`),
     el("p", "", wave.summary || wave.blocker || "Waiting for deterministic delivery evidence."),
   );
   const progress = el("div", "task-progress");
@@ -560,26 +597,163 @@ function waveCard(wave) {
   return card;
 }
 
+function waveStageRail(wave) {
+  const rail = el("div", "wave-stage-rail");
+  const labels = ["Collecting", "Landing", "Wave CI", "Deploy TEST", "Acceptance"];
+  const status = String(wave?.status || "collecting").toLowerCase();
+  const current = status.includes("land") ? 1 : status.includes("ci") || status === "blocked" ? 2 : status.includes("test") ? 3 : status.includes("accept") ? 4 : 0;
+  labels.forEach((label, index) => {
+    const step = el("div", "wave-stage", label);
+    if (index < current) step.classList.add("is-done");
+    if (index === current) step.classList.add(status === "blocked" ? "is-blocked" : "is-current");
+    rail.append(step);
+  });
+  return rail;
+}
+
+function waveMemberRow(item) {
+  const row = el("article", "wave-member");
+  const status = item.pr?.number && String(item.ci?.status || "").toLowerCase() === "success" ? "Ready" : item.pr?.number ? "CI" : "Coding";
+  const copy = el("div", "wave-member-copy");
+  const title = item.number ? `#${item.number} · ${item.title || "Untitled Issue"}` : `PR #${item.pr?.number || "—"} · ${item.title || "Unlinked pull request"}`;
+  copy.append(
+    item.url ? externalLink(item.url, title, "wave-member-title") : el("strong", "wave-member-title", title),
+    el("small", "muted", item.pr?.number ? `PR #${item.pr.number} · ${status === "Ready" ? "all required checks green" : titleCase(item.ci?.status || item.phase || "waiting")}` : titleCase(item.phase || "Coding")),
+  );
+  const impact = optionalNumber(item.usage?.week_impact_percent);
+  row.append(badge(status, status === "Ready" ? "good" : "warning"), copy, el("strong", "wave-member-impact", impact === null ? "—" : `≈ ${formatPercent(impact)}`));
+  return row;
+}
+
+function recentWaveRow(run) {
+  const row = el("div", "recent-wave-row");
+  const copy = el("div");
+  copy.append(
+    run.url ? externalLink(run.url, `Run #${run.run_number || run.id || "—"}`, "recent-wave-link") : el("strong", "", `Run #${run.run_number || run.id || "—"}`),
+    el("small", "muted", `${shortSha(run.head_sha)} · ${run.created_at ? relativeTime(run.created_at) : "time unavailable"}`),
+  );
+  row.append(copy, badge(titleCase(run.conclusion || run.status || "unknown"), statusTone(run.conclusion || run.status)));
+  return row;
+}
+
 function renderInfrastructure(snapshot) {
   clear(targets.infrastructureCounters);
   clear(targets.infrastructureHosts);
   const infrastructure = snapshot.infrastructure || {};
   const hosts = Array.isArray(infrastructure.hosts) ? infrastructure.hosts : [];
   const runners = hosts.reduce((sum, host) => sum + number(host.runners_total), 0);
+  const online = hosts.reduce((sum, host) => sum + number(host.runners_online), 0);
   const busy = hosts.reduce((sum, host) => sum + number(host.runners_busy), 0);
   targets.infrastructureCounters.append(
     counterCard("server", "Hosts", hosts.length),
-    counterCard("cpu", "Runners", runners),
+    counterCard("cpu", "Runners online", `${online}/${runners}`),
     counterCard("activity", "Busy", busy),
     counterCard("list-checks", "Queued jobs", number(infrastructure.queued_jobs)),
     counterCard("triangle-alert", "Alerts", number(infrastructure.alerts), infrastructure.alerts ? "danger" : "neutral"),
   );
   if (!hosts.length) {
     targets.infrastructureHosts.append(emptyState("Infrastructure metrics unavailable", "Configure a deterministic metrics source before CPU, RAM and runner charts can be shown."));
+    clear(targets.infrastructureDetail);
+    targets.infrastructureDetail.append(emptyState("No machine selected", "Waiting for deterministic infrastructure metrics."));
   } else {
-    for (const host of hosts) targets.infrastructureHosts.append(serverCard(host));
+    if (!hosts.some((host) => host.name === selectedInfrastructureHost)) selectedInfrastructureHost = hosts[0].name;
+    for (const host of hosts) targets.infrastructureHosts.append(machineSelector(host));
+    renderInfrastructureDetail(snapshot, hosts.find((host) => host.name === selectedInfrastructureHost));
   }
+}
+
+function machineSelector(host) {
+  const button = el("button", "machine-option");
+  button.type = "button";
+  button.dataset.hostSelect = host.name;
+  button.setAttribute("aria-pressed", String(host.name === selectedInfrastructureHost));
+  const heading = el("span", "machine-option-heading");
+  heading.append(icon(host.kind === "local" ? "monitor" : "server"), el("strong", "", host.name || "Host"), badge(titleCase(host.status || "unknown"), host.status === "online" ? "good" : "warning"));
+  button.append(heading, el("small", "muted", `Busy ${number(host.runners_busy)} · online ${number(host.runners_online)}/${number(host.runners_total)}`));
+  return button;
+}
+
+function selectInfrastructureHost(name) {
+  selectedInfrastructureHost = name;
+  infrastructureChartSignature = null;
+  if (currentSnapshot) renderInfrastructure(currentSnapshot);
+}
+
+function renderInfrastructureDetail(snapshot, host) {
+  if (!host) {
+    clear(targets.infrastructureDetail);
+    targets.infrastructureDetail.append(emptyState("No machine selected", "Choose a machine above."));
+    return;
+  }
+  const sameHost = targets.infrastructureDetail.dataset.hostName === host.name;
+  if (sameHost) {
+    const summary = targets.infrastructureDetail.querySelector("[data-machine-summary]");
+    if (summary) summary.textContent = `CPU ${formatOptionalPercent(host.cpu_percent)} · RAM ${formatOptionalPercent(host.memory_percent)} · busy ${number(host.runners_busy)} of ${number(host.runners_online)} online runners`;
+    const state = targets.infrastructureDetail.querySelector("[data-machine-status]");
+    if (state) {
+      state.textContent = titleCase(host.status || "unknown");
+      state.className = `badge ${host.status === "online" ? "good" : "warning"}`;
+    }
+    renderMachineJobs(host);
+    renderInfrastructureChart(snapshot);
+    return;
+  }
+  infrastructureCpuChart?.destroy();
+  infrastructureMemoryChart?.destroy();
+  infrastructureCpuChart = null;
+  infrastructureMemoryChart = null;
+  infrastructureChartSignature = null;
+  clear(targets.infrastructureDetail);
+  targets.infrastructureDetail.dataset.hostName = host.name;
+  const heading = el("div", "machine-detail-heading");
+  const copy = el("div");
+  const title = el("h2");
+  title.append(icon(host.kind === "local" ? "monitor" : "server"), document.createTextNode(host.name || "Host"));
+  const summary = el("p", "muted", `CPU ${formatOptionalPercent(host.cpu_percent)} · RAM ${formatOptionalPercent(host.memory_percent)} · busy ${number(host.runners_busy)} of ${number(host.runners_online)} online runners`);
+  summary.dataset.machineSummary = "";
+  const state = badge(titleCase(host.status || "unknown"), host.status === "online" ? "good" : "warning");
+  state.dataset.machineStatus = "";
+  copy.append(title, summary);
+  heading.append(copy, state);
+  targets.infrastructureDetail.append(heading);
+  const charts = el("div", "machine-chart-grid");
+  const cpu = el("section", "machine-chart");
+  cpu.append(el("h3", "", "CPU load"));
+  const cpuWrap = el("div", "machine-chart-canvas");
+  const cpuCanvas = document.createElement("canvas");
+  cpuCanvas.id = "infrastructure-cpu-chart";
+  cpuCanvas.setAttribute("aria-label", `${host.name} CPU load over time`);
+  cpuCanvas.setAttribute("role", "img");
+  cpuWrap.append(cpuCanvas);
+  cpu.append(cpuWrap);
+  const memory = el("section", "machine-chart");
+  memory.append(el("h3", "", "RAM load"));
+  const memoryWrap = el("div", "machine-chart-canvas");
+  const memoryCanvas = document.createElement("canvas");
+  memoryCanvas.id = "infrastructure-memory-chart";
+  memoryCanvas.setAttribute("aria-label", `${host.name} RAM load over time`);
+  memoryCanvas.setAttribute("role", "img");
+  memoryWrap.append(memoryCanvas);
+  memory.append(memoryWrap);
+  charts.append(cpu, memory);
+  targets.infrastructureDetail.append(charts);
+  const jobs = el("section", "machine-jobs");
+  jobs.dataset.machineJobs = "";
+  targets.infrastructureDetail.append(jobs);
+  renderMachineJobs(host);
   renderInfrastructureChart(snapshot);
+}
+
+function renderMachineJobs(host) {
+  const jobs = targets.infrastructureDetail.querySelector("[data-machine-jobs]");
+  if (!jobs) return;
+  clear(jobs);
+  jobs.append(el("h3", "", "Current jobs"));
+  if (!Array.isArray(host.jobs) || !host.jobs.length) jobs.append(el("p", "muted", "No jobs are running on this machine now."));
+  for (const job of host.jobs || []) {
+    const label = job.issue ? `#${job.issue} · ${job.name || "CI job"}` : job.name || "CI job";
+    jobs.append(job.url ? externalLink(job.url, label, "machine-job") : el("span", "machine-job", label));
+  }
 }
 
 function serverCard(host) {
@@ -589,7 +763,7 @@ function serverCard(host) {
   const heading = el("h3");
   heading.append(icon(host.kind === "local" ? "monitor" : "server"), document.createTextNode(host.name || "Host"));
   header.append(heading, badge(titleCase(status), status === "online" ? "success" : status === "stale" ? "warning" : "danger"));
-  card.append(header, metricBar("CPU", host.cpu_percent), metricBar("RAM", host.memory_percent), el("p", "", `Runners ${number(host.runners_busy)}/${number(host.runners_total)}`));
+  card.append(header, metricBar("CPU", host.cpu_percent), metricBar("RAM", host.memory_percent), el("p", "", `Busy ${number(host.runners_busy)} · online ${number(host.runners_online)}/${number(host.runners_total)} runners`));
   if (status === "stale") card.append(el("p", "muted", "Last confirmed metrics · refresh in progress"));
   if (Array.isArray(host.jobs) && host.jobs.length) card.append(el("p", "", host.jobs.map((job) => job.issue ? `#${job.issue} ${job.name || "CI"}` : job.name || "CI job").join(" · ")));
   return card;
@@ -663,6 +837,7 @@ function taskProgress(item) {
   const active = item.lane === "running" || String(item.status || "").toLowerCase() === "running";
   if (!active && hasVerifiedIssueDelivery(item)) return 100;
   if (phase.includes("test")) return 92;
+  if (phase.includes("cod") || phase.includes("implement")) return 45;
   if (phase.includes("merge") || item.ci?.status === "success") return 84;
   if (phase.includes("ci") || item.pr) return 72;
   if (phase.includes("review")) return 62;
@@ -696,7 +871,16 @@ function renderOverviewChart(snapshot) {
   const series = [
     ["Ready AI", "ready_for_ai", "#64748b"], ["Running", "running", "#236ca8"], ["Blocked", "blocked", "#a83c36"], ["Ready review", "ready_for_acceptance", "#287d49"], ["Done", "done", "#ad5a17"],
   ];
-  const data = series.map(([label, key, color]) => ({ label, data: samples.map((sample) => number(sample.counts?.[key])), borderColor: color, backgroundColor: color, borderWidth: 2, pointRadius: samples.length > 24 ? 0 : 2, tension: .24 }));
+  const data = series.map(([label, key, color]) => ({
+    label,
+    data: samples.map((sample) => number(sample.counts?.[key])),
+    borderColor: color,
+    backgroundColor: `${color}24`,
+    fill: true,
+    borderWidth: 2,
+    pointRadius: samples.length > 24 ? 0 : 2,
+    tension: .28,
+  }));
   const signature = JSON.stringify([historyRange, labels, data.map((item) => item.data), document.documentElement.dataset.theme]);
   if (signature === overviewChartSignature) return;
   overviewChart?.destroy();
@@ -708,30 +892,43 @@ function renderInfrastructureChart(snapshot) {
   if (typeof Chart !== "function") return;
   const history = Array.isArray(snapshot.infrastructure?.history) ? snapshot.infrastructure.history : [];
   const samples = filterSamplesByRange(history, snapshot.refreshed_at || snapshot.generated_at);
-  const canvas = document.getElementById("infrastructure-chart");
-  if (!samples.length) {
-    infrastructureChart?.destroy();
-    infrastructureChart = null;
+  const cpuCanvas = document.getElementById("infrastructure-cpu-chart");
+  const memoryCanvas = document.getElementById("infrastructure-memory-chart");
+  if (!samples.length || !cpuCanvas || !memoryCanvas || !selectedInfrastructureHost) {
+    infrastructureCpuChart?.destroy();
+    infrastructureMemoryChart?.destroy();
+    infrastructureCpuChart = null;
+    infrastructureMemoryChart = null;
     infrastructureChartSignature = null;
-    canvas.hidden = true;
     return;
   }
-  canvas.hidden = false;
-  const hosts = Array.isArray(snapshot.infrastructure?.hosts) ? snapshot.infrastructure.hosts : [];
   const labels = samples.map((sample) => new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit" }).format(new Date(sample.recorded_at)));
-  const colors = ["#287d49", "#236ca8", "#ad5a17", "#7c3aed"];
-  const datasets = hosts.flatMap((host, index) => {
-    const color = colors[index % colors.length];
-    return [
-      { label: `${host.name} CPU`, data: samples.map((sample) => optionalNumber(sample.hosts?.[host.name]?.cpu_percent)), borderColor: color, borderWidth: 2, pointRadius: 0, spanGaps: false, tension: .24 },
-      { label: `${host.name} RAM`, data: samples.map((sample) => optionalNumber(sample.hosts?.[host.name]?.memory_percent)), borderColor: color, borderDash: [5, 4], borderWidth: 1.5, pointRadius: 0, spanGaps: false, tension: .24 },
-    ];
-  });
-  const signature = JSON.stringify([historyRange, labels, datasets.map((item) => item.data), document.documentElement.dataset.theme]);
+  const cpuData = samples.map((sample) => optionalNumber(sample.hosts?.[selectedInfrastructureHost]?.cpu_percent));
+  const memoryData = samples.map((sample) => optionalNumber(sample.hosts?.[selectedInfrastructureHost]?.memory_percent));
+  const signature = JSON.stringify([historyRange, selectedInfrastructureHost, labels, cpuData, memoryData, document.documentElement.dataset.theme]);
   if (signature === infrastructureChartSignature) return;
-  infrastructureChart?.destroy();
-  infrastructureChart = new Chart(canvas, { type: "line", data: { labels, datasets }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, suggestedMax: 100 } }, plugins: { legend: { position: "bottom" } } } });
+  infrastructureCpuChart?.destroy();
+  infrastructureMemoryChart?.destroy();
+  infrastructureCpuChart = hostMetricChart(cpuCanvas, labels, `${selectedInfrastructureHost} CPU`, cpuData, "#236ca8");
+  infrastructureMemoryChart = hostMetricChart(memoryCanvas, labels, `${selectedInfrastructureHost} RAM`, memoryData, "#7c3aed");
   infrastructureChartSignature = signature;
+}
+
+function hostMetricChart(canvas, labels, label, values, color) {
+  return new Chart(canvas, {
+    type: "line",
+    data: {
+      labels,
+      datasets: [{ label, data: values, borderColor: color, backgroundColor: `${color}26`, fill: true, borderWidth: 2, pointRadius: 0, spanGaps: false, tension: .28 }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      scales: { y: { beginAtZero: true, suggestedMax: 100, ticks: { callback: (value) => `${value}%` } } },
+      plugins: { legend: { display: false } },
+    },
+  });
 }
 
 function renderWorkbench(snapshot) {
@@ -815,7 +1012,7 @@ function workStageKey(item) {
   if (phase.includes("ci") || phase.includes("check")) return "ci";
   if (phase.includes("merge") || phase.includes("land") || phase.includes("wave")) return "landing";
   if (phase.includes("test")) return "test";
-  if (phase.includes("agent") || phase.includes("code") || phase.includes("implement")) return "coding";
+  if (phase.includes("agent") || phase.includes("cod") || phase.includes("implement")) return "coding";
   return "";
 }
 
@@ -898,9 +1095,12 @@ function issueTableRow(item) {
 function workWeekImpact(usage) {
   const impact = optionalNumber(usage?.week_impact_percent);
   const wrap = el("div", "week-impact");
+  const creditShare = usage?.week_impact_basis === "recorded-credit-share";
   wrap.title = impact === null
-    ? "Weekly impact is unavailable until task usage can be matched to observed account-wide weekly quota movement."
-    : "Approximate attribution based on this task's usage ledger and observed account-wide weekly quota movement.";
+    ? "Weekly impact is unavailable because this task has no comparable credit ledger in the current weekly window."
+    : creditShare
+      ? "Approximate share of the account-wide weekly percent used, allocated by recorded task credits. Other Codex activity and rounded account limits make exact attribution impossible."
+      : "Approximate attribution based on this task's usage ledger and observed account-wide weekly quota movement.";
   wrap.append(
     el("strong", "", impact === null ? "—" : `≈ ${formatPercent(impact)}`),
     el("small", "", impact === null ? "impact unavailable" : "week impact"),
@@ -1015,7 +1215,7 @@ function laneLabel(item) {
   if (item.lane === "running" && (phase.includes("ci") || phase.includes("check"))) return "CI running";
   if (item.lane === "running" && (phase.includes("wave") || phase.includes("land") || phase.includes("merge"))) return "Waiting wave";
   if (item.lane === "running" && phase.includes("test")) return "Waiting TEST";
-  if (item.lane === "running" && (phase.includes("code") || phase.includes("implement"))) return "Implementing";
+  if (item.lane === "running" && (phase.includes("cod") || phase.includes("implement"))) return "Implementing";
   if (item.lane === "running") return "Running";
   if (item.lane === "followups") return "Waiting delivery";
   if (item.lane === "done") return "Done";
@@ -1103,7 +1303,9 @@ function usageRow(usage) {
   const impact = el("span", "week-impact");
   if (typeof usage.week_impact_percent === "number") {
     impact.textContent = `Week impact ≈ ${formatPercent(usage.week_impact_percent)}`;
-    impact.title = "Approximation from observed account-wide weekly quota movement, allocated by task credits. Concurrency prevents exact attribution.";
+    impact.title = usage.week_impact_basis === "recorded-credit-share"
+      ? "Approximate share of the account-wide weekly percent used, allocated by recorded task credits. Other Codex activity and rounded account limits make exact attribution impossible."
+      : "Approximation from observed account-wide weekly quota movement, allocated by task credits. Concurrency prevents exact attribution.";
   } else {
     impact.textContent = "Weekly impact unavailable";
     impact.title = "Account-wide quota observations are insufficient for a responsible task attribution.";
@@ -1458,6 +1660,7 @@ function optionalNumber(value) {
 }
 function formatNumber(value) { return Number.isFinite(Number(value)) ? new Intl.NumberFormat("en").format(Number(value)) : "—"; }
 function formatPercent(value) { return `${new Intl.NumberFormat("en", { maximumFractionDigits: 1 }).format(Number(value))}%`; }
+function formatOptionalPercent(value) { const numeric = optionalNumber(value); return numeric === null ? "Unavailable" : formatPercent(numeric); }
 function shortSha(value) { return value ? String(value).slice(0, 8) : "Unknown"; }
 function estimatedCredits(micros) { return Number.isFinite(Number(micros)) ? `Est. ${(Number(micros) / 1_000_000).toLocaleString("en", { maximumFractionDigits: 3 })} credits` : "Estimated credits unavailable"; }
 function titleCase(value) { const text = String(value || "").replaceAll("_", " "); return text ? text[0].toUpperCase() + text.slice(1) : "Unknown"; }
@@ -1493,6 +1696,11 @@ document.addEventListener("click", (event) => {
   const range = event.target.closest("[data-history-range]");
   if (range) {
     setHistoryRange(range.dataset.historyRange);
+    return;
+  }
+  const host = event.target.closest("[data-host-select]");
+  if (host) {
+    selectInfrastructureHost(host.dataset.hostSelect);
     return;
   }
   const tab = event.target.closest("[data-owner-tab]");
