@@ -289,8 +289,9 @@ class ActionService:
         persisted_quarantine = self._state_store.quarantine_for(issue_number)
         fixed_quarantine_marker = self._has_label(issue, _SYSTEM_QUARANTINE_LABEL)
         status = str(issue.get("status", "")).casefold()
+        quarantined = persisted_quarantine is not None or fixed_quarantine_marker
         if status not in {"backlog", "ready for ai"} and not (
-            status == "in progress" and (persisted_quarantine is not None or fixed_quarantine_marker)
+            status in {"blocked", "in progress"} and quarantined
         ):
             raise ActionError("run requires Backlog or Ready for AI")
         if fixed_quarantine_marker:
@@ -428,8 +429,8 @@ class ActionService:
             self._lifecycle.remove_label(issue_number, "symphony")
         if not self._has_label(issue, _SYSTEM_QUARANTINE_LABEL):
             self._lifecycle.add_label(issue_number, _SYSTEM_QUARANTINE_LABEL)
-        if str(issue.get("status", "")).casefold() != "ready for ai":
-            self._lifecycle.set_status(issue_number, "Ready for AI")
+        if str(issue.get("status", "")).casefold() != "blocked":
+            self._lifecycle.set_status(issue_number, "Blocked")
         comment = self._quarantine_comment(normalized_reason)
         self._lifecycle.comment(issue_number, comment)
         return {

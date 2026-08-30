@@ -275,6 +275,25 @@ class ActionServiceTest(unittest.TestCase):
             ],
         )
 
+    def test_run_recovers_quarantined_blocked_issue(self):
+        self.store.set_quarantine(403, "workspace hook failed", "2026-08-25T10:00:00Z")
+        self.snapshot["issues"]["403"].update(
+            {"status": "Blocked", "labels": ["symphony:quarantined"]}
+        )
+
+        result = self.actions.execute("run", {"issue": 403})
+
+        self.assertEqual(result["status"], "accepted")
+        self.assertIsNone(self.store.quarantine_for(403))
+        self.assertEqual(
+            self.lifecycle.calls,
+            [
+                ("remove_label", 403, "symphony:quarantined"),
+                ("set_status", 403, "Ready for AI"),
+                ("add_label", 403, "symphony"),
+            ],
+        )
+
     def test_run_rejects_non_quarantined_in_progress_issue(self):
         self.snapshot["issues"]["403"].update({"status": "In Progress", "labels": []})
 
@@ -439,7 +458,7 @@ class ActionServiceTest(unittest.TestCase):
         )
         self.assertEqual(self.lifecycle.calls[0], ("remove_label", 405, "symphony"))
         self.assertEqual(self.lifecycle.calls[1], ("add_label", 405, "symphony:quarantined"))
-        self.assertEqual(self.lifecycle.calls[2], ("set_status", 405, "Ready for AI"))
+        self.assertEqual(self.lifecycle.calls[2], ("set_status", 405, "Blocked"))
         self.assertEqual(self.lifecycle.calls[3][0:2], ("comment", 405))
         comment = self.lifecycle.calls[3][2]
         self.assertNotRegex(comment, r"[\x00-\x1f\x7f-\x9f]")
