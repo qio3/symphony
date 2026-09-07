@@ -27,6 +27,7 @@ defmodule SymphonyElixir.Orchestrator do
   @capacity_retry_delay_ms 5_000
   @paused_retry_delay_ms 30_000
   @failure_retry_base_ms 10_000
+  @already_integrated_completion_max_attempts 3
   @before_run_hook_output_max_bytes 512
   @before_run_hook_output_truncation "... [truncated]"
   # Slightly above the dashboard render interval so "checking now…" can render.
@@ -330,6 +331,30 @@ defmodule SymphonyElixir.Orchestrator do
         model_route: Map.get(running_entry, :model_route)
       })
     end
+  end
+
+  defp handle_agent_down(
+         {:already_integrated, workspace},
+         state,
+         issue_id,
+         running_entry,
+         session_id
+       )
+       when is_binary(workspace) do
+    Logger.info(
+      "Agent found work already integrated for issue_id=#{issue_id} session_id=#{session_id}; " <>
+        "scheduling lifecycle reconciliation without another worker"
+    )
+
+    schedule_issue_retry(state, issue_id, 1, %{
+      identifier: running_entry.identifier,
+      issue_url: running_entry.issue.url,
+      error: "already_integrated lifecycle reconciliation pending",
+      delay_type: :already_integrated_postcondition,
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: workspace,
+      model_route: Map.get(running_entry, :model_route)
+    })
   end
 
   defp handle_agent_down(
@@ -1450,6 +1475,7 @@ defmodule SymphonyElixir.Orchestrator do
            model_route: model_route
          ) do
       :ok -> :ok
+      {:already_integrated, workspace} -> exit({:already_integrated, workspace})
       {:model_exhausted, route, reason} -> exit({:model_exhausted, route, reason})
       {:workspace_hook_failed, "before_run", _status, _output} = reason -> exit(reason)
     end
@@ -1679,6 +1705,9 @@ defmodule SymphonyElixir.Orchestrator do
         cleanup_issue_workspace(issue, metadata)
         {:noreply, release_issue_claim(state, issue_id)}
 
+      already_integrated_completion_postcondition_required?(metadata) ->
+        handle_already_integrated_completion_postcondition(state, issue, attempt, metadata)
+
       normal_completion_postcondition_required?(issue, metadata) ->
         handle_normal_completion_postcondition(state, issue, attempt, metadata)
 
@@ -1700,6 +1729,63 @@ defmodule SymphonyElixir.Orchestrator do
   defp normal_completion_postcondition_required?(%Issue{} = issue, metadata) when is_map(metadata) do
     Map.get(metadata, :delay_type) in [:continuation, :completion_postcondition] and
       owner_control_enabled?() and !symphony_lease_present?(issue)
+  end
+
+  defp already_integrated_completion_postcondition_required?(metadata) when is_map(metadata) do
+    Map.get(metadata, :delay_type) == :already_integrated_postcondition
+  end
+
+  defp handle_already_integrated_completion_postcondition(state, issue, attempt, metadata) do
+    result =
+      with {:ok, issue_number} <- owner_control_issue_number(issue),
+           client <-
+             Application.get_env(
+               :symphony_elixir,
+               :owner_control_client_module,
+               OwnerControlClient
+             ),
+           {:ok, _response} <- request_owner_control_complete_run(client, issue_number) do
+        :ok
+      end
+
+    case result do
+      :ok ->
+        Logger.info("Reconciled already-integrated Symphony run in Owner Control: #{issue_context(issue)}")
+        {:noreply, release_issue_claim(state, issue.id)}
+
+      reason when attempt < @already_integrated_completion_max_attempts ->
+        Logger.warning("Already-integrated completion postcondition unresolved for #{issue_context(issue)}: #{inspect(reason)}")
+
+        {:noreply,
+         schedule_issue_retry(
+           state,
+           issue.id,
+           attempt + 1,
+           Map.merge(metadata, %{
+             identifier: issue.identifier,
+             issue_url: issue.url,
+             error: "already_integrated completion postcondition unresolved: #{inspect(reason)}",
+             delay_type: :already_integrated_postcondition
+           })
+         )}
+
+      reason ->
+        error =
+          "already_integrated completion postcondition unresolved after " <>
+            "#{@already_integrated_completion_max_attempts} attempts: #{inspect(reason)}"
+
+        Logger.warning("Terminal attention for #{issue_context(issue)}: #{error}")
+
+        running_entry = %{
+          identifier: issue.identifier,
+          issue: issue,
+          worker_host: Map.get(metadata, :worker_host),
+          workspace_path: Map.get(metadata, :workspace_path),
+          model_route: Map.get(metadata, :model_route)
+        }
+
+        {:noreply, block_issue_from_entry(state, issue.id, running_entry, error)}
+    end
   end
 
   defp symphony_lease_present?(%Issue{labels: labels}) when is_list(labels) do

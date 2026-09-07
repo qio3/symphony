@@ -673,6 +673,86 @@ defmodule SymphonyElixir.OwnerControlTest do
     Process.exit(worker_pid, :kill)
   end
 
+  test "already-integrated worker exit never schedules the normal continuation" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-owner-already-integrated-#{System.unique_integer([:positive])}"
+      )
+
+    orchestrator_name =
+      Module.concat(__MODULE__, "AlreadyIntegrated#{System.unique_integer([:positive])}")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      poll_interval_ms: 60_000,
+      workspace_root: test_root
+    )
+
+    Application.put_env(:symphony_elixir, :owner_control_client_module, PausedControl)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+    {:ok, task_supervisor} = Task.Supervisor.start_link()
+    Process.unlink(task_supervisor)
+
+    {:ok, pid} =
+      Orchestrator.start_link(
+        name: orchestrator_name,
+        task_supervisor: task_supervisor,
+        account_rate_limits_reader: fn -> {:error, :test_disabled} end,
+        usage_ledger_path: Path.join(test_root, "usage-ledger.json")
+      )
+
+    Process.unlink(pid)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: GenServer.stop(pid)
+      if Process.alive?(task_supervisor), do: Supervisor.stop(task_supervisor)
+      File.rm_rf(test_root)
+    end)
+
+    Process.sleep(100)
+    issue = %{dispatch_issue(474) | labels: ["symphony"]}
+    worker_pid = spawn(fn -> Process.sleep(:infinity) end)
+    ref = make_ref()
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: ref,
+      identifier: issue.identifier,
+      issue: issue,
+      model_route: nil,
+      selected_model_tier: nil,
+      retry_attempt: 0,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      %{
+        initial_state
+        | running: %{issue.id => running_entry},
+          claimed: MapSet.new([issue.id]),
+          retry_attempts: %{}
+      }
+    end)
+
+    workspace = Path.join(test_root, issue.identifier)
+    send(pid, {:DOWN, ref, :process, worker_pid, {:already_integrated, workspace}})
+
+    assert eventually(fn ->
+             case :sys.get_state(pid).retry_attempts[issue.id] do
+               %{attempt: 1, delay_type: :already_integrated_postcondition} -> true
+               _ -> false
+             end
+           end)
+
+    Process.sleep(1_100)
+    state = :sys.get_state(pid)
+    refute Map.has_key?(state.running, issue.id)
+    assert state.retry_attempts[issue.id].delay_type == :already_integrated_postcondition
+    Process.exit(worker_pid, :kill)
+  end
+
   test "fresh Ready for AI issues acquire their durable leases from one snapshot before dispatch" do
     issues = [dispatch_issue(401), dispatch_issue(402)]
 
@@ -873,6 +953,73 @@ defmodule SymphonyElixir.OwnerControlTest do
     assert_receive {:owner_control_complete_run, 471}, 1_000
     assert MapSet.member?(updated_state.claimed, issue.id)
     assert %{attempt: 1, delay_type: :completion_postcondition} = updated_state.retry_attempts[issue.id]
+  end
+
+  test "already-integrated completion reconciles without dispatching another worker" do
+    issue = %{dispatch_issue(472) | labels: ["symphony"]}
+
+    Application.put_env(:symphony_elixir, :owner_control_client_module, CompletionControl)
+    Application.put_env(:symphony_elixir, :owner_control_completion_test_pid, self())
+    Application.put_env(:symphony_elixir, :owner_control_completion_response, {:ok, %{status: "accepted"}})
+
+    state = %Orchestrator.State{claimed: MapSet.new([issue.id])}
+
+    updated_state =
+      Orchestrator.handle_retry_issue_lookup_for_test(
+        issue,
+        state,
+        issue.id,
+        1,
+        %{
+          identifier: issue.identifier,
+          issue_url: issue.url,
+          workspace_path: "/workspaces/GH-472",
+          delay_type: :already_integrated_postcondition
+        }
+      )
+
+    assert_receive {:owner_control_complete_run, 472}, 1_000
+    refute MapSet.member?(updated_state.claimed, issue.id)
+    refute Map.has_key?(updated_state.retry_attempts, issue.id)
+    refute Map.has_key?(updated_state.running, issue.id)
+  end
+
+  test "already-integrated completion failure is bounded and never returns to worker retry" do
+    issue = %{dispatch_issue(473) | labels: ["symphony"]}
+
+    Application.put_env(:symphony_elixir, :owner_control_client_module, CompletionControl)
+    Application.put_env(:symphony_elixir, :owner_control_completion_test_pid, self())
+
+    Application.put_env(
+      :symphony_elixir,
+      :owner_control_completion_response,
+      {:error, {:owner_control_action_rejected, "still resolving"}}
+    )
+
+    metadata = %{
+      identifier: issue.identifier,
+      issue_url: issue.url,
+      workspace_path: "/workspaces/GH-473",
+      delay_type: :already_integrated_postcondition
+    }
+
+    state = %Orchestrator.State{claimed: MapSet.new([issue.id])}
+
+    retry_state =
+      Orchestrator.handle_retry_issue_lookup_for_test(issue, state, issue.id, 1, metadata)
+
+    assert_receive {:owner_control_complete_run, 473}, 1_000
+
+    assert %{attempt: 2, delay_type: :already_integrated_postcondition} =
+             retry_state.retry_attempts[issue.id]
+
+    terminal_state =
+      Orchestrator.handle_retry_issue_lookup_for_test(issue, retry_state, issue.id, 3, metadata)
+
+    assert_receive {:owner_control_complete_run, 473}, 1_000
+    refute Map.has_key?(terminal_state.retry_attempts, issue.id)
+    refute Map.has_key?(terminal_state.running, issue.id)
+    assert terminal_state.blocked[issue.id].error =~ "already_integrated"
   end
 
   test "unleased issues fail closed outside a fresh active Ready for AI snapshot" do
