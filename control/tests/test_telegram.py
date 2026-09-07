@@ -30,6 +30,7 @@ def snapshot():
             "luna": {"active": 0, "completed": 4},
             "terra": {"active": 1, "completed": 2},
             "sol": {"active": 0, "completed": 1},
+            "astra": {"active": 0, "completed": 0},
         },
         "counts": {
             "backlog": 74,
@@ -92,7 +93,7 @@ class TelegramCommandHandlerTest(unittest.TestCase):
         self.assertIn("Backlog: 74", text)
         self.assertIn("Ready for AI: 2", text)
         self.assertIn("TEST: be44cf15 ✓", text)
-        self.assertIn("Models: Luna 0 · Terra 1 · Sol 0", text)
+        self.assertIn("Models: Luna 0 · Terra 1 · Sol 0 · Astra 0", text)
         self.assertIn("Weekly: 42% used", text)
         self.assertNotIn("Quarantined:", text)
         self.assertNotIn("tokens", text.casefold())

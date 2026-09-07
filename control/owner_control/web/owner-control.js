@@ -21,6 +21,7 @@ const ownerTabs = document.getElementById("owner-tabs");
 const workSummary = document.getElementById("work-summary");
 const workSearch = document.getElementById("work-search");
 const workModelFilter = document.getElementById("work-model-filter");
+workModelFilter.append(new Option("Astra", "astra"));
 const workStageFilter = document.getElementById("work-stage-filter");
 const workSort = document.getElementById("work-sort");
 const headerServiceStatus = document.getElementById("header-service-status");

@@ -95,6 +95,15 @@ defmodule SymphonyElixir.UsageLedgerTest do
 
     assert {:ok, ledger} =
              UsageLedger.record(ledger, %{
+               issue_id: "issue-astra",
+               thread_id: "thread-astra",
+               tier: "astra",
+               model: "gpt-6-astra",
+               token_usage: %{total_tokens: 1}
+             })
+
+    assert {:ok, ledger} =
+             UsageLedger.record(ledger, %{
                issue_id: "issue-non-map-usage",
                thread_id: "thread-non-map-usage",
                token_usage: "not a map"
@@ -103,6 +112,7 @@ defmodule SymphonyElixir.UsageLedgerTest do
     current = UsageLedger.snapshot(ledger).current
     binary = Enum.find(current, &(&1.issue_id == "issue-binary"))
     non_map = Enum.find(current, &(&1.issue_id == "issue-non-map-usage"))
+    astra = Enum.find(current, &(&1.issue_id == "issue-astra"))
 
     assert binary.tier == :terra
     assert binary.started_at == nil
@@ -112,6 +122,8 @@ defmodule SymphonyElixir.UsageLedgerTest do
     assert binary.token_usage.cached_input_tokens == 0
     assert binary.token_usage.total_tokens == 21
     assert non_map.token_usage.total_tokens == 0
+    assert astra.tier == :astra
+    assert astra.model == "gpt-6-astra"
   end
 
   test "rejects invalid records and leaves a missing completion unchanged" do

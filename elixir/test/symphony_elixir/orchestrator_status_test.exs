@@ -1966,7 +1966,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert GenServer.call(pid, :snapshot).issue_usage["403"].aggregate.week_impact_percent == nil
   end
 
-  test "orchestrator quarantines Sol exhaustion instead of retrying Sol again" do
+  test "orchestrator escalates Sol exhaustion to Astra" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
 
     previous_client = Application.get_env(:symphony_elixir, :owner_control_client_module)
@@ -1980,12 +1980,20 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     issue = %Issue{id: "405", identifier: "GH-405", state: "In Progress", labels: ["symphony"], dispatchable: true}
-    orchestrator_name = Module.concat(__MODULE__, :SolTerminalOrchestrator)
+    orchestrator_name = Module.concat(__MODULE__, :SolEscalationOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
     on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
 
     ref = make_ref()
-    route = %{selected_tier: :sol, actual_model: "gpt-5.6-sol", routing_reason: "label_override:model:sol", escalation_history: []}
+
+    route = %{
+      selected_tier: :sol,
+      actual_model: "gpt-5.6-sol",
+      routing_reason: "label_override:model:sol",
+      escalation_history: [],
+      models: %{"astra" => "gpt-6-astra"}
+    }
+
     initial_state = :sys.get_state(pid)
 
     :sys.replace_state(pid, fn _ ->
@@ -1994,14 +2002,13 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     send(pid, {:DOWN, ref, :process, self(), {:model_exhausted, route, :max_turns_exhausted}})
 
-    assert_receive {:failure_quarantine, 405, reason}, 1_000
-    assert reason =~ "model ceiling exhausted"
+    refute_receive {:failure_quarantine, 405, _reason}, 100
     state = :sys.get_state(pid)
-    refute Map.has_key?(state.retry_attempts, issue.id)
-    refute MapSet.member?(state.claimed, issue.id)
+    assert state.retry_attempts[issue.id].model_route.selected_tier == :astra
+    assert state.retry_attempts[issue.id].model_route.actual_model == "gpt-6-astra"
   end
 
-  test "orchestrator never retries a failed Sol attempt as Sol" do
+  test "orchestrator quarantines Astra exhaustion" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
 
     previous_client = Application.get_env(:symphony_elixir, :owner_control_client_module)
@@ -2015,22 +2022,29 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     issue = %Issue{id: "407", identifier: "GH-407", state: "In Progress", labels: ["symphony"], dispatchable: true}
-    orchestrator_name = Module.concat(__MODULE__, :SolNoRepeatOrchestrator)
+    orchestrator_name = Module.concat(__MODULE__, :AstraTerminalOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
     on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
 
     ref = make_ref()
-    route = %{selected_tier: :sol, actual_model: "gpt-5.6-sol", routing_reason: "label_override:model:sol", escalation_history: []}
+
+    route = %{
+      selected_tier: :astra,
+      actual_model: "gpt-6-astra",
+      routing_reason: "label_override:model:astra",
+      escalation_history: []
+    }
+
     initial_state = :sys.get_state(pid)
 
     :sys.replace_state(pid, fn _ ->
       %{initial_state | running: %{issue.id => running_entry(issue, ref, route)}, claimed: MapSet.new([issue.id])}
     end)
 
-    send(pid, {:DOWN, ref, :process, self(), {:worker_failed, :same_root_cause}})
+    send(pid, {:DOWN, ref, :process, self(), {:model_exhausted, route, :max_turns_exhausted}})
 
     assert_receive {:failure_quarantine, 407, reason}, 1_000
-    assert reason =~ "Sol attempt failed"
+    assert reason =~ "model ceiling exhausted on Astra"
     state = :sys.get_state(pid)
     refute Map.has_key?(state.retry_attempts, issue.id)
     refute MapSet.member?(state.claimed, issue.id)
@@ -2066,7 +2080,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         models: %{
           "luna" => "gpt-5.6-luna",
           "terra" => "gpt-5.6-terra",
-          "sol" => "gpt-5.6-sol"
+          "sol" => "gpt-5.6-sol",
+          "astra" => "gpt-6-astra"
         }
       }
       |> ModelRouter.retry_route(failure)
@@ -2082,7 +2097,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     send(pid, {:DOWN, ref, :process, self(), failure})
 
     assert_receive {:failure_quarantine, 406, reason}, 1_000
-    assert reason =~ "Sol attempt failed"
+    assert reason =~ "repeated failure reached retry limit"
     state = :sys.get_state(pid)
     refute Map.has_key?(state.retry_attempts, issue.id)
     refute MapSet.member?(state.claimed, issue.id)

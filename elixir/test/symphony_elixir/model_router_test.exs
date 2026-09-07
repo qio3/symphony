@@ -10,7 +10,8 @@ defmodule SymphonyElixir.ModelRouterTest do
     models: %{
       "luna" => "gpt-5.6-luna",
       "terra" => "gpt-5.6-terra",
-      "sol" => "gpt-5.6-sol"
+      "sol" => "gpt-5.6-sol",
+      "astra" => "gpt-6-astra"
     },
     force_sol_labels: ["risk:security-critical"]
   }
@@ -41,6 +42,8 @@ defmodule SymphonyElixir.ModelRouterTest do
              [:acceptance_criteria, :body, :labels, :title]
 
     assert prompt =~ Jason.encode!(metadata)
+    assert prompt =~ "luna|terra|sol|astra"
+    assert prompt =~ "Choose astra only with confidence at least 0.90"
     refute prompt =~ "inspect the repository"
 
     assert {:ok, %{tier: "luna", confidence: 0.91, reason: "bounded_local_fix"}} =
@@ -59,7 +62,29 @@ defmodule SymphonyElixir.ModelRouterTest do
     assert route.routing_reason == "label_override:model:sol"
   end
 
-  test "metadata-only classifier routes simple normal and complex issues" do
+  test "WORKFLOW routing config requires every tier including Astra" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      model_routing_enabled: true,
+      model_routing_models: Map.delete(@config.models, "astra")
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = WorkflowStore.force_reload()
+    assert message =~ "must define non-blank luna, terra, sol, and astra"
+  end
+
+  test "explicit Astra label routes directly to GPT-6" do
+    route =
+      ModelRouter.route(%{issue("cross-system redesign") | labels: ["model:astra"]},
+        config: @config,
+        classifier: fn _metadata -> flunk("classifier must not run") end
+      )
+
+    assert route.selected_tier == :astra
+    assert route.actual_model == "gpt-6-astra"
+    assert route.routing_reason == "label_override:model:astra"
+  end
+
+  test "metadata-only classifier routes simple normal complex and exceptional issues" do
     classifier = fn metadata ->
       assert Map.keys(metadata) |> Enum.sort() ==
                [:acceptance_criteria, :body, :labels, :title]
@@ -68,12 +93,14 @@ defmodule SymphonyElixir.ModelRouterTest do
         "simple" -> %{tier: "luna", confidence: 0.92, reason: "bounded_local_fix"}
         "normal" -> %{tier: "terra", confidence: 0.84, reason: "multi_file_feature"}
         "complex" -> %{tier: "sol", confidence: 0.91, reason: "concurrency_root_cause"}
+        "exceptional" -> %{tier: "astra", confidence: 0.96, reason: "cross_system_architecture"}
       end
     end
 
     assert ModelRouter.route(issue("simple"), config: @config, classifier: classifier).selected_tier == :luna
     assert ModelRouter.route(issue("normal"), config: @config, classifier: classifier).selected_tier == :terra
     assert ModelRouter.route(issue("complex"), config: @config, classifier: classifier).selected_tier == :sol
+    assert ModelRouter.route(issue("exceptional"), config: @config, classifier: classifier).selected_tier == :astra
   end
 
   test "low classifier confidence falls back to Terra" do
@@ -88,6 +115,17 @@ defmodule SymphonyElixir.ModelRouterTest do
     assert route.routing_reason == "classifier_low_confidence"
   end
 
+  test "classifier cannot select Astra below exceptional confidence" do
+    route =
+      ModelRouter.route(issue("hard but uncertain"),
+        config: @config,
+        classifier: fn _ -> %{tier: "astra", confidence: 0.89, reason: "cross_system_unknown"} end
+      )
+
+    assert route.selected_tier == :terra
+    assert route.routing_reason == "classifier_low_confidence"
+  end
+
   test "an exact configured high-risk label forces Sol without classifier" do
     route =
       ModelRouter.route(%{issue("rotate auth") | labels: ["risk:security-critical"]},
@@ -99,10 +137,11 @@ defmodule SymphonyElixir.ModelRouterTest do
     assert route.routing_reason == "force_sol_label:risk:security-critical"
   end
 
-  test "reasoning exhaustion escalates one tier and Sol is the ceiling" do
+  test "reasoning exhaustion escalates Luna through Astra and Astra is the ceiling" do
     luna = ModelRouter.route(%{issue("small") | labels: ["model:luna"]}, config: @config)
     terra = ModelRouter.escalate(luna, "max_turns_exhausted")
     sol = ModelRouter.escalate(terra, "session_budget_exceeded")
+    astra = ModelRouter.escalate(sol, "max_turns_exhausted")
 
     assert terra.selected_tier == :terra
     assert terra.escalated_from == :luna
@@ -110,8 +149,11 @@ defmodule SymphonyElixir.ModelRouterTest do
     assert sol.selected_tier == :sol
     assert sol.escalated_from == :terra
     assert sol.actual_model == "gpt-5.6-sol"
-    assert length(sol.escalation_history) == 2
-    assert ModelRouter.escalate(sol, "max_turns_exhausted") == sol
+    assert astra.selected_tier == :astra
+    assert astra.escalated_from == :sol
+    assert astra.actual_model == "gpt-6-astra"
+    assert length(astra.escalation_history) == 3
+    assert ModelRouter.escalate(astra, "max_turns_exhausted") == astra
   end
 
   test "CI retry and owner Blocked do not escalate" do
@@ -148,11 +190,13 @@ defmodule SymphonyElixir.ModelRouterTest do
     assert ModelRouter.terminal_retry?(third_retry)
   end
 
-  test "reasoning exhaustion at Sol is terminal" do
+  test "reasoning exhaustion is terminal only at Astra" do
     sol = ModelRouter.route(%{issue("hard") | labels: ["model:sol"]}, config: @config)
+    astra = ModelRouter.route(%{issue("hardest") | labels: ["model:astra"]}, config: @config)
 
-    assert ModelRouter.terminal_exhaustion?(sol, :max_turns_exhausted)
-    refute ModelRouter.terminal_exhaustion?(sol, :ci_retry)
+    refute ModelRouter.terminal_exhaustion?(sol, :max_turns_exhausted)
+    assert ModelRouter.terminal_exhaustion?(astra, :max_turns_exhausted)
+    refute ModelRouter.terminal_exhaustion?(astra, :ci_retry)
   end
 
   test "only the exact app-server budget code is reasoning exhaustion" do
@@ -193,13 +237,14 @@ defmodule SymphonyElixir.ModelRouterTest do
       %{
         state
         | running: %{"44" => entry},
-          model_completed_counts: %{luna: 2, terra: 1, sol: 0}
+          model_completed_counts: %{luna: 2, terra: 1, sol: 0, astra: 0}
       }
     end)
 
     snapshot = Orchestrator.snapshot(orchestrator_name, 1_000)
     assert snapshot.model_counts.terra == %{active: 1, completed: 1}
     assert snapshot.model_counts.luna == %{active: 0, completed: 2}
+    assert snapshot.model_counts.astra == %{active: 0, completed: 0}
 
     assert [worker] = snapshot.running
     assert worker.selected_model_tier == :terra

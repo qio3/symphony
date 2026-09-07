@@ -196,8 +196,11 @@ defmodule SymphonyElixir.UsageLedger do
 
   defp non_negative(_value), do: 0
 
-  defp normalize_tier(tier) when tier in [:luna, :terra, :sol], do: tier
-  defp normalize_tier(tier) when tier in ["luna", "terra", "sol"], do: String.to_existing_atom(tier)
+  defp normalize_tier(tier) when tier in [:luna, :terra, :sol, :astra], do: tier
+
+  defp normalize_tier(tier) when tier in ["luna", "terra", "sol", "astra"],
+    do: String.to_existing_atom(tier)
+
   defp normalize_tier(_tier), do: nil
 
   defp normalize_datetime(%DateTime{} = value), do: value
