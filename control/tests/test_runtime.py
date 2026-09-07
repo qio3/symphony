@@ -1449,6 +1449,7 @@ class DockerComposeSupervisorTest(unittest.TestCase):
 
     def test_start_stop_and_status_use_fixed_targets_without_shell(self):
         calls = []
+        compose_file = Path("C:/control/docker-compose.yml")
 
         def runner(command, **kwargs):
             calls.append((command, kwargs))
@@ -1459,7 +1460,7 @@ class DockerComposeSupervisorTest(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
         supervisor = DockerComposeSupervisor(
-            compose_file=Path("C:/control/docker-compose.yml"),
+            compose_file=compose_file,
             container_name="zavod-symphony",
             service_name="symphony",
             runner=runner,
@@ -1476,13 +1477,13 @@ class DockerComposeSupervisorTest(unittest.TestCase):
                     "docker",
                     "compose",
                     "-f",
-                    "C:\\control\\docker-compose.yml",
+                    str(compose_file),
                     "up",
                     "-d",
                     "--no-deps",
                     "symphony",
                 ],
-                ["docker", "compose", "-f", "C:\\control\\docker-compose.yml", "stop", "symphony"],
+                ["docker", "compose", "-f", str(compose_file), "stop", "symphony"],
                 ["docker", "inspect", "zavod-symphony", "--format", "{{json .State}}"],
             ],
         )
@@ -1490,13 +1491,14 @@ class DockerComposeSupervisorTest(unittest.TestCase):
 
     def test_restart_and_logs_use_fixed_compose_target_without_shell(self):
         calls = []
+        compose_file = Path("C:/control/docker-compose.yml")
 
         def runner(command, **kwargs):
             calls.append((command, kwargs))
             return subprocess.CompletedProcess(command, 0, stdout="line one\nline two\n", stderr="")
 
         supervisor = DockerComposeSupervisor(
-            compose_file=Path("C:/control/docker-compose.yml"),
+            compose_file=compose_file,
             container_name="zavod-symphony",
             service_name="symphony",
             runner=runner,
@@ -1507,11 +1509,11 @@ class DockerComposeSupervisorTest(unittest.TestCase):
 
         self.assertEqual(
             calls[0][0],
-            ["docker", "compose", "-f", "C:\\control\\docker-compose.yml", "restart", "symphony"],
+            ["docker", "compose", "-f", str(compose_file), "restart", "symphony"],
         )
         self.assertEqual(
             calls[1][0],
-            ["docker", "compose", "-f", "C:\\control\\docker-compose.yml", "logs", "--tail", "20", "symphony"],
+            ["docker", "compose", "-f", str(compose_file), "logs", "--tail", "20", "symphony"],
         )
         self.assertTrue(all(call[1].get("shell") is False for call in calls))
         self.assertEqual(lines, ["line one", "line two"])
