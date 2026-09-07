@@ -23,6 +23,7 @@ jobs:
       - name: Set up mise tools
         uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db # v3
         with:
+          version: 2026.9.1
           install: true
           cache: true
           working_directory: elixir
