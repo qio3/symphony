@@ -100,7 +100,7 @@ defmodule SymphonyElixir.WorkspaceRecoveryTest do
         hook_before_run: "printf 'unexpected Symphony branch' >&2; exit 2"
       )
 
-      assert :ok = AgentRunner.run(issue)
+      assert {:already_integrated, ^workspace} = AgentRunner.run(issue)
       assert File.dir?(Path.join(workspace, ".git"))
     after
       File.rm_rf(test_root)

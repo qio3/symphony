@@ -20,6 +20,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   @spec run(map(), pid() | nil, keyword()) ::
           :ok
+          | {:already_integrated, Path.t()}
           | {:model_exhausted, ModelRouter.route(), atom()}
           | {:workspace_hook_failed, String.t(), integer(), String.t()}
           | no_return()
@@ -40,6 +41,9 @@ defmodule SymphonyElixir.AgentRunner do
          ) do
       :ok ->
         :ok
+
+      {:already_integrated, workspace} ->
+        {:already_integrated, workspace}
 
       {:error, {:workspace_hook_failed, "before_run", _status, _output} = reason} ->
         reason
@@ -104,7 +108,7 @@ defmodule SymphonyElixir.AgentRunner do
             "worker_host=#{worker_host_for_log(worker_host)} workspace=#{workspace}"
         )
 
-        :ok
+        {:already_integrated, workspace}
 
       {:error, {:workspace_preservation_required, workspace, reason}} ->
         preservation_output =
