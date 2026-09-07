@@ -155,6 +155,8 @@ class ControlHttpServerTest(unittest.TestCase):
 
     def test_owner_shell_uses_the_approved_v5_visual_contract(self):
         html, _csrf, _headers = self.browser_session()
+        with self.request("/assets/owner-control.js", authorized=False) as response:
+            javascript = response.read().decode("utf-8")
 
         self.assertRegex(html, r'id="page-overview"[^>]*\bhidden\b')
         self.assertRegex(html, r'id="page-work"[^>]*data-page="work"(?![^>]*\bhidden\b)')
@@ -162,6 +164,7 @@ class ControlHttpServerTest(unittest.TestCase):
         self.assertIn('id="work-summary"', html)
         self.assertIn('id="work-search"', html)
         self.assertIn('id="work-model-filter"', html)
+        self.assertIn('new Option("Astra", "astra")', javascript)
         self.assertIn('id="work-stage-filter"', html)
         self.assertIn('id="work-sort"', html)
         self.assertIn('id="header-service-status"', html)

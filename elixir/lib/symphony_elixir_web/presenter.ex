@@ -252,7 +252,8 @@ defmodule SymphonyElixirWeb.Presenter do
     %{
       luna: %{active: 0, completed: 0},
       terra: %{active: 0, completed: 0},
-      sol: %{active: 0, completed: 0}
+      sol: %{active: 0, completed: 0},
+      astra: %{active: 0, completed: 0}
     }
   end
 

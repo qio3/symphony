@@ -7,10 +7,15 @@ defmodule SymphonyElixir.ModelRouter do
   alias SymphonyElixir.Config
   alias SymphonyElixir.Tracker.Issue
 
-  @tiers [:luna, :terra, :sol]
-  @override_labels %{"model:luna" => :luna, "model:terra" => :terra, "model:sol" => :sol}
+  @tiers [:luna, :terra, :sol, :astra]
+  @override_labels %{
+    "model:luna" => :luna,
+    "model:terra" => :terra,
+    "model:sol" => :sol,
+    "model:astra" => :astra
+  }
 
-  @type tier :: :luna | :terra | :sol
+  @type tier :: :luna | :terra | :sol | :astra
   @type route :: %{
           selected_tier: tier(),
           actual_model: String.t(),
@@ -57,22 +62,21 @@ defmodule SymphonyElixir.ModelRouter do
   end
 
   @spec escalate(route(), String.t() | atom()) :: route()
-  def escalate(%{selected_tier: :sol} = route, _reason), do: route
+  def escalate(%{selected_tier: :astra} = route, _reason), do: route
 
-  def escalate(%{selected_tier: tier} = route, reason) when tier in [:luna, :terra] do
-    next_tier = if tier == :luna, do: :terra, else: :sol
+  def escalate(%{selected_tier: tier} = route, reason) when tier in [:luna, :terra, :sol] do
+    next_tier = %{luna: :terra, terra: :sol, sol: :astra} |> Map.fetch!(tier)
     reason = machine_reason(reason)
 
-    %{
-      route
-      | selected_tier: next_tier,
-        actual_model: model_id(route, next_tier),
-        routing_reason: "escalation:#{reason}",
-        escalated_from: tier,
-        escalation_history:
-          Map.get(route, :escalation_history, []) ++
-            [%{from: tier, to: next_tier, reason: reason}]
-    }
+    Map.merge(route, %{
+      selected_tier: next_tier,
+      actual_model: model_id(route, next_tier),
+      routing_reason: "escalation:#{reason}",
+      escalated_from: tier,
+      escalation_history:
+        Map.get(route, :escalation_history, []) ++
+          [%{from: tier, to: next_tier, reason: reason}]
+    })
   end
 
   @spec maybe_escalate(route(), term()) :: route()
@@ -114,7 +118,7 @@ defmodule SymphonyElixir.ModelRouter do
 
   @doc "Returns true when the strongest model has exhausted its reasoning budget."
   @spec terminal_exhaustion?(route(), term()) :: boolean()
-  def terminal_exhaustion?(%{selected_tier: :sol}, reason) do
+  def terminal_exhaustion?(%{selected_tier: :astra}, reason) do
     reason in [
       :max_turns_exhausted,
       :session_budget_exceeded,
@@ -141,11 +145,10 @@ defmodule SymphonyElixir.ModelRouter do
 
   defp classify(issue, config, classifier) when is_function(classifier, 1) do
     result = classifier.(metadata(issue))
-    threshold = Map.get(config, :confidence_threshold, 0.65)
 
     with {:ok, tier} <- result_tier(result),
          confidence when is_number(confidence) <- result_value(result, :confidence),
-         true <- confidence >= threshold do
+         true <- confidence >= confidence_threshold(tier, config) do
       reason = result |> result_value(:reason) |> machine_reason()
       build_route(tier, config, "classifier:#{reason}", confidence / 1.0)
     else
@@ -157,6 +160,11 @@ defmodule SymphonyElixir.ModelRouter do
   catch
     _, _ -> build_route(:terra, config, "classifier_unavailable", 0.0)
   end
+
+  defp confidence_threshold(:astra, config),
+    do: max(Map.get(config, :confidence_threshold, 0.65), 0.90)
+
+  defp confidence_threshold(_tier, config), do: Map.get(config, :confidence_threshold, 0.65)
 
   defp build_route(tier, config, reason, confidence) do
     %{
@@ -186,7 +194,8 @@ defmodule SymphonyElixir.ModelRouter do
     %{
       "luna" => "gpt-5.6-luna",
       "terra" => "gpt-5.6-terra",
-      "sol" => "gpt-5.6-sol"
+      "sol" => "gpt-5.6-sol",
+      "astra" => "gpt-6-astra"
     }
   end
 
@@ -227,6 +236,7 @@ defmodule SymphonyElixir.ModelRouter do
           "luna" -> {:ok, :luna}
           "terra" -> {:ok, :terra}
           "sol" -> {:ok, :sol}
+          "astra" -> {:ok, :astra}
           _ -> :error
         end
 

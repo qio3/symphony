@@ -60,7 +60,7 @@ defmodule SymphonyElixir.Orchestrator do
       blocked: %{},
       retry_attempts: %{},
       source_circuit: SourceCircuit.new(),
-      model_completed_counts: %{luna: 0, terra: 0, sol: 0},
+      model_completed_counts: %{luna: 0, terra: 0, sol: 0, astra: 0},
       codex_totals: nil,
       codex_rate_limits: nil,
       weekly_quota_observation: nil,
@@ -288,12 +288,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_agent_down({:model_exhausted, route, reason}, state, issue_id, running_entry, session_id) do
-    if Map.get(route, :selected_tier) == :sol or ModelRouter.terminal_exhaustion?(route, reason) do
+    if ModelRouter.terminal_exhaustion?(route, reason) do
       quarantine_running_failure(
         state,
         issue_id,
         running_entry,
-        "model ceiling exhausted on Sol: #{reason}"
+        "model ceiling exhausted on Astra: #{reason}"
       )
     else
       escalated_route = ModelRouter.maybe_escalate(route, reason)
@@ -467,12 +467,12 @@ defmodule SymphonyElixir.Orchestrator do
     next_attempt = next_retry_attempt_from_running(running_entry)
     model_route = retry_model_route(running_entry, reason)
 
-    if same_sol_retry?(running_entry, model_route) do
+    if same_ceiling_retry?(running_entry, model_route) do
       quarantine_running_failure(
         state,
         issue_id,
         running_entry,
-        "Sol attempt failed and cannot be retried as Sol: #{inspect(reason, limit: 20, printable_limit: 512)}"
+        "Astra attempt failed and cannot be retried as Astra: #{inspect(reason, limit: 20, printable_limit: 512)}"
       )
     else
       maybe_schedule_bounded_retry(
@@ -507,12 +507,12 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp same_sol_retry?(running_entry, retry_route) when is_map(retry_route) do
-    get_in(running_entry, [:model_route, :selected_tier]) == :sol and
-      Map.get(retry_route, :selected_tier) == :sol
+  defp same_ceiling_retry?(running_entry, retry_route) when is_map(retry_route) do
+    get_in(running_entry, [:model_route, :selected_tier]) == :astra and
+      Map.get(retry_route, :selected_tier) == :astra
   end
 
-  defp same_sol_retry?(_running_entry, _retry_route), do: false
+  defp same_ceiling_retry?(_running_entry, _retry_route), do: false
 
   defp quarantine_running_failure(state, issue_id, running_entry, reason) do
     Logger.error(
@@ -3018,7 +3018,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp record_model_completion(%State{} = state, running_entry) when is_map(running_entry) do
     case Map.get(running_entry, :selected_model_tier) do
-      tier when tier in [:luna, :terra, :sol] ->
+      tier when tier in [:luna, :terra, :sol, :astra] ->
         counts = Map.update(state.model_completed_counts, tier, 1, &(&1 + 1))
         %{state | model_completed_counts: counts}
 
@@ -3030,7 +3030,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp record_model_completion(state, _running_entry), do: state
 
   defp model_counts(%State{} = state) do
-    Enum.into([:luna, :terra, :sol], %{}, fn tier ->
+    Enum.into([:luna, :terra, :sol, :astra], %{}, fn tier ->
       active =
         Enum.count(state.running, fn {_issue_id, entry} ->
           Map.get(entry, :selected_model_tier) == tier

@@ -236,7 +236,8 @@ defmodule SymphonyElixir.Config.Schema do
     @default_models %{
       "luna" => "gpt-5.6-luna",
       "terra" => "gpt-5.6-terra",
-      "sol" => "gpt-5.6-sol"
+      "sol" => "gpt-5.6-sol",
+      "astra" => "gpt-6-astra"
     }
     @default_classifier_command "codex --disable shell_tool --disable unified_exec --disable code_mode_host --disable browser_use --disable in_app_browser --disable computer_use --disable apps --disable plugins --disable multi_agent --disable workspace_dependencies --disable skill_search --disable view_image --disable image_generation --disable tool_suggest app-server"
 
@@ -280,14 +281,16 @@ defmodule SymphonyElixir.Config.Schema do
 
     defp validate_models(:models, models) when is_map(models) do
       invalid =
-        Enum.reject(["luna", "terra", "sol"], fn tier ->
+        Enum.reject(["luna", "terra", "sol", "astra"], fn tier ->
           case Map.get(models, tier) do
             model when is_binary(model) -> String.trim(model) != ""
             _ -> false
           end
         end)
 
-      if invalid == [], do: [], else: [models: "must define non-blank luna, terra, and sol model ids"]
+      if invalid == [],
+        do: [],
+        else: [models: "must define non-blank luna, terra, sol, and astra model ids"]
     end
 
     defp validate_models(:models, _models), do: [models: "must be a map"]

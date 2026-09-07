@@ -12,7 +12,7 @@ defmodule SymphonyElixir.Codex.MetadataClassifier do
     "additionalProperties" => false,
     "required" => ["tier", "confidence", "reason"],
     "properties" => %{
-      "tier" => %{"type" => "string", "enum" => ["luna", "terra", "sol"]},
+      "tier" => %{"type" => "string", "enum" => ["luna", "terra", "sol", "astra"]},
       "confidence" => %{"type" => "number", "minimum" => 0, "maximum" => 1},
       "reason" => %{"type" => "string", "maxLength" => 80}
     }
@@ -74,12 +74,13 @@ defmodule SymphonyElixir.Codex.MetadataClassifier do
     Do not call tools, read files, run commands, or obtain any additional context.
 
     Return exactly one JSON object with this schema:
-    {"tier":"luna|terra|sol","confidence":0.0,"reason":"short_machine_reason"}
+    {"tier":"luna|terra|sol|astra","confidence":0.0,"reason":"short_machine_reason"}
 
     luna: bounded/localized low-risk bug, test, UI copy/layout, config, docs, or mechanical one-subsystem change.
     terra: normal default development, feature/debugging/integration, several files, several edge cases, or moderate cross-component work.
     sol: architecture, difficult unknown root cause, concurrency/race, security/auth/access, destructive data integrity, complex migration, or difficult infrastructure/release reasoning.
-    Do not choose sol merely because words such as CI, backend, or migration appear. If uncertain, return terra with confidence below 0.65.
+    astra: exceptional cross-system architecture or a difficult systemic problem spanning multiple services where the strongest reasoning is necessary. Choose astra only with confidence at least 0.90.
+    Do not choose sol or astra merely because words such as CI, backend, or migration appear. If uncertain, return terra with confidence below 0.65.
 
     ISSUE_METADATA_JSON:
     #{Jason.encode!(metadata)}

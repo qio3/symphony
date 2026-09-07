@@ -121,7 +121,8 @@ defmodule SymphonyElixir.TestSupport do
           model_routing_models: %{
             "luna" => "gpt-5.6-luna",
             "terra" => "gpt-5.6-terra",
-            "sol" => "gpt-5.6-sol"
+            "sol" => "gpt-5.6-sol",
+            "astra" => "gpt-6-astra"
           },
           model_routing_force_sol_labels: [],
           hook_after_create: nil,

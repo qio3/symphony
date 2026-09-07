@@ -120,7 +120,7 @@ class TelegramCommandHandler:
                 f"Symphony {service_text}",
                 f"Intake: {'Active' if intake.get('active') else 'Paused'}",
                 f"Workers: {workers.get('running', 0)}/{workers.get('limit', 0)}",
-                f"Models: {_model_count(models, 'luna')} · {_model_count(models, 'terra')} · {_model_count(models, 'sol')}",
+                f"Models: {_model_count(models, 'luna')} · {_model_count(models, 'terra')} · {_model_count(models, 'sol')} · {_model_count(models, 'astra')}",
                 f"Weekly: {weekly_text}",
                 "",
                 f"Backlog: {counts.get('backlog', 0)}",

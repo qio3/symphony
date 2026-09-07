@@ -19,6 +19,7 @@ defmodule SymphonyElixir.UsageCostTest do
   end
 
   test "unknown models remain unavailable instead of inventing a price" do
+    assert UsageCost.estimate_micros("gpt-6-astra", %{total_tokens: 10}) == nil
     assert UsageCost.estimate_micros("gpt-unknown", %{total_tokens: 10}) == nil
     assert UsageCost.estimate_micros(nil, %{total_tokens: 10}) == nil
     assert UsageCost.estimate_micros("gpt-5.6-luna", :invalid) == nil
