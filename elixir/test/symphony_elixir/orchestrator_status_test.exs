@@ -856,6 +856,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   test "issue usage selects the latest attempt by timestamp rather than thread id" do
     path = Path.join(System.tmp_dir!(), "symphony-orchestrator-attempts-#{System.unique_integer([:positive])}.jsonl")
     issue_id = "issue-attempt-order"
+    now = DateTime.utc_now()
+    earlier_started_at = DateTime.add(now, -3_600, :second)
+    earlier_completed_at = DateTime.add(now, -3_000, :second)
+    later_started_at = DateTime.add(now, -1_800, :second)
 
     usage = %{
       input_tokens: 1,
@@ -873,8 +877,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         issue_id: issue_id,
         issue_identifier: "MT-251",
         thread_id: "thread-z-earlier",
-        started_at: ~U[2026-08-24 10:00:00Z],
-        completed_at: ~U[2026-08-24 10:10:00Z],
+        started_at: earlier_started_at,
+        completed_at: earlier_completed_at,
         token_usage: usage,
         estimated_usage_credits_micros: 10
       })
@@ -884,7 +888,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         issue_id: issue_id,
         issue_identifier: "MT-251",
         thread_id: "thread-a-later",
-        started_at: ~U[2026-08-24 11:00:00Z],
+        started_at: later_started_at,
         completed_at: nil,
         token_usage: usage,
         estimated_usage_credits_micros: 20

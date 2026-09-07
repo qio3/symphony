@@ -2,6 +2,7 @@ defmodule SymphonyElixir.ModelRouterTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.Codex.MetadataClassifier
+  alias SymphonyElixir.Config.Schema.ModelRouting
   alias SymphonyElixir.ModelRouter
 
   @config %{
@@ -63,12 +64,14 @@ defmodule SymphonyElixir.ModelRouterTest do
   end
 
   test "WORKFLOW routing config requires every tier including Astra" do
-    write_workflow_file!(Workflow.workflow_file_path(),
-      model_routing_enabled: true,
-      model_routing_models: Map.delete(@config.models, "astra")
-    )
+    changeset =
+      ModelRouting.changeset(%ModelRouting{}, %{
+        enabled: true,
+        models: Map.delete(@config.models, "astra")
+      })
 
-    assert {:error, {:invalid_workflow_config, message}} = WorkflowStore.force_reload()
+    refute changeset.valid?
+    {message, _metadata} = changeset.errors[:models]
     assert message =~ "must define non-blank luna, terra, sol, and astra"
   end
 
