@@ -37,3 +37,10 @@ jobs:
 
       - name: Verify make all
         run: make all
+
+      - name: Verify Owner Control and host release templates
+        working-directory: .
+        env:
+          PYTHONPATH: control
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m unittest discover -s control/tests
