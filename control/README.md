@@ -69,6 +69,10 @@ The optional infrastructure file stays outside the repository and contains only 
 key-path, and runner-name mappings. Owner Control uses it for read-only CPU/RAM samples and joins
 those hosts to GitHub Actions runner/job state; it does not expose an SSH or shell action.
 
+Host launcher and Compose release templates live in [`control/host`](host/README.md). They keep the
+trusted runtime SHA and Codex CLI version in one non-secret `release.json` and run all fail-closed
+checkout preflight checks before starting Owner Control or Docker.
+
 Non-loopback binding is rejected unless `SYMPHONY_CONTROL_ALLOW_NON_LOOPBACK=1` is explicit. If the
 Symphony container later needs a Docker-host binding, restrict that interface with the host firewall
 and keep bearer authentication enabled.

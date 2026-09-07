@@ -1,0 +1,7 @@
+services:
+  symphony:
+    build:
+      args:
+        SYMPHONY_SHA: ${SYMPHONY_RELEASE_SHA:?release SHA is required}
+        CODEX_VERSION: ${SYMPHONY_CODEX_VERSION:?Codex version is required}
+    image: zavod-symphony:${SYMPHONY_RELEASE_SHA:?release SHA is required}
