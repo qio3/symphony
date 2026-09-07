@@ -150,6 +150,7 @@ defmodule SymphonyElixir.CoreTest do
 
     System.put_env("LINEAR_API_KEY", "test-linear-api-key")
     Workflow.clear_workflow_file_path()
+    assert :ok = WorkflowStore.force_reload()
 
     assert {:ok, %{config: config, prompt: prompt}} = Workflow.load()
     assert is_map(config)
@@ -1652,6 +1653,7 @@ defmodule SymphonyElixir.CoreTest do
 
     System.put_env("LINEAR_API_KEY", "test-linear-api-key")
     Workflow.set_workflow_file_path(Path.expand("WORKFLOW.md", File.cwd!()))
+    assert :ok = WorkflowStore.force_reload()
 
     issue = %Issue{
       identifier: "MT-616",
