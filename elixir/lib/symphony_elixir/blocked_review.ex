@@ -6,9 +6,9 @@ defmodule SymphonyElixir.BlockedReview do
   Owner Control alone applies the structured result.
   """
 
-  alias SymphonyElixir.Workspace
   alias SymphonyElixir.Codex.AppServer
   alias SymphonyElixir.Tracker.Issue
+  alias SymphonyElixir.Workspace
 
   @model "gpt-6-astra"
   @timeout_ms 600_000

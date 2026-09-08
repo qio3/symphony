@@ -2298,36 +2298,55 @@ defmodule SymphonyElixir.Orchestrator do
     labels = Enum.map(Map.get(issue, :labels, []), &normalize_label/1)
     review = Map.get(issue, :blocked_review)
 
-    cond do
-      normalize_issue_state(status) != "blocked" or normalize_issue_state(state) != "open" ->
-        []
-
-      "symphony" in labels or "symphony:quarantined" in labels ->
-        []
-
-      is_map(review) and Map.get(review, :version) == version and
-        Map.get(review, :status) == "claimed" and
-          not blocked_review_claim_expired?(review) ->
-        []
-
-      is_map(review) and Map.get(review, :version) == version and
-          Map.get(review, :status) == "completed" ->
-        completed_blocked_review_candidate(number, version, issue, review)
-
-      true ->
-        [
-          %{
-            number: number,
-            blocker_version: version,
-            mode: :review,
-            context: Map.put(issue, :blocker_version, version),
-            result: nil
-          }
-        ]
-    end
+    blocked_review_candidate_for_state(
+      number,
+      version,
+      issue,
+      review,
+      blocked_review_eligible?(status, state, labels, review, version)
+    )
   end
 
   defp blocked_review_candidate(_issue), do: []
+
+  defp blocked_review_eligible?(status, state, labels, review, version) do
+    normalize_issue_state(status) == "blocked" and
+      normalize_issue_state(state) == "open" and
+      "symphony" not in labels and
+      "symphony:quarantined" not in labels and
+      not active_blocked_review_claim?(review, version)
+  end
+
+  defp active_blocked_review_claim?(review, version) do
+    is_map(review) and
+      Map.get(review, :version) == version and
+      Map.get(review, :status) == "claimed" and
+      not blocked_review_claim_expired?(review)
+  end
+
+  defp blocked_review_candidate_for_state(_number, _version, _issue, _review, false), do: []
+
+  defp blocked_review_candidate_for_state(number, version, issue, review, true) do
+    if completed_blocked_review?(review, version) do
+      completed_blocked_review_candidate(number, version, issue, review)
+    else
+      [
+        %{
+          number: number,
+          blocker_version: version,
+          mode: :review,
+          context: Map.put(issue, :blocker_version, version),
+          result: nil
+        }
+      ]
+    end
+  end
+
+  defp completed_blocked_review?(review, version) do
+    is_map(review) and
+      Map.get(review, :version) == version and
+      Map.get(review, :status) == "completed"
+  end
 
   defp blocked_review_claim_expired?(review) do
     with value when is_binary(value) <- Map.get(review, :claim_expires_at),
