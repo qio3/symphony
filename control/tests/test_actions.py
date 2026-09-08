@@ -569,7 +569,7 @@ class ActionServiceTest(unittest.TestCase):
         )
         self.assertEqual(self.lifecycle.calls[0], ("remove_label", 405, "symphony"))
         self.assertEqual(self.lifecycle.calls[1], ("add_label", 405, "symphony:quarantined"))
-        self.assertEqual(self.lifecycle.calls[2], ("set_status", 405, "Blocked"))
+        self.assertEqual(self.lifecycle.calls[2], ("set_status", 405, "Ready for AI"))
         self.assertEqual(self.lifecycle.calls[3][0:2], ("comment", 405))
         comment = self.lifecycle.calls[3][2]
         self.assertNotRegex(comment, r"[\x00-\x1f\x7f-\x9f]")
@@ -580,6 +580,73 @@ class ActionServiceTest(unittest.TestCase):
         self.assertLessEqual(len(persisted["reason"].encode("utf-8")), 512)
         self.assertNotRegex(persisted["reason"], r"[\x00-\x1f\x7f-\x9f]")
         self.assertIn("quarantined_at", persisted)
+
+    def test_technical_quarantine_keeps_ready_status_and_rejects_lease_after_restart(self):
+        self.snapshot["issues"]["405"]["status"] = "Ready for AI"
+        self.actions.execute_internal(
+            "quarantine_before_run", {"issue": 405, "reason": "invalid git"}
+        )
+        self.assertFalse(any(call[0] == "set_status" for call in self.lifecycle.calls))
+        saved = self.store.quarantine_for(405)
+        self.snapshot["issues"]["405"]["labels"] = ["symphony:quarantined"]
+        self.lifecycle.calls.clear()
+        restarted = ActionService(
+            snapshot_provider=lambda: self.snapshot,
+            lifecycle=self.lifecycle,
+            supervisor=self.supervisor,
+            state_store=StateStore(self.state_path),
+        )
+
+        for _ in range(2):
+            restarted.execute_internal(
+                "quarantine_before_run", {"issue": 405, "reason": "later error"}
+            )
+            self.assertEqual(StateStore(self.state_path).quarantine_for(405), saved)
+            with self.assertRaisesRegex(ActionError, "quarantin"):
+                restarted.execute("lease", {"issue": 405})
+
+        self.assertTrue(all(call[0] == "comment" for call in self.lifecycle.calls))
+        self.assertTrue(all("invalid git" in call[2] for call in self.lifecycle.calls))
+        with self.assertRaises(ActionError):
+            restarted.execute_internal(
+                "claim_blocked_review", {"issue": 405, "version": "technical-failure"}
+            )
+
+    def test_technical_quarantine_retry_after_status_failure_preserves_reason(self):
+        self.lifecycle.fail_on = "set_status"
+        with self.assertRaisesRegex(RuntimeError, "status unavailable"):
+            self.actions.execute_internal(
+                "quarantine_before_run", {"issue": 405, "reason": "invalid git"}
+            )
+        saved = self.store.quarantine_for(405)
+        self.snapshot["issues"]["405"]["labels"] = ["symphony:quarantined"]
+        self.lifecycle.fail_on = None
+        self.lifecycle.calls.clear()
+        restarted = ActionService(
+            snapshot_provider=lambda: self.snapshot,
+            lifecycle=self.lifecycle,
+            supervisor=self.supervisor,
+            state_store=StateStore(self.state_path),
+        )
+        restarted.execute_internal(
+            "quarantine_before_run", {"issue": 405, "reason": "later error"}
+        )
+        self.assertEqual(self.lifecycle.calls[0], ("set_status", 405, "Ready for AI"))
+        self.assertEqual(StateStore(self.state_path).quarantine_for(405), saved)
+        self.assertNotIn(("add_label", 405, "symphony"), self.lifecycle.calls)
+
+    def test_late_technical_quarantine_does_not_overwrite_owner_or_delivered_state(self):
+        for status in ("Blocked", "Ready for Acceptance", "Done", "Postponed"):
+            with self.subTest(status=status):
+                self.snapshot["issues"]["405"]["status"] = status
+                self.store.set_quarantine(405, "earlier failure", "2026-09-08T00:00:00Z")
+                saved = self.store.quarantine_for(405)
+                with self.assertRaises(ActionError):
+                    self.actions.execute_internal(
+                        "quarantine_before_run", {"issue": 405, "reason": "late failure"}
+                    )
+                self.assertEqual(self.lifecycle.calls, [])
+                self.assertEqual(self.store.quarantine_for(405), saved)
 
     def test_accept_requires_ready_state_and_synced_test(self):
         self.actions.execute("accept", {"issue": 402})

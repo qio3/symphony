@@ -621,8 +621,10 @@ class ActionService:
             self._lifecycle.remove_label(issue_number, "symphony")
         if not self._has_label(issue, _SYSTEM_QUARANTINE_LABEL):
             self._lifecycle.add_label(issue_number, _SYSTEM_QUARANTINE_LABEL)
-        if str(issue.get("status", "")).casefold() != "blocked":
-            self._lifecycle.set_status(issue_number, "Blocked")
+        # Technical quarantine is not an owner question. The durable record and
+        # label prevent dispatch even when the Project card is Ready for AI.
+        if str(issue.get("status", "")).casefold() == "in progress":
+            self._lifecycle.set_status(issue_number, "Ready for AI")
         comment = self._quarantine_comment(normalized_reason)
         self._lifecycle.comment(issue_number, comment)
         return {
