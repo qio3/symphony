@@ -1037,8 +1037,6 @@ defmodule SymphonyElixir.Orchestrator do
         "mcpServer/elicitation/request"
   end
 
-  defp input_required_blocker?(_running_entry), do: false
-
   defp input_required_completion_outcome(completion) when is_map(completion) do
     outcome = Map.get(completion, :outcome) || Map.get(completion, "outcome")
     normalize_input_required_outcome(outcome)
@@ -1067,8 +1065,6 @@ defmodule SymphonyElixir.Orchestrator do
       codex_message_blocker_error(Map.get(running_entry, :last_codex_message)) ||
       fallback
   end
-
-  defp blocker_error(_running_entry, fallback), do: fallback
 
   defp codex_event_blocker_error(:turn_input_required), do: "codex turn requires operator input"
   defp codex_event_blocker_error(:approval_required), do: "codex turn requires approval"
@@ -1316,9 +1312,6 @@ defmodule SymphonyElixir.Orchestrator do
         blocked_review_failure_result(reason)
     end
   end
-
-  defp apply_blocked_review_result(_client, _number, _version, _claim_token, _result, 0),
-    do: exit(:blocked_review_apply_failed)
 
   defp apply_blocked_review_result(client, number, version, claim_token, result, attempts_left) do
     case client.apply_blocked_review(number, version, claim_token, result) do
