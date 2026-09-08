@@ -110,6 +110,93 @@ class StateStore:
         value = self.read().get("system_quarantines")
         return value if isinstance(value, dict) else {}
 
+    def blocked_reviews(self) -> dict[str, dict[str, Any]]:
+        value = self.read().get("blocked_reviews")
+        if not isinstance(value, dict):
+            return {}
+        return {
+            str(key): dict(review)
+            for key, review in value.items()
+            if isinstance(review, dict)
+        }
+
+    def blocked_review_for(self, issue: int) -> dict[str, Any] | None:
+        if type(issue) is not int or issue <= 0:
+            return None
+        return self.blocked_reviews().get(str(issue))
+
+    def claim_blocked_review(self, issue: int, version: str, claimed_at: str) -> bool:
+        if type(issue) is not int or issue <= 0 or not version or not claimed_at:
+            raise ValueError("invalid blocked review claim")
+        with self._lock:
+            state = self._read_unlocked()
+            reviews = dict(state.get("blocked_reviews") or {})
+            existing = reviews.get(str(issue))
+            if isinstance(existing, dict) and existing.get("version") == version:
+                return False
+            reviews[str(issue)] = {
+                "issue": issue,
+                "version": version,
+                "status": "claimed",
+                "claimed_at": claimed_at,
+                "completed_at": None,
+                "result": None,
+                "applied_steps": [],
+            }
+            state["blocked_reviews"] = reviews
+            self._write_unlocked(state)
+            return True
+
+    def complete_blocked_review(
+        self, issue: int, version: str, result: dict[str, Any], completed_at: str
+    ) -> None:
+        if type(issue) is not int or issue <= 0 or not version or not isinstance(result, dict):
+            raise ValueError("invalid blocked review result")
+        with self._lock:
+            state = self._read_unlocked()
+            reviews = dict(state.get("blocked_reviews") or {})
+            existing = reviews.get(str(issue))
+            if not isinstance(existing, dict) or existing.get("version") != version:
+                raise ValueError("blocked review result does not match its durable claim")
+            review = dict(existing)
+            review.update(
+                {
+                    "status": "completed",
+                    "completed_at": completed_at,
+                    "result": json.loads(json.dumps(result)),
+                }
+            )
+            review.setdefault("applied_steps", [])
+            reviews[str(issue)] = review
+            state["blocked_reviews"] = reviews
+            self._write_unlocked(state)
+
+    def blocked_review_step_completed(self, issue: int, version: str, step: str) -> bool:
+        review = self.blocked_review_for(issue)
+        return bool(
+            isinstance(review, dict)
+            and review.get("version") == version
+            and step in (review.get("applied_steps") or [])
+        )
+
+    def record_blocked_review_step(self, issue: int, version: str, step: str) -> None:
+        if not step:
+            raise ValueError("blocked review step is required")
+        with self._lock:
+            state = self._read_unlocked()
+            reviews = dict(state.get("blocked_reviews") or {})
+            existing = reviews.get(str(issue))
+            if not isinstance(existing, dict) or existing.get("version") != version:
+                raise ValueError("blocked review step does not match its durable result")
+            review = dict(existing)
+            steps = list(review.get("applied_steps") or [])
+            if step not in steps:
+                steps.append(step)
+            review["applied_steps"] = steps
+            reviews[str(issue)] = review
+            state["blocked_reviews"] = reviews
+            self._write_unlocked(state)
+
     def status_history(self) -> list[dict[str, Any]]:
         value = self.read().get("status_history")
         if not isinstance(value, list):

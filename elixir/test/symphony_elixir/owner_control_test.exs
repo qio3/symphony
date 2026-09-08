@@ -87,9 +87,50 @@ defmodule SymphonyElixir.OwnerControlTest do
         Application.fetch_env!(:symphony_elixir, :owner_control_test_intake_active)
     end
 
+    def claim_blocked_review(issue_number, version) do
+      test_pid = Application.fetch_env!(:symphony_elixir, :owner_control_test_pid)
+      cycle_ref = Application.fetch_env!(:symphony_elixir, :owner_control_test_cycle_ref)
+      send(test_pid, {:blocked_review_claim, cycle_ref, issue_number, version})
+
+      {:ok,
+       %{
+         status: "accepted",
+         context: %{
+           number: issue_number,
+           title: "Blocked review",
+           body: "Choose the existing adapter.",
+           blocker_version: version
+         }
+       }}
+    end
+
+    def apply_blocked_review(issue_number, version, result) do
+      test_pid = Application.fetch_env!(:symphony_elixir, :owner_control_test_pid)
+      cycle_ref = Application.fetch_env!(:symphony_elixir, :owner_control_test_cycle_ref)
+      send(test_pid, {:blocked_review_apply, cycle_ref, issue_number, version, result})
+      {:ok, %{status: "accepted"}}
+    end
+
     defp test_orchestrator? do
       Process.info(self(), :registered_name) ==
         {:registered_name, Application.get_env(:symphony_elixir, :owner_control_test_orchestrator_name)}
+    end
+  end
+
+  defmodule FakeBlockedReview do
+    def run(context, recipient) do
+      test_pid = Application.fetch_env!(:symphony_elixir, :owner_control_test_pid)
+      send(test_pid, {:blocked_review_model, context, recipient})
+
+      {:ok,
+       %{
+         "outcome" => "resolved",
+         "decision" => "Use the existing adapter.",
+         "evidence" => ["Covered by the repository contract."],
+         "assumptions" => [],
+         "next_step" => "Return to Ready for AI.",
+         "question" => nil
+       }}
     end
   end
 
@@ -116,7 +157,8 @@ defmodule SymphonyElixir.OwnerControlTest do
       :owner_control_test_intake_active,
       :owner_control_test_orchestrator_name,
       :owner_control_completion_response,
-      :owner_control_completion_test_pid
+      :owner_control_completion_test_pid,
+      :blocked_review_module
     ]
 
     previous = Map.new(keys, &{&1, Application.get_env(:symphony_elixir, &1)})
@@ -172,6 +214,15 @@ defmodule SymphonyElixir.OwnerControlTest do
              Client.quarantine_before_run(401, "workspace before_run hook failed")
 
     assert_receive {:request, :post, "http://127.0.0.1:4080/v1/internal/actions/quarantine_before_run", _headers, %{issue: 401, reason: "workspace before_run hook failed"}}
+
+    assert {:ok, %{status: "accepted"}} = Client.claim_blocked_review(401, "version-1")
+
+    assert_receive {:request, :post, "http://127.0.0.1:4080/v1/internal/actions/claim_blocked_review", _headers, %{issue: 401, version: "version-1"}}
+
+    review = %{outcome: "unresolved", question: "Owner choice?"}
+    assert {:ok, %{status: "accepted"}} = Client.apply_blocked_review(401, "version-1", review)
+
+    assert_receive {:request, :post, "http://127.0.0.1:4080/v1/internal/actions/apply_blocked_review", _headers, %{issue: 401, version: "version-1", result: ^review}}
 
     assert {:error, :unsupported_action} = Client.action(:complete_run, %{issue: 401})
 
@@ -255,6 +306,11 @@ defmodule SymphonyElixir.OwnerControlTest do
 
     assert Client.quarantine_before_run(401, :not_a_reason) ==
              {:error, :invalid_quarantine_request}
+
+    assert Client.claim_blocked_review(401, "") == {:error, :invalid_blocked_review_claim}
+
+    assert Client.apply_blocked_review(401, "version", :bad) ==
+             {:error, :invalid_blocked_review_result}
   end
 
   test "internal actions preserve fail-closed control configuration outcomes" do
@@ -268,6 +324,44 @@ defmodule SymphonyElixir.OwnerControlTest do
 
     assert Client.quarantine_before_run(401, "before_run hook failed") ==
              {:error, :invalid_owner_control_settings}
+  end
+
+  test "blocked review candidates are deduplicated by durable semantic version" do
+    base = %{
+      stale: false,
+      sources: %{github: %{status: "fresh"}},
+      issues: %{
+        "892" => %{
+          number: 892,
+          title: "Review blocker",
+          body: "Choose a reversible adapter.",
+          status: "Blocked",
+          state: "OPEN",
+          labels: [],
+          blocker_version: "v1"
+        }
+      }
+    }
+
+    assert [%{number: 892, mode: :review, blocker_version: "v1"}] =
+             Orchestrator.blocked_review_candidates_for_test(base)
+
+    claimed = put_in(base, [:issues, "892", :blocked_review], %{version: "v1", status: "claimed"})
+    assert Orchestrator.blocked_review_candidates_for_test(claimed) == []
+
+    partial =
+      put_in(base, [:issues, "892", :blocked_review], %{
+        version: "v1",
+        status: "completed",
+        result: %{outcome: "resolved", decision: "Use adapter"},
+        applied_steps: ["comment"]
+      })
+
+    assert [%{mode: :apply_only, result: %{outcome: "resolved"}}] =
+             Orchestrator.blocked_review_candidates_for_test(partial)
+
+    applied = put_in(partial, [:issues, "892", :blocked_review, :applied_steps], ["comment", "ready_for_ai"])
+    assert Orchestrator.blocked_review_candidates_for_test(applied) == []
   end
 
   test "internal completion distinguishes retryable and malformed service errors" do
@@ -773,6 +867,38 @@ defmodule SymphonyElixir.OwnerControlTest do
 
     assert eventually(fn -> map_size(:sys.get_state(pid).running) == 2 end)
     refute_receive {:owner_control_snapshot, ^cycle_ref}, 100
+  end
+
+  test "idle capacity runs at most one delegated blocked review and applies its result" do
+    issue = dispatch_issue(892)
+
+    snapshot =
+      dispatch_snapshot([
+        %{
+          number: 892,
+          title: "Blocked review",
+          body: "Choose a reversible adapter.",
+          status: "Blocked",
+          state: "OPEN",
+          labels: [],
+          blocker_version: "blocked-v1"
+        }
+      ])
+
+    Application.put_env(:symphony_elixir, :blocked_review_module, FakeBlockedReview)
+
+    {pid, task_supervisor, cycle_ref, test_root} =
+      start_dispatch_cycle([issue], snapshot, {:ok, %{status: "accepted"}})
+
+    on_exit(fn -> stop_dispatch_cycle(pid, task_supervisor, test_root) end)
+
+    assert_receive {:blocked_review_claim, ^cycle_ref, 892, "blocked-v1"}, 1_000
+    assert_receive {:blocked_review_model, %{number: 892}, ^pid}, 1_000
+
+    assert_receive {:blocked_review_apply, ^cycle_ref, 892, "blocked-v1", %{"outcome" => "resolved"}},
+                   1_000
+
+    assert eventually(fn -> :sys.get_state(pid).running == %{} end)
   end
 
   test "labeled Ready for AI issues revalidate their lease immediately before dispatch" do

@@ -319,6 +319,7 @@ class GitHubClientTest(unittest.TestCase):
                 "number": 401,
                 "identifier": "#401",
                 "title": "Ready on TEST",
+                "body": None,
                 "url": "https://github.test/issues/401",
                 "status": "Ready for Acceptance",
                 "status_missing": False,
@@ -326,6 +327,14 @@ class GitHubClientTest(unittest.TestCase):
                 "closed_at": None,
                 "labels": ["backend"],
                 "owner_question": "choose A or B?",
+                "comments": [
+                    {"body": "Progress update", "created_at": None, "author": None},
+                    {
+                        "body": "Owner question: choose A or B?",
+                        "created_at": None,
+                        "author": None,
+                    },
+                ],
                 "project_item_id": "project-item-401",
                 "pr": {
                     "number": 99,

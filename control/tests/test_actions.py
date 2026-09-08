@@ -100,6 +100,15 @@ class ActionServiceTest(unittest.TestCase):
                 "403": {"number": 403, "status": "Ready for AI", "state": "OPEN", "labels": []},
                 "404": {"number": 404, "status": "In Progress", "state": "OPEN", "labels": []},
                 "405": {"number": 405, "status": "In Progress", "state": "OPEN", "labels": ["symphony"]},
+                "406": {
+                    "number": 406,
+                    "status": "Blocked",
+                    "state": "OPEN",
+                    "labels": ["ждёт-владельца"],
+                    "blocker_version": "blocked-v1",
+                    "body": "Choose a reversible implementation detail.",
+                    "comments": [],
+                },
             },
             "running": [],
             "retrying": [],
@@ -111,6 +120,92 @@ class ActionServiceTest(unittest.TestCase):
             supervisor=self.supervisor,
             state_store=self.store,
         )
+
+    def test_internal_blocked_review_claim_is_durable_and_apply_is_idempotent(self):
+        claimed = self.actions.execute_internal(
+            "claim_blocked_review", {"issue": 406, "version": "blocked-v1"}
+        )
+        self.assertEqual(claimed["status"], "accepted")
+        self.assertEqual(claimed["context"]["body"], self.snapshot["issues"]["406"]["body"])
+
+        with self.assertRaisesRegex(ActionError, "already claimed"):
+            self.actions.execute_internal(
+                "claim_blocked_review", {"issue": 406, "version": "blocked-v1"}
+            )
+
+        result = {
+            "outcome": "resolved",
+            "decision": "Use the existing adapter.",
+            "evidence": ["The adapter already covers this path."],
+            "assumptions": ["No production mutation is required."],
+            "next_step": "Implement through the normal worker.",
+            "question": None,
+        }
+        self.snapshot["running"] = [
+            {
+                "issue_id": "406",
+                "mode": "blocked_review",
+                "blocker_version": "blocked-v1",
+            }
+        ]
+        applied = self.actions.execute_internal(
+            "apply_blocked_review",
+            {"issue": 406, "version": "blocked-v1", "result": result},
+        )
+        repeated = self.actions.execute_internal(
+            "apply_blocked_review",
+            {"issue": 406, "version": "blocked-v1", "result": result},
+        )
+
+        self.assertEqual(applied, repeated)
+        self.assertEqual(
+            [call[:2] for call in self.lifecycle.calls],
+            [("comment", 406), ("remove_label", 406), ("set_status", 406)],
+        )
+        self.assertIn("gpt-6-astra", self.lifecycle.calls[0][2])
+        self.assertEqual(self.lifecycle.calls[-1], ("set_status", 406, "Ready for AI"))
+
+    def test_unresolved_blocked_review_keeps_issue_blocked(self):
+        self.actions.execute_internal(
+            "claim_blocked_review", {"issue": 406, "version": "blocked-v1"}
+        )
+        result = {
+            "outcome": "unresolved",
+            "decision": None,
+            "evidence": [],
+            "assumptions": [],
+            "next_step": "Owner must provide production access.",
+            "question": "Provide read-only credentials?",
+        }
+        self.actions.execute_internal(
+            "apply_blocked_review",
+            {"issue": 406, "version": "blocked-v1", "result": result},
+        )
+
+        self.assertEqual([call[0] for call in self.lifecycle.calls], ["comment"])
+
+    def test_blocked_review_result_refuses_to_overwrite_a_new_live_lease(self):
+        self.actions.execute_internal(
+            "claim_blocked_review", {"issue": 406, "version": "blocked-v1"}
+        )
+        self.snapshot["issues"]["406"]["labels"] = ["symphony"]
+
+        with self.assertRaisesRegex(ActionError, "live worker or lease"):
+            self.actions.execute_internal(
+                "apply_blocked_review",
+                {
+                    "issue": 406,
+                    "version": "blocked-v1",
+                    "result": {
+                        "outcome": "resolved",
+                        "decision": "Use adapter",
+                        "evidence": [],
+                        "assumptions": [],
+                        "next_step": "Implement",
+                        "question": None,
+                    },
+                },
+            )
 
     def test_run_sets_ready_for_ai_before_acquiring_lease(self):
         result = self.actions.execute("run", {"issue": 401})

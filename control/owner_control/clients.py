@@ -521,6 +521,7 @@ class GitHubClient:
             "number": content["number"],
             "identifier": f"#{content['number']}",
             "title": content.get("title"),
+            "body": content.get("body"),
             "url": content.get("url"),
             "status": status or "Backlog",
             "status_missing": status is None,
@@ -528,6 +529,15 @@ class GitHubClient:
             "closed_at": content.get("closedAt"),
             "labels": [label.get("name") for label in (content.get("labels") or {}).get("nodes") or [] if label.get("name")],
             "owner_question": extract_owner_question(comments),
+            "comments": [
+                {
+                    "body": comment.get("body"),
+                    "created_at": comment.get("createdAt"),
+                    "author": (comment.get("author") or {}).get("login"),
+                }
+                for comment in comments
+                if isinstance(comment, dict)
+            ],
             "project_item_id": node.get("id"),
             "pr": normalized_pr,
             "ci": ci,
@@ -702,9 +712,9 @@ query OwnerControlProject($projectId: ID!, $cursor: String) {
           content {
             __typename
             ... on Issue {
-              number title url state closedAt
+              number title body url state closedAt
               labels(first: 30) { nodes { name } }
-              comments(last: 20) { nodes { body } }
+              comments(last: 20) { nodes { body createdAt author { login } } }
               closedByPullRequestsReferences(first: 10) {
                 nodes {
                   number url state merged

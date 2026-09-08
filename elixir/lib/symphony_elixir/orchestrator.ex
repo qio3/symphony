@@ -9,6 +9,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   alias SymphonyElixir.{
     AgentRunner,
+    BlockedReview,
     Config,
     ModelRouter,
     SourceCircuit,
@@ -201,7 +202,12 @@ defmodule SymphonyElixir.Orchestrator do
         state = record_session_completion_totals(state, running_entry)
         session_id = running_entry_session_id(running_entry)
 
-        state = handle_agent_down(reason, state, issue_id, running_entry, session_id)
+        state =
+          if Map.get(running_entry, :mode) == :blocked_review do
+            handle_blocked_review_down(reason, state, issue_id, running_entry, session_id)
+          else
+            handle_agent_down(reason, state, issue_id, running_entry, session_id)
+          end
 
         Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
 
@@ -1157,17 +1163,184 @@ defmodule SymphonyElixir.Orchestrator do
     owner_control = owner_control_dispatch_context()
     state = apply_owner_worker_limit(state, owner_control)
 
-    issues
-    |> sort_issues_for_dispatch(owner_control.resumable_issue_numbers)
-    |> Enum.reduce(state, fn issue, state_acc ->
-      maybe_dispatch_issue(
-        issue,
-        state_acc,
-        active_states,
-        terminal_states,
-        owner_control
-      )
-    end)
+    state =
+      issues
+      |> sort_issues_for_dispatch(owner_control.resumable_issue_numbers)
+      |> Enum.reduce(state, fn issue, state_acc ->
+        maybe_dispatch_issue(
+          issue,
+          state_acc,
+          active_states,
+          terminal_states,
+          owner_control
+        )
+      end)
+
+    maybe_dispatch_blocked_review(state, owner_control)
+  end
+
+  defp maybe_dispatch_blocked_review(%State{} = state, owner_control) do
+    cond do
+      owner_control.intake_active != true ->
+        state
+
+      normal_dispatch_pending?(state, owner_control) ->
+        state
+
+      not fresh_dispatch_slots_available?(state) ->
+        state
+
+      Enum.any?(state.running, fn {_id, entry} -> Map.get(entry, :mode) == :blocked_review end) ->
+        state
+
+      true ->
+        case List.first(owner_control.blocked_review_candidates) do
+          nil -> state
+          candidate -> dispatch_blocked_review(state, candidate)
+        end
+    end
+  end
+
+  defp normal_dispatch_pending?(state, owner_control) do
+    case {owner_control.ready_issue_numbers, owner_control.resumable_issue_numbers} do
+      {ready, resumable} when is_map(ready) and is_map(resumable) ->
+        ready
+        |> Map.merge(resumable)
+        |> Map.keys()
+        |> Enum.any?(fn issue_id ->
+          not Map.has_key?(state.running, issue_id) and
+            not Map.has_key?(state.blocked, issue_id) and
+            not MapSet.member?(state.claimed, issue_id)
+        end)
+
+      _owner_control_disabled ->
+        false
+    end
+  end
+
+  defp dispatch_blocked_review(%State{} = state, candidate) do
+    client = Application.get_env(:symphony_elixir, :owner_control_client_module, OwnerControlClient)
+    number = candidate.number
+    version = candidate.blocker_version
+
+    claim_result =
+      case candidate.mode do
+        :review -> client.claim_blocked_review(number, version)
+        :apply_only -> {:ok, %{context: candidate.context}}
+      end
+
+    case claim_result do
+      {:ok, response} ->
+        context = Map.merge(candidate.context, Map.get(response, :context, %{}))
+        start_blocked_review_task(state, candidate, context, client)
+
+      {:error, reason} ->
+        Logger.info("Skipping blocked review claim issue=#{number}: #{inspect(reason)}")
+        state
+    end
+  end
+
+  defp start_blocked_review_task(state, candidate, context, client) do
+    recipient = self()
+
+    task = fn ->
+      result =
+        case candidate.mode do
+          :apply_only -> candidate.result
+          :review -> blocked_review_result(context, recipient)
+        end
+
+      apply_blocked_review_result(client, candidate.number, candidate.blocker_version, result, 3)
+    end
+
+    case Task.Supervisor.start_child(state.task_supervisor, task) do
+      {:ok, pid} ->
+        ref = Process.monitor(pid)
+        issue = blocked_review_issue(candidate)
+
+        route = %{
+          selected_tier: :astra,
+          actual_model: "gpt-6-astra",
+          routing_reason: :blocked_review
+        }
+
+        entry =
+          issue
+          |> new_running_entry(pid, ref, nil, route, nil)
+          |> Map.merge(%{
+            mode: :blocked_review,
+            blocker_version: candidate.blocker_version,
+            review_mode: candidate.mode
+          })
+
+        Logger.info("Dispatching blocked review issue=#{candidate.number} mode=#{candidate.mode} model=gpt-6-astra")
+
+        %{
+          state
+          | running: Map.put(state.running, issue.id, entry),
+            claimed: MapSet.put(state.claimed, issue.id)
+        }
+
+      {:error, reason} ->
+        Logger.warning("Unable to start blocked review issue=#{candidate.number}: #{inspect(reason)}")
+        state
+    end
+  end
+
+  defp blocked_review_result(context, recipient) do
+    reviewer = Application.get_env(:symphony_elixir, :blocked_review_module, BlockedReview)
+
+    case reviewer.run(context, recipient) do
+      {:ok, result} ->
+        result
+
+      {:error, reason} ->
+        %{
+          "outcome" => "unresolved",
+          "decision" => nil,
+          "evidence" => ["gpt-6-astra review failed: #{inspect(reason)}"],
+          "assumptions" => [],
+          "next_step" => "Retry after the delegated reviewer is healthy.",
+          "question" => "Should the blocked review be retried after gpt-6-astra recovers?"
+        }
+    end
+  end
+
+  defp apply_blocked_review_result(_client, _number, _version, _result, 0),
+    do: exit(:blocked_review_apply_failed)
+
+  defp apply_blocked_review_result(client, number, version, result, attempts_left) do
+    case client.apply_blocked_review(number, version, result) do
+      {:ok, _response} ->
+        :ok
+
+      {:error, _reason} when attempts_left > 1 ->
+        Process.sleep(250)
+        apply_blocked_review_result(client, number, version, result, attempts_left - 1)
+
+      {:error, reason} ->
+        exit({:blocked_review_apply_failed, reason})
+    end
+  end
+
+  defp blocked_review_issue(candidate) do
+    %Issue{
+      id: Integer.to_string(candidate.number),
+      identifier: "BLOCKED-#{candidate.number}-#{String.slice(candidate.blocker_version, 0, 12)}",
+      title: to_string(Map.get(candidate.context, :title) || "Blocked review"),
+      description: to_string(Map.get(candidate.context, :body) || ""),
+      state: "open",
+      labels: [],
+      dispatchable: false
+    }
+  end
+
+  defp handle_blocked_review_down(reason, state, issue_id, running_entry, session_id) do
+    Logger.info("Blocked review finished issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
+
+    state
+    |> record_model_completion(running_entry)
+    |> Map.update!(:claimed, &MapSet.delete(&1, issue_id))
   end
 
   defp maybe_dispatch_issue(issue, state, active_states, terminal_states, owner_control) do
@@ -2050,7 +2223,8 @@ defmodule SymphonyElixir.Orchestrator do
           intake_active: true,
           ready_issue_numbers: fresh_ready_issue_numbers(snapshot),
           resumable_issue_numbers: fresh_resumable_issue_numbers(snapshot),
-          worker_limit: fresh_owner_worker_limit(snapshot)
+          worker_limit: fresh_owner_worker_limit(snapshot),
+          blocked_review_candidates: fresh_blocked_review_candidates(snapshot)
         }
 
       _disabled_or_unavailable ->
@@ -2063,7 +2237,8 @@ defmodule SymphonyElixir.Orchestrator do
       intake_active: intake_active,
       ready_issue_numbers: %{},
       resumable_issue_numbers: %{},
-      worker_limit: nil
+      worker_limit: nil,
+      blocked_review_candidates: []
     }
   end
 
@@ -2072,8 +2247,89 @@ defmodule SymphonyElixir.Orchestrator do
       intake_active: true,
       ready_issue_numbers: :owner_control_disabled,
       resumable_issue_numbers: :owner_control_disabled,
-      worker_limit: nil
+      worker_limit: nil,
+      blocked_review_candidates: []
     }
+  end
+
+  @doc false
+  def blocked_review_candidates_for_test(snapshot), do: fresh_blocked_review_candidates(snapshot)
+
+  defp fresh_blocked_review_candidates(snapshot) do
+    if fresh_owner_control_snapshot?(snapshot) do
+      snapshot
+      |> Map.get(:issues, %{})
+      |> Enum.flat_map(fn {_key, issue} -> blocked_review_candidate(issue) end)
+      |> Enum.sort_by(& &1.number)
+    else
+      []
+    end
+  end
+
+  defp blocked_review_candidate(
+         %{
+           number: number,
+           status: status,
+           state: state,
+           blocker_version: version
+         } = issue
+       )
+       when is_integer(number) and number > 0 and is_binary(version) and byte_size(version) > 0 do
+    labels = Enum.map(Map.get(issue, :labels, []), &normalize_label/1)
+    review = Map.get(issue, :blocked_review)
+
+    cond do
+      normalize_issue_state(status) != "blocked" or normalize_issue_state(state) != "open" ->
+        []
+
+      "symphony" in labels or "symphony:quarantined" in labels ->
+        []
+
+      is_map(review) and Map.get(review, :version) == version and
+          Map.get(review, :status) == "claimed" ->
+        []
+
+      is_map(review) and Map.get(review, :version) == version and
+          Map.get(review, :status) == "completed" ->
+        completed_blocked_review_candidate(number, version, issue, review)
+
+      true ->
+        [
+          %{
+            number: number,
+            blocker_version: version,
+            mode: :review,
+            context: Map.put(issue, :blocker_version, version),
+            result: nil
+          }
+        ]
+    end
+  end
+
+  defp blocked_review_candidate(_issue), do: []
+
+  defp completed_blocked_review_candidate(number, version, issue, review) do
+    result = Map.get(review, :result)
+    steps = Map.get(review, :applied_steps, [])
+    outcome = if is_map(result), do: Map.get(result, :outcome), else: nil
+
+    fully_applied? =
+      "comment" in steps and
+        (outcome == "unresolved" or "ready_for_ai" in steps)
+
+    if is_map(result) and not fully_applied? do
+      [
+        %{
+          number: number,
+          blocker_version: version,
+          mode: :apply_only,
+          context: Map.put(issue, :blocker_version, version),
+          result: result
+        }
+      ]
+    else
+      []
+    end
   end
 
   defp fresh_owner_worker_limit(snapshot) do
@@ -2516,6 +2772,9 @@ defmodule SymphonyElixir.Orchestrator do
           routing_reason: Map.get(metadata, :routing_reason),
           escalated_from: Map.get(metadata, :escalated_from),
           escalation_history: Map.get(metadata, :escalation_history, []),
+          mode: Map.get(metadata, :mode),
+          blocker_version: Map.get(metadata, :blocker_version),
+          review_mode: Map.get(metadata, :review_mode),
           runtime_seconds: running_seconds(metadata.started_at, now)
         }
       end)

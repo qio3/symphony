@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -25,12 +27,21 @@ class SnapshotBuilder:
         landing: dict[str, Any] | None = None,
         quarantines: dict[str, Any] | None = None,
         worker_max: int | None = None,
+        blocked_reviews: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         items = {
             str(item["number"]): self._project_item(item)
             for item in project.get("items", [])
             if isinstance(item, dict) and item.get("number") is not None
         }
+        saved_blocked_reviews = blocked_reviews if isinstance(blocked_reviews, dict) else {}
+        for issue_key, item in items.items():
+            if str(item.get("status") or "").casefold() != "blocked":
+                continue
+            item["blocker_version"] = blocker_version(item)
+            saved_review = saved_blocked_reviews.get(issue_key)
+            if isinstance(saved_review, dict):
+                item["blocked_review"] = deepcopy(saved_review)
         running = self._runtime_by_issue(runtime.get("running", []))
         retrying = self._runtime_by_issue(runtime.get("retrying", []))
         blocked = self._runtime_by_issue(runtime.get("blocked", []))
@@ -118,15 +129,26 @@ class SnapshotBuilder:
                 lanes["system_quarantines"].append(item)
                 counts["quarantined"] += 1
             elif runtime_blocked is not None or status.casefold() == "blocked":
-                item = self._with_runtime(item, runtime_blocked or {})
+                blocked_runtime = runtime_blocked or (
+                    runtime_running
+                    if (runtime_running or {}).get("mode") == "blocked_review"
+                    else {}
+                )
+                item = self._with_runtime(item, blocked_runtime)
                 item["status"] = "Blocked"
-                item["stage"] = "Blocked"
+                item["stage"] = (
+                    "Reviewing blocker"
+                    if blocked_runtime.get("mode") == "blocked_review"
+                    else "Blocked"
+                )
+                if blocked_runtime.get("mode") == "blocked_review":
+                    counts["running"] += 1
                 item["question"] = (
                     item.get("owner_question")
-                    or (runtime_blocked or {}).get("last_message")
+                    or blocked_runtime.get("last_message")
                     or item.get("question")
                 )
-                item["reason"] = (runtime_blocked or {}).get("error") or item.get("reason")
+                item["reason"] = blocked_runtime.get("error") or item.get("reason")
                 lanes["blocked"].append(item)
                 counts["blocked"] += 1
             elif status.casefold() == "ready for acceptance":
@@ -478,6 +500,7 @@ class SnapshotBuilder:
         copied.setdefault("stage", copied.get("status"))
         return copied
 
+
     @staticmethod
     def _runtime_only_item(issue_key: str, entry: dict[str, Any]) -> dict[str, Any]:
         number = int(issue_key) if issue_key.isdigit() else issue_key
@@ -510,9 +533,13 @@ class SnapshotBuilder:
             "model",
             "turn_count",
             "attempt",
+            "mode",
+            "review_mode",
         ):
             if runtime.get(key) is not None:
                 item[key] = runtime[key]
+        if runtime.get("blocker_version") is not None:
+            item["review_version"] = runtime["blocker_version"]
         return item
 
     @staticmethod
@@ -636,3 +663,37 @@ def _quota_windows(rate_limits: Any) -> dict[str, dict[str, Any] | None]:
 
     visit(rate_limits)
     return {"five_hour": by_duration.get(300), "weekly": by_duration.get(10080)}
+
+
+_BLOCKED_REVIEW_MARKER = "<!-- symphony-blocked-review:"
+
+
+def blocker_version(item: dict[str, Any]) -> str:
+    """Hash semantic blocker inputs while excluding delegated-review comments."""
+    comments = []
+    for comment in item.get("comments") or []:
+        if not isinstance(comment, dict):
+            continue
+        body = str(comment.get("body") or "").strip()
+        if not body or _BLOCKED_REVIEW_MARKER in body:
+            continue
+        comments.append({"body": body, "author": str(comment.get("author") or "")})
+    semantic = {
+        "number": item.get("number"),
+        "title": str(item.get("title") or ""),
+        "body": str(item.get("body") or ""),
+        "owner_question": str(item.get("owner_question") or ""),
+        "labels": sorted(
+            normalized
+            for label in item.get("labels") or []
+            if (normalized := str(label).casefold())
+            not in {"symphony", "symphony:quarantined", "ждёт-владельца"}
+        ),
+        "comments": comments,
+        "pr": item.get("pr"),
+        "ci": item.get("ci"),
+    }
+    encoded = json.dumps(
+        semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()

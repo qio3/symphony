@@ -6,6 +6,26 @@ from owner_control.state_store import StateStore
 
 
 class StateStoreHistoryTest(unittest.TestCase):
+    def test_blocked_review_claim_and_result_are_durable_per_semantic_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "owner-control.json"
+            store = StateStore(path)
+
+            self.assertTrue(store.claim_blocked_review(892, "version-a", "2026-09-08T10:00:00Z"))
+            self.assertFalse(StateStore(path).claim_blocked_review(892, "version-a", "2026-09-08T10:01:00Z"))
+
+            result = {"outcome": "resolved", "decision": "Use the existing retry contract."}
+            StateStore(path).complete_blocked_review(
+                892, "version-a", result, "2026-09-08T10:02:00Z"
+            )
+
+            persisted = StateStore(path).blocked_review_for(892)
+            self.assertEqual(persisted["version"], "version-a")
+            self.assertEqual(persisted["status"], "completed")
+            self.assertEqual(persisted["result"], result)
+            self.assertFalse(StateStore(path).claim_blocked_review(892, "version-a", "2026-09-08T10:03:00Z"))
+            self.assertTrue(StateStore(path).claim_blocked_review(892, "version-b", "2026-09-08T10:04:00Z"))
+
     def test_phase_observation_closes_previous_phase_without_duplicate_entries(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "owner-control.json"

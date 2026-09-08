@@ -254,6 +254,7 @@ class SnapshotService:
             test=test,
             landing=landing,
             quarantines=self._state_store.quarantines(),
+            blocked_reviews=self._state_store.blocked_reviews(),
         )
         snapshot["failures"] = failures
         snapshot["sources"] = sources
