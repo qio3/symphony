@@ -7,6 +7,7 @@ defmodule SymphonyElixir.BlockedReview do
   """
 
   alias SymphonyElixir.Codex.AppServer
+  alias SymphonyElixir.Config
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.Workspace
 
@@ -52,6 +53,7 @@ defmodule SymphonyElixir.BlockedReview do
            :ok <- Workspace.run_before_run_hook(workspace, issue),
            {:ok, _turn} <-
              AppServer.run(workspace, prompt(context), issue,
+               command: review_command(),
                model: @model,
                dynamic_tools: false,
                approval_policy: "never",
@@ -79,6 +81,15 @@ defmodule SymphonyElixir.BlockedReview do
   @doc false
   @spec prompt_for_test(map()) :: String.t()
   def prompt_for_test(context), do: prompt(context)
+
+  defp review_command do
+    command = Config.settings!().codex.command
+
+    case :os.type() do
+      {:unix, :linux} -> command <> " --enable use_legacy_landlock"
+      _other -> command
+    end
+  end
 
   @doc false
   @spec parse_output_for_test(String.t()) :: {:ok, map()} | {:error, term()}
@@ -170,7 +181,7 @@ defmodule SymphonyElixir.BlockedReview do
 
     %Issue{
       id: Integer.to_string(number),
-      identifier: "BLOCKED-#{number}-#{short_version}",
+      identifier: "GH-#{number}-blocked-review-#{short_version}",
       title: to_string(Map.get(context, :title) || Map.get(context, "title") || "Blocked review"),
       description: to_string(Map.get(context, :body) || Map.get(context, "body") || ""),
       state: "open",

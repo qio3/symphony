@@ -1,5 +1,12 @@
 # Symphony Elixir
 
+Blocked Astra reviews use a separate `GH-<number>-blocked-review-<version>` workspace.
+The `GH-` prefix preserves compatibility with the configured GitHub bootstrap hooks;
+review cleanup does not remove the normal `GH-<number>` delivery workspace.
+On Linux, this mode selects Codex's Landlock sandbox so read-only repository
+inspection works in Docker without permission to create nested namespaces.
+The filesystem remains read-only and sandbox network access remains disabled.
+
 This directory contains the current Elixir/OTP implementation of Symphony, based on
 [`SPEC.md`](../SPEC.md) at the repository root.
 
