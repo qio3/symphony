@@ -13,6 +13,8 @@ class StateStoreHistoryTest(unittest.TestCase):
 
             self.assertTrue(store.claim_blocked_review(892, "version-a", "2026-09-08T10:00:00Z"))
             self.assertFalse(StateStore(path).claim_blocked_review(892, "version-a", "2026-09-08T10:01:00Z"))
+            self.assertTrue(StateStore(path).claim_blocked_review(892, "version-a", "2026-09-08T10:11:00Z"))
+            self.assertFalse(StateStore(path).claim_blocked_review(892, "version-a", "2026-09-08T10:22:00Z"))
 
             result = {"outcome": "resolved", "decision": "Use the existing retry contract."}
             StateStore(path).complete_blocked_review(
@@ -22,6 +24,7 @@ class StateStoreHistoryTest(unittest.TestCase):
             persisted = StateStore(path).blocked_review_for(892)
             self.assertEqual(persisted["version"], "version-a")
             self.assertEqual(persisted["status"], "completed")
+            self.assertEqual(persisted["claim_attempt"], 2)
             self.assertEqual(persisted["result"], result)
             self.assertFalse(StateStore(path).claim_blocked_review(892, "version-a", "2026-09-08T10:03:00Z"))
             self.assertTrue(StateStore(path).claim_blocked_review(892, "version-b", "2026-09-08T10:04:00Z"))

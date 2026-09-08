@@ -9,6 +9,10 @@ from pathlib import Path
 from typing import Any
 
 
+_BLOCKED_REVIEW_CLAIM_SECONDS = 10 * 60
+_BLOCKED_REVIEW_MAX_CLAIMS = 2
+
+
 class StateStore:
     """Small atomic local store for owner intent and notification watermarks."""
 
@@ -133,12 +137,35 @@ class StateStore:
             reviews = dict(state.get("blocked_reviews") or {})
             existing = reviews.get(str(issue))
             if isinstance(existing, dict) and existing.get("version") == version:
-                return False
+                existing_claimed_at = _timestamp(existing.get("claimed_at"))
+                requested_at = _timestamp(claimed_at)
+                attempts = existing.get("claim_attempt")
+                attempts = attempts if type(attempts) is int and attempts > 0 else 1
+                claim_is_fresh = (
+                    existing_claimed_at is None
+                    or requested_at is None
+                    or requested_at - existing_claimed_at < _BLOCKED_REVIEW_CLAIM_SECONDS
+                )
+                if (
+                    existing.get("status") == "completed"
+                    or claim_is_fresh
+                    or attempts >= _BLOCKED_REVIEW_MAX_CLAIMS
+                ):
+                    return False
+                claim_attempt = attempts + 1
+            else:
+                claim_attempt = 1
             reviews[str(issue)] = {
                 "issue": issue,
                 "version": version,
                 "status": "claimed",
                 "claimed_at": claimed_at,
+                "claim_expires_at": datetime.fromtimestamp(
+                    (_timestamp(claimed_at) or time.time())
+                    + _BLOCKED_REVIEW_CLAIM_SECONDS,
+                    timezone.utc,
+                ).isoformat(),
+                "claim_attempt": claim_attempt,
                 "completed_at": None,
                 "result": None,
                 "applied_steps": [],

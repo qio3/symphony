@@ -77,9 +77,11 @@ defmodule SymphonyElixir.BlockedReview do
   end
 
   @doc false
+  @spec prompt_for_test(map()) :: String.t()
   def prompt_for_test(context), do: prompt(context)
 
   @doc false
+  @spec parse_output_for_test(String.t()) :: {:ok, map()} | {:error, term()}
   def parse_output_for_test(output), do: parse_output(output)
 
   defp prompt(context) do

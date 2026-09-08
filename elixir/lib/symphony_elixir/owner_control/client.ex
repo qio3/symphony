@@ -21,7 +21,8 @@ defmodule SymphonyElixir.OwnerControl.Client do
     session_id turn_count tokens health_url models model selected_tier actual_model routing_reason
     escalated_from escalation_history luna terra sol astra completed from to quarantined issue
     body comments author created_at blocker_version blocked_review outcome decision evidence
-    assumptions next_step mode review_mode review_version claimed_at applied_steps context result
+    assumptions next_step mode review_mode review_version claimed_at claim_expires_at
+    claim_attempt applied_steps context result
   )a
   @key_lookup Map.new(@known_keys, &{Atom.to_string(&1), &1})
 

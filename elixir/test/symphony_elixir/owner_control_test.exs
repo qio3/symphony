@@ -349,6 +349,15 @@ defmodule SymphonyElixir.OwnerControlTest do
     claimed = put_in(base, [:issues, "892", :blocked_review], %{version: "v1", status: "claimed"})
     assert Orchestrator.blocked_review_candidates_for_test(claimed) == []
 
+    expired =
+      put_in(base, [:issues, "892", :blocked_review], %{
+        version: "v1",
+        status: "claimed",
+        claim_expires_at: DateTime.utc_now() |> DateTime.add(-1, :second) |> DateTime.to_iso8601()
+      })
+
+    assert [%{mode: :review}] = Orchestrator.blocked_review_candidates_for_test(expired)
+
     partial =
       put_in(base, [:issues, "892", :blocked_review], %{
         version: "v1",

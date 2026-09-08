@@ -666,6 +666,12 @@ def _quota_windows(rate_limits: Any) -> dict[str, dict[str, Any] | None]:
 
 
 _BLOCKED_REVIEW_MARKER = "<!-- symphony-blocked-review:"
+_BLOCKER_COMMENT = re.compile(
+    r"(?:owner\s+(?:question|decision)|вопрос\s+владельцу|решение\s+владельца|"
+    r"нужен\s+выбор\s+владельца|нужно\s+решение\s+владельца|"
+    r"symphony-blocked-review-retry|повтор(?:ить|и)\s+(?:astra[- ]?)?разбор)",
+    re.IGNORECASE,
+)
 
 
 def blocker_version(item: dict[str, Any]) -> str:
@@ -675,7 +681,11 @@ def blocker_version(item: dict[str, Any]) -> str:
         if not isinstance(comment, dict):
             continue
         body = str(comment.get("body") or "").strip()
-        if not body or _BLOCKED_REVIEW_MARKER in body:
+        if (
+            not body
+            or _BLOCKED_REVIEW_MARKER in body
+            or _BLOCKER_COMMENT.search(body) is None
+        ):
             continue
         comments.append({"body": body, "author": str(comment.get("author") or "")})
     semantic = {
@@ -690,10 +700,19 @@ def blocker_version(item: dict[str, Any]) -> str:
             not in {"symphony", "symphony:quarantined", "ждёт-владельца"}
         ),
         "comments": comments,
-        "pr": item.get("pr"),
-        "ci": item.get("ci"),
+        "pr": _stable_blocker_pr(item.get("pr")),
     }
     encoded = json.dumps(
         semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _stable_blocker_pr(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return {
+        "number": value.get("number"),
+        "merged": bool(value.get("merged")),
+        "merge_sha": value.get("merge_sha"),
+    }

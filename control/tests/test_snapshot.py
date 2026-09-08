@@ -76,6 +76,7 @@ class SnapshotBuilderTest(unittest.TestCase):
         )
         item["comments"][1]["body"] = "<!-- symphony-blocked-review:new --> another result"
         item["labels"].extend(["symphony", "ждёт-владельца"])
+        item["comments"].append({"body": "unrelated progress update", "author": "contributor"})
         second = SnapshotBuilder().build(
             service={"live": True},
             intake_active=True,

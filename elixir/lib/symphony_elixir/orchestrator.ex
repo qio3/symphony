@@ -1283,6 +1283,14 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.warning("Unable to start blocked review issue=#{candidate.number}: #{inspect(reason)}")
+
+        _ =
+          client.apply_blocked_review(
+            candidate.number,
+            candidate.blocker_version,
+            blocked_review_failure_result({:task_start_failed, reason})
+          )
+
         state
     end
   end
@@ -1295,14 +1303,7 @@ defmodule SymphonyElixir.Orchestrator do
         result
 
       {:error, reason} ->
-        %{
-          "outcome" => "unresolved",
-          "decision" => nil,
-          "evidence" => ["gpt-6-astra review failed: #{inspect(reason)}"],
-          "assumptions" => [],
-          "next_step" => "Retry after the delegated reviewer is healthy.",
-          "question" => "Should the blocked review be retried after gpt-6-astra recovers?"
-        }
+        blocked_review_failure_result(reason)
     end
   end
 
@@ -1338,9 +1339,27 @@ defmodule SymphonyElixir.Orchestrator do
   defp handle_blocked_review_down(reason, state, issue_id, running_entry, session_id) do
     Logger.info("Blocked review finished issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
 
+    if reason != :normal and Map.get(running_entry, :review_mode) == :review do
+      client = Application.get_env(:symphony_elixir, :owner_control_client_module, OwnerControlClient)
+      number = String.to_integer(issue_id)
+      version = Map.fetch!(running_entry, :blocker_version)
+      _ = client.apply_blocked_review(number, version, blocked_review_failure_result(reason))
+    end
+
     state
     |> record_model_completion(running_entry)
     |> Map.update!(:claimed, &MapSet.delete(&1, issue_id))
+  end
+
+  defp blocked_review_failure_result(reason) do
+    %{
+      "outcome" => "unresolved",
+      "decision" => nil,
+      "evidence" => ["gpt-6-astra review failed: #{inspect(reason)}"],
+      "assumptions" => [],
+      "next_step" => "Retry after the delegated reviewer is healthy.",
+      "question" => "Should the blocked review be retried after gpt-6-astra recovers?"
+    }
   end
 
   defp maybe_dispatch_issue(issue, state, active_states, terminal_states, owner_control) do
@@ -2253,6 +2272,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec blocked_review_candidates_for_test(map()) :: [map()]
   def blocked_review_candidates_for_test(snapshot), do: fresh_blocked_review_candidates(snapshot)
 
   defp fresh_blocked_review_candidates(snapshot) do
@@ -2286,7 +2306,8 @@ defmodule SymphonyElixir.Orchestrator do
         []
 
       is_map(review) and Map.get(review, :version) == version and
-          Map.get(review, :status) == "claimed" ->
+        Map.get(review, :status) == "claimed" and
+          not blocked_review_claim_expired?(review) ->
         []
 
       is_map(review) and Map.get(review, :version) == version and
@@ -2307,6 +2328,15 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp blocked_review_candidate(_issue), do: []
+
+  defp blocked_review_claim_expired?(review) do
+    with value when is_binary(value) <- Map.get(review, :claim_expires_at),
+         {:ok, expires_at, _offset} <- DateTime.from_iso8601(value) do
+      DateTime.compare(expires_at, DateTime.utc_now()) == :lt
+    else
+      _invalid_or_legacy_claim -> false
+    end
+  end
 
   defp completed_blocked_review_candidate(number, version, issue, review) do
     result = Map.get(review, :result)
