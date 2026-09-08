@@ -95,6 +95,7 @@ defmodule SymphonyElixir.OwnerControlTest do
       {:ok,
        %{
          status: "accepted",
+         claim_token: "claim-token-#{issue_number}",
          context: %{
            number: issue_number,
            title: "Blocked review",
@@ -104,10 +105,15 @@ defmodule SymphonyElixir.OwnerControlTest do
        }}
     end
 
-    def apply_blocked_review(issue_number, version, result) do
+    def apply_blocked_review(issue_number, version, claim_token, result) do
       test_pid = Application.fetch_env!(:symphony_elixir, :owner_control_test_pid)
       cycle_ref = Application.fetch_env!(:symphony_elixir, :owner_control_test_cycle_ref)
-      send(test_pid, {:blocked_review_apply, cycle_ref, issue_number, version, result})
+
+      send(
+        test_pid,
+        {:blocked_review_apply, cycle_ref, issue_number, version, claim_token, result}
+      )
+
       {:ok, %{status: "accepted"}}
     end
 
@@ -220,9 +226,11 @@ defmodule SymphonyElixir.OwnerControlTest do
     assert_receive {:request, :post, "http://127.0.0.1:4080/v1/internal/actions/claim_blocked_review", _headers, %{issue: 401, version: "version-1"}}
 
     review = %{outcome: "unresolved", question: "Owner choice?"}
-    assert {:ok, %{status: "accepted"}} = Client.apply_blocked_review(401, "version-1", review)
 
-    assert_receive {:request, :post, "http://127.0.0.1:4080/v1/internal/actions/apply_blocked_review", _headers, %{issue: 401, version: "version-1", result: ^review}}
+    assert {:ok, %{status: "accepted"}} =
+             Client.apply_blocked_review(401, "version-1", "claim-1", review)
+
+    assert_receive {:request, :post, "http://127.0.0.1:4080/v1/internal/actions/apply_blocked_review", _headers, %{issue: 401, version: "version-1", claim_token: "claim-1", result: ^review}}
 
     assert {:error, :unsupported_action} = Client.action(:complete_run, %{issue: 401})
 
@@ -309,7 +317,7 @@ defmodule SymphonyElixir.OwnerControlTest do
 
     assert Client.claim_blocked_review(401, "") == {:error, :invalid_blocked_review_claim}
 
-    assert Client.apply_blocked_review(401, "version", :bad) ==
+    assert Client.apply_blocked_review(401, "version", "claim", :bad) ==
              {:error, :invalid_blocked_review_result}
   end
 
@@ -904,7 +912,7 @@ defmodule SymphonyElixir.OwnerControlTest do
     assert_receive {:blocked_review_claim, ^cycle_ref, 892, "blocked-v1"}, 1_000
     assert_receive {:blocked_review_model, %{number: 892}, ^pid}, 1_000
 
-    assert_receive {:blocked_review_apply, ^cycle_ref, 892, "blocked-v1", %{"outcome" => "resolved"}},
+    assert_receive {:blocked_review_apply, ^cycle_ref, 892, "blocked-v1", "claim-token-892", %{"outcome" => "resolved"}},
                    1_000
 
     assert eventually(fn -> :sys.get_state(pid).running == %{} end)

@@ -309,16 +309,17 @@ class ActionService:
         }
         if str(issue_number) in running_issue_ids or self._has_label(issue, "symphony"):
             raise ActionError("blocked review requires an issue without a live worker or lease")
-        claimed = self._state_store.claim_blocked_review(
+        claim_token = self._state_store.claim_blocked_review(
             issue_number, version, datetime.now(timezone.utc).isoformat()
         )
-        if not claimed:
+        if not claim_token:
             raise ActionError("blocked review version is already claimed or completed")
         return {
             "status": "accepted",
             "action": "claim_blocked_review",
             "issue": issue_number,
             "version": version,
+            "claim_token": claim_token,
             "context": {
                 key: issue.get(key)
                 for key in (
@@ -358,15 +359,19 @@ class ActionService:
         if str(issue_number) in conflicting_running or self._has_label(issue, "symphony"):
             raise ActionError("blocked review result cannot overwrite a live worker or lease")
         result = self._blocked_review_result(params.get("result"))
+        claim_token = str(params.get("claim_token") or "").strip()
         persisted = self._state_store.blocked_review_for(issue_number)
         if not isinstance(persisted, dict) or persisted.get("version") != version:
             raise ActionError("blocked review result requires its durable claim")
         if persisted.get("status") == "completed" and persisted.get("result") != result:
             raise ActionError("blocked review result conflicts with the durable result")
         if persisted.get("status") != "completed":
+            if not claim_token:
+                raise ActionError("blocked review result requires its claim token")
             self._state_store.complete_blocked_review(
                 issue_number,
                 version,
+                claim_token,
                 result,
                 datetime.now(timezone.utc).isoformat(),
             )

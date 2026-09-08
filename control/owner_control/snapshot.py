@@ -667,9 +667,7 @@ def _quota_windows(rate_limits: Any) -> dict[str, dict[str, Any] | None]:
 
 _BLOCKED_REVIEW_MARKER = "<!-- symphony-blocked-review:"
 _BLOCKER_COMMENT = re.compile(
-    r"(?:owner\s+(?:question|decision)|вопрос\s+владельцу|решение\s+владельца|"
-    r"нужен\s+выбор\s+владельца|нужно\s+решение\s+владельца|"
-    r"symphony-blocked-review-retry|повтор(?:ить|и)\s+(?:astra[- ]?)?разбор)",
+    r"^(?:/blocked-review\b|<!--\s*symphony-blocked-review-retry\s*-->)",
     re.IGNORECASE,
 )
 
@@ -693,12 +691,6 @@ def blocker_version(item: dict[str, Any]) -> str:
         "title": str(item.get("title") or ""),
         "body": str(item.get("body") or ""),
         "owner_question": str(item.get("owner_question") or ""),
-        "labels": sorted(
-            normalized
-            for label in item.get("labels") or []
-            if (normalized := str(label).casefold())
-            not in {"symphony", "symphony:quarantined", "ждёт-владельца"}
-        ),
         "comments": comments,
         "pr": _stable_blocker_pr(item.get("pr")),
     }

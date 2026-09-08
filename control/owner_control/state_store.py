@@ -4,13 +4,13 @@ import json
 import os
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
-_BLOCKED_REVIEW_CLAIM_SECONDS = 10 * 60
-_BLOCKED_REVIEW_MAX_CLAIMS = 2
+_BLOCKED_REVIEW_CLAIM_SECONDS = 11 * 60
 
 
 class StateStore:
@@ -129,7 +129,9 @@ class StateStore:
             return None
         return self.blocked_reviews().get(str(issue))
 
-    def claim_blocked_review(self, issue: int, version: str, claimed_at: str) -> bool:
+    def claim_blocked_review(
+        self, issue: int, version: str, claimed_at: str
+    ) -> str | None:
         if type(issue) is not int or issue <= 0 or not version or not claimed_at:
             raise ValueError("invalid blocked review claim")
         with self._lock:
@@ -139,22 +141,27 @@ class StateStore:
             if isinstance(existing, dict) and existing.get("version") == version:
                 existing_claimed_at = _timestamp(existing.get("claimed_at"))
                 requested_at = _timestamp(claimed_at)
-                attempts = existing.get("claim_attempt")
-                attempts = attempts if type(attempts) is int and attempts > 0 else 1
                 claim_is_fresh = (
                     existing_claimed_at is None
                     or requested_at is None
                     or requested_at - existing_claimed_at < _BLOCKED_REVIEW_CLAIM_SECONDS
                 )
-                if (
-                    existing.get("status") == "completed"
-                    or claim_is_fresh
-                    or attempts >= _BLOCKED_REVIEW_MAX_CLAIMS
-                ):
-                    return False
-                claim_attempt = attempts + 1
-            else:
-                claim_attempt = 1
+                if existing.get("status") == "completed" or claim_is_fresh:
+                    return None
+                expired = dict(existing)
+                expired.update(
+                    {
+                        "status": "completed",
+                        "claim_token": None,
+                        "completed_at": claimed_at,
+                        "result": _expired_blocked_review_result(),
+                    }
+                )
+                reviews[str(issue)] = expired
+                state["blocked_reviews"] = reviews
+                self._write_unlocked(state)
+                return None
+            claim_token = uuid.uuid4().hex
             reviews[str(issue)] = {
                 "issue": issue,
                 "version": version,
@@ -165,19 +172,30 @@ class StateStore:
                     + _BLOCKED_REVIEW_CLAIM_SECONDS,
                     timezone.utc,
                 ).isoformat(),
-                "claim_attempt": claim_attempt,
+                "claim_token": claim_token,
                 "completed_at": None,
                 "result": None,
                 "applied_steps": [],
             }
             state["blocked_reviews"] = reviews
             self._write_unlocked(state)
-            return True
+            return claim_token
 
     def complete_blocked_review(
-        self, issue: int, version: str, result: dict[str, Any], completed_at: str
+        self,
+        issue: int,
+        version: str,
+        claim_token: str,
+        result: dict[str, Any],
+        completed_at: str,
     ) -> None:
-        if type(issue) is not int or issue <= 0 or not version or not isinstance(result, dict):
+        if (
+            type(issue) is not int
+            or issue <= 0
+            or not version
+            or not claim_token
+            or not isinstance(result, dict)
+        ):
             raise ValueError("invalid blocked review result")
         with self._lock:
             state = self._read_unlocked()
@@ -185,6 +203,8 @@ class StateStore:
             existing = reviews.get(str(issue))
             if not isinstance(existing, dict) or existing.get("version") != version:
                 raise ValueError("blocked review result does not match its durable claim")
+            if existing.get("claim_token") != claim_token:
+                raise ValueError("blocked review result does not match its claim token")
             review = dict(existing)
             review.update(
                 {
@@ -197,7 +217,6 @@ class StateStore:
             reviews[str(issue)] = review
             state["blocked_reviews"] = reviews
             self._write_unlocked(state)
-
     def blocked_review_step_completed(self, issue: int, version: str, step: str) -> bool:
         review = self.blocked_review_for(issue)
         return bool(
@@ -479,3 +498,14 @@ def _timestamp(value: Any) -> float | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.timestamp()
+
+
+def _expired_blocked_review_result() -> dict[str, Any]:
+    return {
+        "outcome": "unresolved",
+        "decision": None,
+        "evidence": ["The delegated review claim expired before a result was persisted."],
+        "assumptions": [],
+        "next_step": "Add an explicit /blocked-review comment to request one fresh review.",
+        "question": "Should this blocker be reviewed again?",
+    }

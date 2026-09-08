@@ -22,7 +22,7 @@ defmodule SymphonyElixir.OwnerControl.Client do
     escalated_from escalation_history luna terra sol astra completed from to quarantined issue
     body comments author created_at blocker_version blocked_review outcome decision evidence
     assumptions next_step mode review_mode review_version claimed_at claim_expires_at
-    claim_attempt applied_steps context result
+    claim_attempt claim_token applied_steps context result
   )a
   @key_lookup Map.new(@known_keys, &{Atom.to_string(&1), &1})
 
@@ -80,18 +80,21 @@ defmodule SymphonyElixir.OwnerControl.Client do
 
   def claim_blocked_review(_issue_number, _version), do: {:error, :invalid_blocked_review_claim}
 
-  @spec apply_blocked_review(pos_integer(), String.t(), map()) :: {:ok, map()} | {:error, term()}
-  def apply_blocked_review(issue_number, version, result)
+  @spec apply_blocked_review(pos_integer(), String.t(), String.t() | nil, map()) ::
+          {:ok, map()} | {:error, term()}
+  def apply_blocked_review(issue_number, version, claim_token, result)
       when is_integer(issue_number) and issue_number > 0 and is_binary(version) and
-             byte_size(version) > 0 and is_map(result) do
+             byte_size(version) > 0 and (is_binary(claim_token) or is_nil(claim_token)) and
+             is_map(result) do
     internal_action("apply_blocked_review", %{
       issue: issue_number,
       version: version,
+      claim_token: claim_token,
       result: result
     })
   end
 
-  def apply_blocked_review(_issue_number, _version, _result),
+  def apply_blocked_review(_issue_number, _version, _claim_token, _result),
     do: {:error, :invalid_blocked_review_result}
 
   @spec intake_active?() :: boolean()

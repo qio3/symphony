@@ -1232,7 +1232,8 @@ defmodule SymphonyElixir.Orchestrator do
     case claim_result do
       {:ok, response} ->
         context = Map.merge(candidate.context, Map.get(response, :context, %{}))
-        start_blocked_review_task(state, candidate, context, client)
+        claim_token = Map.get(response, :claim_token) || Map.get(candidate, :claim_token)
+        start_blocked_review_task(state, candidate, context, claim_token, client)
 
       {:error, reason} ->
         Logger.info("Skipping blocked review claim issue=#{number}: #{inspect(reason)}")
@@ -1240,7 +1241,7 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp start_blocked_review_task(state, candidate, context, client) do
+  defp start_blocked_review_task(state, candidate, context, claim_token, client) do
     recipient = self()
 
     task = fn ->
@@ -1250,7 +1251,14 @@ defmodule SymphonyElixir.Orchestrator do
           :review -> blocked_review_result(context, recipient)
         end
 
-      apply_blocked_review_result(client, candidate.number, candidate.blocker_version, result, 3)
+      apply_blocked_review_result(
+        client,
+        candidate.number,
+        candidate.blocker_version,
+        claim_token,
+        result,
+        3
+      )
     end
 
     case Task.Supervisor.start_child(state.task_supervisor, task) do
@@ -1270,6 +1278,7 @@ defmodule SymphonyElixir.Orchestrator do
           |> Map.merge(%{
             mode: :blocked_review,
             blocker_version: candidate.blocker_version,
+            claim_token: claim_token,
             review_mode: candidate.mode
           })
 
@@ -1288,6 +1297,7 @@ defmodule SymphonyElixir.Orchestrator do
           client.apply_blocked_review(
             candidate.number,
             candidate.blocker_version,
+            claim_token,
             blocked_review_failure_result({:task_start_failed, reason})
           )
 
@@ -1307,17 +1317,25 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp apply_blocked_review_result(_client, _number, _version, _result, 0),
+  defp apply_blocked_review_result(_client, _number, _version, _claim_token, _result, 0),
     do: exit(:blocked_review_apply_failed)
 
-  defp apply_blocked_review_result(client, number, version, result, attempts_left) do
-    case client.apply_blocked_review(number, version, result) do
+  defp apply_blocked_review_result(client, number, version, claim_token, result, attempts_left) do
+    case client.apply_blocked_review(number, version, claim_token, result) do
       {:ok, _response} ->
         :ok
 
       {:error, _reason} when attempts_left > 1 ->
         Process.sleep(250)
-        apply_blocked_review_result(client, number, version, result, attempts_left - 1)
+
+        apply_blocked_review_result(
+          client,
+          number,
+          version,
+          claim_token,
+          result,
+          attempts_left - 1
+        )
 
       {:error, reason} ->
         exit({:blocked_review_apply_failed, reason})
@@ -1343,7 +1361,15 @@ defmodule SymphonyElixir.Orchestrator do
       client = Application.get_env(:symphony_elixir, :owner_control_client_module, OwnerControlClient)
       number = String.to_integer(issue_id)
       version = Map.fetch!(running_entry, :blocker_version)
-      _ = client.apply_blocked_review(number, version, blocked_review_failure_result(reason))
+      claim_token = Map.get(running_entry, :claim_token)
+
+      _ =
+        client.apply_blocked_review(
+          number,
+          version,
+          claim_token,
+          blocked_review_failure_result(reason)
+        )
     end
 
     state
@@ -2371,6 +2397,7 @@ defmodule SymphonyElixir.Orchestrator do
         %{
           number: number,
           blocker_version: version,
+          claim_token: Map.get(review, :claim_token),
           mode: :apply_only,
           context: Map.put(issue, :blocker_version, version),
           result: result

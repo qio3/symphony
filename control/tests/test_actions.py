@@ -125,6 +125,7 @@ class ActionServiceTest(unittest.TestCase):
         claimed = self.actions.execute_internal(
             "claim_blocked_review", {"issue": 406, "version": "blocked-v1"}
         )
+        claim_token = claimed["claim_token"]
         self.assertEqual(claimed["status"], "accepted")
         self.assertEqual(claimed["context"]["body"], self.snapshot["issues"]["406"]["body"])
 
@@ -150,11 +151,21 @@ class ActionServiceTest(unittest.TestCase):
         ]
         applied = self.actions.execute_internal(
             "apply_blocked_review",
-            {"issue": 406, "version": "blocked-v1", "result": result},
+            {
+                "issue": 406,
+                "version": "blocked-v1",
+                "claim_token": claim_token,
+                "result": result,
+            },
         )
         repeated = self.actions.execute_internal(
             "apply_blocked_review",
-            {"issue": 406, "version": "blocked-v1", "result": result},
+            {
+                "issue": 406,
+                "version": "blocked-v1",
+                "claim_token": claim_token,
+                "result": result,
+            },
         )
 
         self.assertEqual(applied, repeated)
@@ -166,7 +177,7 @@ class ActionServiceTest(unittest.TestCase):
         self.assertEqual(self.lifecycle.calls[-1], ("set_status", 406, "Ready for AI"))
 
     def test_unresolved_blocked_review_keeps_issue_blocked(self):
-        self.actions.execute_internal(
+        claimed = self.actions.execute_internal(
             "claim_blocked_review", {"issue": 406, "version": "blocked-v1"}
         )
         result = {
@@ -179,7 +190,12 @@ class ActionServiceTest(unittest.TestCase):
         }
         self.actions.execute_internal(
             "apply_blocked_review",
-            {"issue": 406, "version": "blocked-v1", "result": result},
+            {
+                "issue": 406,
+                "version": "blocked-v1",
+                "claim_token": claimed["claim_token"],
+                "result": result,
+            },
         )
 
         self.assertEqual([call[0] for call in self.lifecycle.calls], ["comment"])
