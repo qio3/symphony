@@ -92,6 +92,14 @@ while already-running workers continue. The native Phoenix page remains a runtim
 surface. The runtime completion callback reads only confirmed cached lifecycle state and schedules
 source refresh asynchronously, so it never waits on the runtime observability endpoint.
 
+Technical quarantine releases the execution lease and keeps the Issue in `Ready for AI`,
+not owner `Blocked`. Its durable record, reason and `symphony:quarantined` label still block
+automatic dispatch and new leases; the dashboard continues to show `System quarantine`.
+Only an explicit recovery action may clear it. A late quarantine callback cannot overwrite
+`Blocked`, `Ready for Acceptance`, `Done` or another non-active Project status. Existing
+technical cards require fresh, individual reconciliation without clearing their quarantine
+or rewriting an owner's decision; there is no bulk status migration on startup.
+
 The static Owner Control presentation adapts dashboard patterns from Rondo and vendors Chart.js
 locally so the localhost UI has no CDN dependency. Attribution and pinned versions are recorded in
 `control/THIRD_PARTY_NOTICES.md`.
