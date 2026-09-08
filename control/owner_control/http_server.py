@@ -25,7 +25,12 @@ _ACTIONS = {
     "restart",
     "set_workers",
 }
-_INTERNAL_ACTIONS = {"complete_run", "quarantine_before_run"}
+_INTERNAL_ACTIONS = {
+    "complete_run",
+    "quarantine_before_run",
+    "claim_blocked_review",
+    "apply_blocked_review",
+}
 _MAX_BODY_BYTES = 16_384
 _ASSET_ROOT = Path(__file__).with_name("web")
 _ASSETS = {

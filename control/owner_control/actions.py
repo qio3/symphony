@@ -256,7 +256,12 @@ class ActionService:
         return self._rework(issue_number, issue, params.get("reason"))
 
     def _execute_internal_locked(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
-        if action not in {"complete_run", "quarantine_before_run"}:
+        if action not in {
+            "complete_run",
+            "quarantine_before_run",
+            "claim_blocked_review",
+            "apply_blocked_review",
+        }:
             raise ActionError(f"unsupported internal action: {action}")
 
         issue_number = self._issue_number(params.get("issue"))
@@ -280,8 +285,195 @@ class ActionService:
         if not isinstance(issue, dict):
             raise ActionError(f"issue #{issue_number} is not in the control snapshot")
 
+        if action == "claim_blocked_review":
+            return self._claim_blocked_review(issue_number, issue, snapshot, params)
+        if action == "apply_blocked_review":
+            return self._apply_blocked_review(issue_number, issue, snapshot, params)
+
         self._require_canonical_open_quarantine_issue(issue_number, issue)
         return self._quarantine_before_run(issue_number, issue, params.get("reason"))
+
+    def _claim_blocked_review(
+        self,
+        issue_number: int,
+        issue: dict[str, Any],
+        snapshot: dict[str, Any],
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        version = str(params.get("version") or "").strip()
+        self._require_blocked_review_target(issue_number, issue, version)
+        running_issue_ids = {
+            str(entry.get("issue_id") or entry.get("issue_number") or "")
+            for entry in snapshot.get("running") or []
+            if isinstance(entry, dict)
+        }
+        if str(issue_number) in running_issue_ids or self._has_label(issue, "symphony"):
+            raise ActionError("blocked review requires an issue without a live worker or lease")
+        claim_token = self._state_store.claim_blocked_review(
+            issue_number, version, datetime.now(timezone.utc).isoformat()
+        )
+        if not claim_token:
+            raise ActionError("blocked review version is already claimed or completed")
+        return {
+            "status": "accepted",
+            "action": "claim_blocked_review",
+            "issue": issue_number,
+            "version": version,
+            "claim_token": claim_token,
+            "context": {
+                key: issue.get(key)
+                for key in (
+                    "number",
+                    "identifier",
+                    "title",
+                    "body",
+                    "url",
+                    "labels",
+                    "owner_question",
+                    "comments",
+                    "pr",
+                    "ci",
+                    "blocker_version",
+                )
+            },
+        }
+
+    def _apply_blocked_review(
+        self,
+        issue_number: int,
+        issue: dict[str, Any],
+        snapshot: dict[str, Any],
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        version = str(params.get("version") or "").strip()
+        self._require_blocked_review_target(issue_number, issue, version)
+        conflicting_running = {
+            str(entry.get("issue_id") or entry.get("issue_number") or "")
+            for entry in snapshot.get("running") or []
+            if isinstance(entry, dict)
+            and not (
+                entry.get("mode") == "blocked_review"
+                and entry.get("blocker_version") == version
+            )
+        }
+        if str(issue_number) in conflicting_running or self._has_label(issue, "symphony"):
+            raise ActionError("blocked review result cannot overwrite a live worker or lease")
+        result = self._blocked_review_result(params.get("result"))
+        claim_token = str(params.get("claim_token") or "").strip()
+        persisted = self._state_store.blocked_review_for(issue_number)
+        if not isinstance(persisted, dict) or persisted.get("version") != version:
+            raise ActionError("blocked review result requires its durable claim")
+        if persisted.get("status") == "completed" and persisted.get("result") != result:
+            raise ActionError("blocked review result conflicts with the durable result")
+        if persisted.get("status") != "completed":
+            if not claim_token:
+                raise ActionError("blocked review result requires its claim token")
+            self._state_store.complete_blocked_review(
+                issue_number,
+                version,
+                claim_token,
+                result,
+                datetime.now(timezone.utc).isoformat(),
+            )
+
+        self._blocked_review_step(
+            issue_number,
+            version,
+            "comment",
+            lambda: self._lifecycle.comment_once(
+                issue_number,
+                self._blocked_review_comment(version, result),
+                f"blocked-review:{issue_number}:{version}",
+            ),
+        )
+        if result["outcome"] == "resolved":
+            if self._has_label(issue, _OWNER_WAITING_LABEL):
+                self._blocked_review_step(
+                    issue_number,
+                    version,
+                    "remove_owner_waiting",
+                    lambda: self._lifecycle.remove_label(issue_number, _OWNER_WAITING_LABEL),
+                )
+            self._blocked_review_step(
+                issue_number,
+                version,
+                "ready_for_ai",
+                lambda: self._lifecycle.set_status(issue_number, "Ready for AI"),
+            )
+        return {
+            "status": "accepted",
+            "action": "apply_blocked_review",
+            "issue": issue_number,
+            "version": version,
+            "outcome": result["outcome"],
+        }
+
+    @staticmethod
+    def _require_blocked_review_target(
+        issue_number: int, issue: dict[str, Any], version: str
+    ) -> None:
+        if type(issue.get("number")) is not int or issue.get("number") != issue_number:
+            raise ActionError("blocked review requires a canonical issue number")
+        if str(issue.get("state") or "").upper() != "OPEN":
+            raise ActionError("blocked review requires an open issue")
+        if str(issue.get("status") or "").casefold() != "blocked":
+            raise ActionError("blocked review requires Blocked status")
+        if not version or issue.get("blocker_version") != version:
+            raise ActionError("blocked review semantic version is stale")
+
+    @staticmethod
+    def _blocked_review_result(value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict) or value.get("outcome") not in {
+            "resolved",
+            "unresolved",
+        }:
+            raise ActionError("blocked review result requires resolved or unresolved outcome")
+        normalized = {
+            "outcome": value["outcome"],
+            "decision": str(value.get("decision") or "").strip() or None,
+            "evidence": [str(item).strip() for item in value.get("evidence") or [] if str(item).strip()][:8],
+            "assumptions": [str(item).strip() for item in value.get("assumptions") or [] if str(item).strip()][:8],
+            "next_step": str(value.get("next_step") or "").strip() or None,
+            "question": str(value.get("question") or "").strip() or None,
+        }
+        if normalized["outcome"] == "resolved" and not normalized["decision"]:
+            raise ActionError("resolved blocked review requires a decision")
+        if normalized["outcome"] == "unresolved" and not normalized["question"]:
+            raise ActionError("unresolved blocked review requires a concrete owner question")
+        return normalized
+
+    def _blocked_review_step(
+        self,
+        issue: int,
+        version: str,
+        step: str,
+        callback: Callable[[], None],
+    ) -> None:
+        if self._state_store.blocked_review_step_completed(issue, version, step):
+            return
+        callback()
+        self._state_store.record_blocked_review_step(issue, version, step)
+
+    @staticmethod
+    def _blocked_review_comment(version: str, result: dict[str, Any]) -> str:
+        def lines(title: str, values: list[str]) -> list[str]:
+            return [f"**{title}:**", *[f"- {value}" for value in values]] if values else []
+
+        body = [
+            f"<!-- symphony-blocked-review:{version} -->",
+            "### Делегированное ревью Blocked-задачи (gpt-6-astra)",
+            "",
+            f"**Результат:** {result['outcome']}",
+        ]
+        if result.get("decision"):
+            body.extend(["", f"**Решение:** {result['decision']}"])
+        body.extend(["", *lines("Проверяемые основания", result["evidence"])])
+        body.extend(["", *lines("Допущения", result["assumptions"])])
+        if result.get("next_step"):
+            body.extend(["", f"**Следующий шаг:** {result['next_step']}"])
+        if result.get("question"):
+            body.extend(["", f"**Вопрос владельцу:** {result['question']}"])
+        return "\n".join(body).strip()
 
     def _run(self, issue_number: int, issue: dict[str, Any]) -> dict[str, Any]:
         if str(issue.get("state", "OPEN")).upper() != "OPEN":

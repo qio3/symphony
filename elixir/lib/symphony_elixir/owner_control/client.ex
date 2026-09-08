@@ -20,6 +20,9 @@ defmodule SymphonyElixir.OwnerControl.Client do
     merged due_at last_message last_event last_event_at error attempt worker_host workspace_path
     session_id turn_count tokens health_url models model selected_tier actual_model routing_reason
     escalated_from escalation_history luna terra sol astra completed from to quarantined issue
+    body comments author created_at blocker_version blocked_review outcome decision evidence
+    assumptions next_step mode review_mode review_version claimed_at claim_expires_at
+    claim_attempt claim_token applied_steps context result
   )a
   @key_lookup Map.new(@known_keys, &{Atom.to_string(&1), &1})
 
@@ -67,6 +70,32 @@ defmodule SymphonyElixir.OwnerControl.Client do
   end
 
   def quarantine_before_run(_issue_number, _reason), do: {:error, :invalid_quarantine_request}
+
+  @spec claim_blocked_review(pos_integer(), String.t()) :: {:ok, map()} | {:error, term()}
+  def claim_blocked_review(issue_number, version)
+      when is_integer(issue_number) and issue_number > 0 and is_binary(version) and
+             byte_size(version) > 0 do
+    internal_action("claim_blocked_review", %{issue: issue_number, version: version})
+  end
+
+  def claim_blocked_review(_issue_number, _version), do: {:error, :invalid_blocked_review_claim}
+
+  @spec apply_blocked_review(pos_integer(), String.t(), String.t() | nil, map()) ::
+          {:ok, map()} | {:error, term()}
+  def apply_blocked_review(issue_number, version, claim_token, result)
+      when is_integer(issue_number) and issue_number > 0 and is_binary(version) and
+             byte_size(version) > 0 and (is_binary(claim_token) or is_nil(claim_token)) and
+             is_map(result) do
+    internal_action("apply_blocked_review", %{
+      issue: issue_number,
+      version: version,
+      claim_token: claim_token,
+      result: result
+    })
+  end
+
+  def apply_blocked_review(_issue_number, _version, _claim_token, _result),
+    do: {:error, :invalid_blocked_review_result}
 
   @spec intake_active?() :: boolean()
   def intake_active? do

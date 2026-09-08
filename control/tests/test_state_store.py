@@ -6,6 +6,80 @@ from owner_control.state_store import StateStore
 
 
 class StateStoreHistoryTest(unittest.TestCase):
+    def test_blocked_review_claim_and_result_are_durable_per_semantic_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "owner-control.json"
+            store = StateStore(path)
+
+            claim_token = store.claim_blocked_review(
+                892, "version-a", "2026-09-08T10:00:00Z"
+            )
+            self.assertIsInstance(claim_token, str)
+            self.assertIsNone(
+                StateStore(path).claim_blocked_review(
+                    892, "version-a", "2026-09-08T10:01:00Z"
+                )
+            )
+            self.assertIsNone(
+                StateStore(path).claim_blocked_review(
+                    892, "version-a", "2026-09-08T10:12:00Z"
+                )
+            )
+
+            expired = StateStore(path).blocked_review_for(892)
+            self.assertEqual(expired["status"], "completed")
+            self.assertEqual(expired["result"]["outcome"], "unresolved")
+
+            result = {"outcome": "resolved", "decision": "Use the existing retry contract."}
+            with self.assertRaisesRegex(ValueError, "claim token"):
+                StateStore(path).complete_blocked_review(
+                    892,
+                    "version-a",
+                    claim_token,
+                    result,
+                    "2026-09-08T10:12:01Z",
+                )
+
+            persisted = StateStore(path).blocked_review_for(892)
+            self.assertEqual(persisted["version"], "version-a")
+            self.assertEqual(persisted["status"], "completed")
+            self.assertNotEqual(persisted["result"], result)
+            self.assertIsNone(
+                StateStore(path).claim_blocked_review(
+                    892, "version-a", "2026-09-08T10:13:00Z"
+                )
+            )
+            self.assertIsInstance(
+                StateStore(path).claim_blocked_review(
+                    892, "version-b", "2026-09-08T10:14:00Z"
+                ),
+                str,
+            )
+
+    def test_blocked_review_result_requires_the_current_claim_token(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "owner-control.json"
+            store = StateStore(path)
+            token = store.claim_blocked_review(892, "version-a", "2026-09-08T10:00:00Z")
+
+            with self.assertRaisesRegex(ValueError, "claim token"):
+                store.complete_blocked_review(
+                    892,
+                    "version-a",
+                    "stale-token",
+                    {"outcome": "resolved", "decision": "Use adapter."},
+                    "2026-09-08T10:01:00Z",
+                )
+
+            store.complete_blocked_review(
+                892,
+                "version-a",
+                token,
+                {"outcome": "resolved", "decision": "Use adapter."},
+                "2026-09-08T10:01:00Z",
+            )
+            self.assertEqual(store.blocked_review_for(892)["status"], "completed")
+
     def test_phase_observation_closes_previous_phase_without_duplicate_entries(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "owner-control.json"

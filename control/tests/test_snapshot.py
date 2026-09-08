@@ -4,6 +4,115 @@ from owner_control.snapshot import SnapshotBuilder
 
 
 class SnapshotBuilderTest(unittest.TestCase):
+    def test_active_blocked_review_is_visible_and_consumes_one_worker_slot(self):
+        snapshot = SnapshotBuilder().build(
+            service={"live": True},
+            intake_active=True,
+            worker_limit=2,
+            runtime={
+                "running": [
+                    {
+                        "issue_id": "892",
+                        "mode": "blocked_review",
+                        "review_mode": "review",
+                        "blocker_version": "v1",
+                    }
+                ],
+                "retrying": [],
+                "blocked": [],
+            },
+            project={
+                "items": [
+                    {
+                        "number": 892,
+                        "title": "Blocked review",
+                        "status": "Blocked",
+                        "state": "OPEN",
+                    }
+                ]
+            },
+            canonical={"sha": "a" * 40},
+            test={"sha": "a" * 40},
+        )
+
+        item = snapshot["owner_view"]["blocked"][0]
+        self.assertEqual(item["stage"], "Reviewing blocker")
+        self.assertEqual(item["mode"], "blocked_review")
+        self.assertEqual(snapshot["workers"]["running"], 1)
+
+    def test_blocked_issue_has_stable_semantic_version_and_saved_review(self):
+        item = {
+            "number": 892,
+            "title": "Blocked review",
+            "body": "Need a reversible technical choice.",
+            "status": "Blocked",
+            "state": "OPEN",
+            "labels": ["needs-review"],
+            "comments": [
+                {"body": "Owner question: choose the existing adapter.", "author": "teren"},
+                {
+                    "body": "<!-- symphony-blocked-review:old --> delegated result",
+                    "author": "N0MoreFun",
+                },
+            ],
+        }
+        saved = {
+            "892": {
+                "version": "older",
+                "status": "completed",
+                "result": {"outcome": "unresolved"},
+            }
+        }
+
+        first = SnapshotBuilder().build(
+            service={"live": True},
+            intake_active=True,
+            worker_limit=2,
+            runtime={"running": [], "retrying": [], "blocked": []},
+            project={"items": [item]},
+            canonical={"sha": "a" * 40},
+            test={"sha": "a" * 40},
+            blocked_reviews=saved,
+        )
+        item["comments"][1]["body"] = "<!-- symphony-blocked-review:new --> another result"
+        item["labels"].extend(["symphony", "ждёт-владельца", "unrelated-triage"])
+        item["comments"].append({"body": "unrelated progress update", "author": "contributor"})
+        item["comments"].append(
+            {"body": "Owner question mentioned incidentally in a status note.", "author": "contributor"}
+        )
+        second = SnapshotBuilder().build(
+            service={"live": True},
+            intake_active=True,
+            worker_limit=2,
+            runtime={"running": [], "retrying": [], "blocked": []},
+            project={"items": [item]},
+            canonical={"sha": "a" * 40},
+            test={"sha": "a" * 40},
+            blocked_reviews=saved,
+        )
+
+        blocked = first["owner_view"]["blocked"][0]
+        self.assertEqual(blocked["blocker_version"], second["owner_view"]["blocked"][0]["blocker_version"])
+        self.assertEqual(blocked["blocked_review"], saved["892"])
+
+        item["comments"].append(
+            {"body": "/blocked-review Owner selected the existing adapter.", "author": "teren"}
+        )
+        third = SnapshotBuilder().build(
+            service={"live": True},
+            intake_active=True,
+            worker_limit=2,
+            runtime={"running": [], "retrying": [], "blocked": []},
+            project={"items": [item]},
+            canonical={"sha": "a" * 40},
+            test={"sha": "a" * 40},
+            blocked_reviews=saved,
+        )
+        self.assertNotEqual(
+            blocked["blocker_version"],
+            third["owner_view"]["blocked"][0]["blocker_version"],
+        )
+
     def test_projects_done_items_for_the_done_work_tab(self):
         snapshot = SnapshotBuilder().build(
             service={"live": True},
