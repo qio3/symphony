@@ -1,6 +1,11 @@
 defmodule SymphonyElixir.PathSafety do
   @moduledoc false
 
+  @spec reserved_workspace_path?(Path.t()) :: boolean()
+  def reserved_workspace_path?(path) do
+    ".symphony-quarantine" in Path.split(Path.expand(path))
+  end
+
   @spec canonicalize(Path.t()) :: {:ok, Path.t()} | {:error, term()}
   def canonicalize(path) when is_binary(path) do
     expanded_path = Path.expand(path)
