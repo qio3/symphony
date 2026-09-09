@@ -213,6 +213,10 @@ defmodule SymphonyElixir.Codex.AppServer do
       canonical_root_prefix = canonical_root <> "/"
 
       cond do
+        PathSafety.reserved_workspace_path?(expanded_workspace) or
+            PathSafety.reserved_workspace_path?(canonical_workspace) ->
+          {:error, {:invalid_workspace_cwd, :reserved_archive, expanded_workspace}}
+
         canonical_workspace == canonical_root ->
           {:error, {:invalid_workspace_cwd, :workspace_root, canonical_workspace}}
 

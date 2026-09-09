@@ -201,9 +201,12 @@ Notes:
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run
   `git clone ... .` there, along with any other setup commands you need.
 - A recognized corrupt local workspace is never deleted in place. If it contains only broken
-  `.git` metadata, Symphony atomically moves it to the timestamped sibling
-  `<workspace-root>-quarantine` directory and performs one clean bootstrap. A valid stale Git
-  workspace is inspected first: uncommitted or unique commits stop in system quarantine with the
+  `.git` metadata, Symphony atomically moves it to a reserved archive directory at
+  `<workspace-root>/.symphony-quarantine/<unique>/workspace` directory and performs one clean bootstrap.
+  The reserved archive namespace cannot be used as an Issue workspace or Codex cwd, or removed by
+  workspace cleanup (including recorded paths after a root change). Archives stay on the persistent
+  workspace mount; symlink destinations are rejected, and a failed atomic rename preserves the source.
+  A valid stale Git workspace is inspected first: uncommitted or unique commits stop in system quarantine with the
   exact path, while work already contained in canonical completes through normal reconciliation
   without starting Codex again. Remote workspace recovery fails closed and preserves the path.
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch

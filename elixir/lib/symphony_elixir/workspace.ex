@@ -96,18 +96,15 @@ defmodule SymphonyElixir.Workspace do
 
   @spec remove(Path.t(), worker_host()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
   def remove(workspace, nil) do
-    case File.exists?(workspace) do
-      true ->
-        case validate_workspace_path(workspace, nil) do
-          :ok ->
-            remove_local_workspace(workspace)
+    case validate_workspace_path(workspace, nil) do
+      :ok ->
+        remove_local_workspace(workspace)
 
-          {:error, reason} ->
-            {:error, reason, ""}
-        end
+      {:error, {:workspace_outside_root, _, _} = reason} ->
+        if File.lstat(workspace) == {:error, :enoent}, do: {:ok, []}, else: {:error, reason, ""}
 
-      false ->
-        File.rm_rf(workspace)
+      {:error, reason} ->
+        {:error, reason, ""}
     end
   end
 
@@ -351,23 +348,32 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp archive_local_workspace(workspace, workspace_root) do
-    quarantine_root =
-      Path.join(Path.dirname(workspace_root), Path.basename(workspace_root) <> "-quarantine")
-
-    timestamp =
-      DateTime.utc_now()
-      |> DateTime.to_iso8601(:basic)
-      |> String.replace(~r/[^0-9TZ]/, "")
-
-    archived_workspace =
-      Path.join(
-        quarantine_root,
-        "#{Path.basename(workspace)}-#{timestamp}-#{System.unique_integer([:positive])}"
-      )
-
-    with :ok <- File.mkdir_p(quarantine_root),
+    # Keep the archive on the same persistent mount as the source. Reserve a
+    # fresh parent directory exclusively so rename can never replace an archive.
+    with {:ok, root} <- PathSafety.canonicalize(workspace_root),
+         {:ok, quarantine_root} <- ensure_quarantine_root(root),
+         unique = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower),
+         archive_parent = Path.join(quarantine_root, "#{Path.basename(workspace)}-#{unique}"),
+         :ok <- File.mkdir(archive_parent),
+         archived_workspace = Path.join(archive_parent, "workspace"),
          :ok <- File.rename(workspace, archived_workspace) do
       {:ok, {:rebuild, archived_workspace}}
+    else
+      {:error, reason} ->
+        {:error, {:workspace_preservation_required, workspace, "could not archive workspace: #{inspect(reason)}"}}
+    end
+  end
+
+  defp ensure_quarantine_root(root) do
+    path = Path.join(root, ".symphony-quarantine")
+
+    with result when result in [:ok, {:error, :eexist}] <- File.mkdir(path),
+         {:ok, %File.Stat{type: :directory}} <- File.lstat(path),
+         {:ok, ^path} <- PathSafety.canonicalize(path) do
+      {:ok, path}
+    else
+      {:error, reason} -> {:error, {:archive_directory_unavailable, path, reason}}
+      _ -> {:error, {:unsafe_archive_directory, path}}
     end
   end
 
@@ -400,6 +406,9 @@ defmodule SymphonyElixir.Workspace do
         |> ignore_hook_failure()
     end
   end
+
+  defp workspace_path_for_issue(".symphony-quarantine", _worker_host),
+    do: {:error, {:reserved_workspace_path, ".symphony-quarantine"}}
 
   defp workspace_path_for_issue(safe_id, nil) when is_binary(safe_id) do
     Config.local_workspace_root()
@@ -646,6 +655,10 @@ defmodule SymphonyElixir.Workspace do
       canonical_root_prefix = canonical_root <> "/"
 
       cond do
+        PathSafety.reserved_workspace_path?(expanded_workspace) or
+            PathSafety.reserved_workspace_path?(canonical_workspace) ->
+          {:error, {:reserved_workspace_path, expanded_workspace}}
+
         canonical_workspace == canonical_root ->
           {:error, {:workspace_equals_root, canonical_workspace, canonical_root}}
 
