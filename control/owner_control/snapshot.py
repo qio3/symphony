@@ -123,8 +123,26 @@ class SnapshotBuilder:
             runtime_retry = retrying.get(issue_key)
             system_quarantine = system_quarantines.get(issue_key)
             status = str(item.get("status") or "Backlog")
+            closed = str(item.get("state", "")).casefold() == "closed"
+            historical_quarantine = (
+                system_quarantine is not None
+                and runtime_running is None
+                and runtime_retry is None
+                and runtime_blocked is None
+                and (
+                    closed
+                    or (
+                        not item.get("status_missing")
+                        and status.casefold() in {"ready for acceptance", "done"}
+                    )
+                )
+            )
+            if historical_quarantine and closed:
+                status = "Done"
+                item = {**item, "status": status, "stage": status}
 
-            if system_quarantine is not None:
+            # Keep the durable guard and raw diagnostics; only project its current lane.
+            if system_quarantine is not None and not historical_quarantine:
                 item = self._with_system_quarantine(item, system_quarantine)
                 lanes["system_quarantines"].append(item)
                 counts["quarantined"] += 1

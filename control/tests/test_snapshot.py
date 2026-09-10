@@ -1,4 +1,5 @@
 import unittest
+from copy import deepcopy
 
 from owner_control.snapshot import SnapshotBuilder
 
@@ -772,6 +773,72 @@ class SnapshotBuilderTest(unittest.TestCase):
         self.assertEqual(quarantine["stage"], "System quarantine")
         self.assertEqual(quarantine["reason"], "workspace before_run hook failed")
         self.assertEqual(snapshot["quarantined"][0]["issue"], 405)
+
+    def test_delivered_quarantine_uses_delivery_lane_and_preserves_diagnostics(self):
+        for status, state, lane in (
+            ("Ready for Acceptance", "OPEN", "ready_for_acceptance"),
+            ("Done", "OPEN", "done"),
+            ("In Progress", "CLOSED", "done"),
+            ("Ready for Acceptance", "CLOSED", "done"),
+        ):
+            with self.subTest(status=status, state=state):
+                project = {"items": [{"number": 617, "status": status, "state": state}]}
+                quarantines = {"617": {
+                    "issue": 617, "reason": "old hook timeout",
+                    "quarantined_at": "2026-09-08T10:00:00Z",
+                }}
+                original = deepcopy((project, quarantines))
+                snapshot = SnapshotBuilder().build(
+                    service={}, intake_active=True, worker_limit=12,
+                    runtime={}, project=project, canonical={}, test={},
+                    quarantines=quarantines,
+                )
+
+                self.assertEqual(snapshot["counts"]["quarantined"], 0)
+                self.assertEqual(snapshot["owner_view"]["system_quarantines"], [])
+                self.assertEqual(snapshot["counts"][lane], 1)
+                self.assertEqual([item["number"] for item in snapshot["owner_view"][lane]], [617])
+                self.assertEqual(snapshot["quarantined"], [quarantines["617"]])
+                self.assertEqual((project, quarantines), original)
+
+    def test_quarantine_remains_visible_for_runtime_conflicts_or_unknown_delivery(self):
+        for status, runtime_lane in (
+            ("Ready for Acceptance", "running"),
+            ("Ready for Acceptance", "retrying"),
+            ("Done", "blocked"),
+            ("Ready for AI", None),
+            ("In Progress", None),
+            (None, None),
+        ):
+            with self.subTest(status=status, runtime_lane=runtime_lane):
+                runtime = {runtime_lane: [{"issue_id": "617"}]} if runtime_lane else {}
+                snapshot = SnapshotBuilder().build(
+                    service={}, intake_active=True, worker_limit=12,
+                    runtime=runtime,
+                    project={"items": [{"number": 617, "status": status, "state": "OPEN"}]},
+                    canonical={}, test={},
+                    quarantines={"617": {
+                        "issue": 617, "reason": "preserve workspace",
+                        "quarantined_at": "2026-09-08T10:00:00Z",
+                    }},
+                )
+
+                self.assertEqual(snapshot["counts"]["quarantined"], 1)
+                self.assertEqual(snapshot["owner_view"]["ready_for_acceptance"], [])
+                self.assertEqual(snapshot["owner_view"]["done"], [])
+                self.assertEqual(snapshot["owner_view"]["system_quarantines"][0]["number"], 617)
+
+    def test_missing_project_issue_keeps_its_quarantine_visible(self):
+        snapshot = SnapshotBuilder().build(
+            service={}, intake_active=True, worker_limit=12,
+            runtime={}, project={"items": []}, canonical={}, test={},
+            quarantines={"617": {
+                "issue": 617, "reason": "preserve workspace",
+                "quarantined_at": "2026-09-08T10:00:00Z",
+            }},
+        )
+        self.assertEqual(snapshot["counts"]["quarantined"], 1)
+        self.assertEqual(snapshot["owner_view"]["system_quarantines"][0]["number"], 617)
 
     def test_projects_runtime_model_routing_without_reclassifying_issues(self):
         model = {
