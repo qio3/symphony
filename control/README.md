@@ -100,6 +100,12 @@ Only an explicit recovery action may clear it. A late quarantine callback cannot
 technical cards require fresh, individual reconciliation without clearing their quarantine
 or rewriting an owner's decision; there is no bulk status migration on startup.
 
+A delivered (`Ready for Acceptance`, `Done` or closed) Issue with only a historical
+quarantine appears in its delivery lane, not the active quarantine count. Its raw
+quarantine reason and timestamp remain in diagnostics and the durable dispatch guard is
+unchanged. Live worker/retry/blocked conflicts and unknown delivery still show quarantine;
+returning the Issue to executable work does not silently clear its previous guard.
+
 The static Owner Control presentation adapts dashboard patterns from Rondo and vendors Chart.js
 locally so the localhost UI has no CDN dependency. Attribution and pinned versions are recorded in
 `control/THIRD_PARTY_NOTICES.md`.
