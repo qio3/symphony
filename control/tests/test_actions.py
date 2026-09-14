@@ -98,7 +98,8 @@ class ActionServiceTest(unittest.TestCase):
                     "test": {"sha": "deployed", "merge_sha": "merged", "contains_merge": True},
                 },
                 "403": {"number": 403, "status": "Ready for AI", "state": "OPEN", "labels": []},
-                "404": {"number": 404, "status": "In Progress", "state": "OPEN", "labels": []},
+                "404": {"number": 404, "status": "In Progress", "state": "OPEN", "labels": [],
+                        "test": {"sha": "deployed", "merge_sha": "merged", "contains_merge": True}},
                 "405": {"number": 405, "status": "In Progress", "state": "OPEN", "labels": ["symphony"]},
                 "406": {
                     "number": 406,
@@ -477,18 +478,37 @@ class ActionServiceTest(unittest.TestCase):
             [("set_status", 404, "Ready for Acceptance")],
         )
 
+    def test_completion_without_confirmed_delivery_keeps_in_progress(self):
+        cases = [None, {}, {"sha": "deployed", "contains_merge": True},
+                 {"merge_sha": "merged", "contains_merge": True},
+                 {"sha": "deployed", "merge_sha": "merged", "contains_merge": False},
+                 {"sha": "deployed", "merge_sha": "merged", "contains_merge": None}]
+        for delivery in cases:
+            with self.subTest(delivery=delivery):
+                self.snapshot["issues"]["404"]["test"] = delivery
+                self.lifecycle.calls.clear()
+                result = self.actions.execute_internal("complete_run", {"issue": 404})
+                self.assertEqual(result["status"], "accepted")
+                self.assertEqual(self.lifecycle.calls, [])
+
+    def test_completion_with_stale_test_keeps_in_progress(self):
+        self.snapshot["sources"]["test"]["status"] = "stale"
+        self.actions.execute_internal("complete_run", {"issue": 404})
+        self.assertEqual(self.lifecycle.calls, [])
+
     def test_internal_complete_run_does_not_read_runtime_while_runtime_waits_for_callback(self):
         def runtime_snapshot():
             raise AssertionError("complete_run must not call back into the waiting runtime")
 
         completion_snapshot = {
-            "sources": {"github": {"status": "fresh"}},
+            "sources": {"github": {"status": "fresh"}, "test": {"status": "fresh"}},
             "issues": {
                 "404": {
                     "number": 404,
                     "status": "In Progress",
                     "state": "OPEN",
                     "labels": [],
+                    "test": {"sha": "deployed", "merge_sha": "merged", "contains_merge": True},
                 }
             },
         }
