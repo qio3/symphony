@@ -599,6 +599,19 @@ class ActionService:
             raise RetryableActionError("complete_run requires a canonical issue state")
         if self._has_label(issue, "symphony"):
             raise RetryableActionError("complete_run requires the Symphony lease to be absent")
+        # Waiting for CI also releases the lease. It is not delivery evidence.
+        # Use the cached completion snapshot: never call the waiting runtime back.
+        delivery = issue.get("test")
+        test_source = (snapshot.get("sources") or {}).get("test")
+        if (
+            not isinstance(delivery, dict)
+            or not delivery.get("merge_sha")
+            or not delivery.get("sha")
+            or delivery.get("contains_merge") is not True
+            or not isinstance(test_source, dict)
+            or test_source.get("status") != "fresh"
+        ):
+            return {"status": "accepted", "action": "complete_run", "issue": issue_number}
         self._lifecycle.set_status(issue_number, "Ready for Acceptance")
         return {"status": "accepted", "action": "complete_run", "issue": issue_number}
 
